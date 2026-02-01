@@ -4,6 +4,7 @@ Desktop widget showing hardware temperatures and usage.
 Sits on the desktop layer — above wallpaper, below all app windows.
 Requires admin privileges to read hardware sensors.
 """
+import copy
 import ctypes
 import ctypes.wintypes
 import json
@@ -250,8 +251,9 @@ def read_sensors(computer):
             disk_used = None
             for sensor in hw.Sensors:
                 if sensor.SensorType == SensorType.Temperature:
-                    if sensor.Value is not None and "temperature" == sensor.Name.lower().strip():
-                        disk_temp = round(float(sensor.Value))
+                    if sensor.Value is not None and "temperature" in sensor.Name.lower():
+                        if disk_temp is None:
+                            disk_temp = round(float(sensor.Value))
                 elif sensor.SensorType == SensorType.Load:
                     if "used space" in sensor.Name.lower() and sensor.Value is not None:
                         disk_used = round(float(sensor.Value))
@@ -265,17 +267,30 @@ def read_sensors(computer):
 
         elif hw_type == HardwareType.Motherboard:
             for sub in hw.SubHardware:
+                control_sensors = []
                 for sensor in sub.Sensors:
                     name = sensor.Name.lower()
                     if sensor.SensorType == SensorType.Fan:
-                        if "cpu" in name and "optional" not in name:
-                            if sensor.Value is not None:
+                        if sensor.Value is not None:
+                            if "cpu" in name and "optional" not in name:
                                 data["cpu_fan"] = round(float(sensor.Value))
                     elif sensor.SensorType == SensorType.Control:
-                        # Control #1 typically corresponds to CPU fan on ITE chips
-                        if ("#1" in name or "cpu" in name) and data["cpu_fan_pct"] is None:
-                            if sensor.Value is not None:
-                                data["cpu_fan_pct"] = round(float(sensor.Value))
+                        if sensor.Value is not None:
+                            control_sensors.append((name, round(float(sensor.Value))))
+                # Match CPU fan percentage: prefer "cpu" in name, then "#1", then first control
+                if data["cpu_fan_pct"] is None:
+                    for cname, cval in control_sensors:
+                        if "cpu" in cname:
+                            data["cpu_fan_pct"] = cval
+                            break
+                    else:
+                        for cname, cval in control_sensors:
+                            if "#1" in cname:
+                                data["cpu_fan_pct"] = cval
+                                break
+                        else:
+                            if control_sensors and data["cpu_fan"] is not None:
+                                data["cpu_fan_pct"] = control_sensors[0][1]
 
         elif hw_type == HardwareType.Memory:
             for sensor in hw.Sensors:
@@ -657,7 +672,7 @@ class OverlayApp:
 
     def update_ui(self):
         with self.lock:
-            data = dict(self.sensor_data)
+            data = copy.deepcopy(self.sensor_data)
 
         if not data:
             self.root.after(500, self.update_ui)
@@ -711,11 +726,12 @@ class OverlayApp:
             if gpu_fan == 0:
                 self.rows["gpu_fan"].config(text="OFF", fg="#4ade80")
             else:
-                self.rows["gpu_fan"].config(text=f"{gpu_fan} RPM", fg="#a0a0c0")
+                est_pct = min(100, round(gpu_fan / 2200 * 100))
+                self.rows["gpu_fan"].config(text=f"~{est_pct}%", fg=load_color(est_pct))
         else:
             self.rows["gpu_fan"].config(text="--", fg="#888888")
 
-        # CPU FAN: prefer %, fallback RPM
+        # CPU FAN: show % (same style as GPU fan)
         cpu_fan_pct = data.get("cpu_fan_pct")
         cpu_fan = data.get("cpu_fan")
         if cpu_fan_pct is not None:
@@ -727,7 +743,9 @@ class OverlayApp:
             if cpu_fan == 0:
                 self.rows["cpu_fan"].config(text="OFF", fg="#4ade80")
             else:
-                self.rows["cpu_fan"].config(text=f"{cpu_fan} RPM", fg="#a0a0c0")
+                # Estimate % from RPM (typical CPU fan max ~1500-2000 RPM)
+                est_pct = min(100, round(cpu_fan / 1800 * 100))
+                self.rows["cpu_fan"].config(text=f"~{est_pct}%", fg=load_color(est_pct))
         else:
             self.rows["cpu_fan"].config(text="--", fg="#888888")
 
