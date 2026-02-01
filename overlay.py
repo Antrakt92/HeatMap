@@ -219,8 +219,14 @@ def init_hardware_monitor():
         return None
 
 
-def read_sensors(computer):
-    """Read all temperature and load sensors from hardware."""
+def read_sensors(computer, update_storage=True):
+    """Read all temperature and load sensors from hardware.
+
+    Args:
+        computer: LibreHardwareMonitor Computer instance (or None for psutil fallback).
+        update_storage: If False, skip hw.Update() for storage devices to reduce I/O.
+                        Disk data will retain previous values from the last full update.
+    """
     data = {
         "cpu_temp": None,
         "cpu_load": None,
@@ -243,9 +249,14 @@ def read_sensors(computer):
     from LibreHardwareMonitor.Hardware import HardwareType, SensorType
 
     for hw in computer.Hardware:
-        hw.Update()
-        for sub in hw.SubHardware:
-            sub.Update()
+        is_storage = hw.HardwareType == HardwareType.Storage
+        if is_storage and not update_storage:
+            # Skip Update() but still read cached sensor values
+            pass
+        else:
+            hw.Update()
+            for sub in hw.SubHardware:
+                sub.Update()
 
         hw_type = hw.HardwareType
 
@@ -1009,13 +1020,19 @@ class OverlayApp:
 
     def sensor_loop(self):
         consecutive_errors = 0
+        _storage_counter = 0
+        _STORAGE_INTERVAL = 15  # update storage every 15 cycles (~30s)
         while not self._stop_event.is_set():
             try:
+                _storage_counter += 1
+                update_storage = _storage_counter >= _STORAGE_INTERVAL
+                if update_storage:
+                    _storage_counter = 0
                 with self.lock:
                     if not self.running:
                         break
                     computer = self.computer
-                    data = read_sensors(computer)
+                    data = read_sensors(computer, update_storage=update_storage)
                     self.sensor_data = data
                 consecutive_errors = 0
             except Exception as e:
@@ -1142,12 +1159,10 @@ class OverlayApp:
         # Rebuild disk rows if disk list changed
         if disk_names != self._last_disk_names:
             self._last_disk_names = disk_names
-            # Destroy old disk widgets
+            # Destroy all children of disk_frame at once (avoids double-destroy)
+            for child in list(self.disk_frame.winfo_children()):
+                child.destroy()
             for key in list(self.disk_labels):
-                try:
-                    self.rows[key].master.destroy()
-                except Exception:
-                    pass
                 self.rows.pop(key, None)
                 self.rows.pop(key + "_usage", None)
             self.disk_labels.clear()
@@ -1238,6 +1253,14 @@ def kill_previous_instances():
             pass
 
 
+def _is_admin():
+    """Check if the current process has administrator privileges."""
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except Exception:
+        return False
+
+
 def main():
     kill_previous_instances()
 
@@ -1248,6 +1271,9 @@ def main():
             "HW Monitor", 0x10
         )
         sys.exit(1)
+
+    if not _is_admin():
+        log.warning("Running without admin privileges — hardware sensors may be unavailable")
 
     app = OverlayApp()
     try:
