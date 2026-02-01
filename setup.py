@@ -5,6 +5,7 @@ Run this once before using the overlay.
 import hashlib
 import io
 import os
+import ssl
 import sys
 import zipfile
 import urllib.request
@@ -56,7 +57,8 @@ def download_and_extract():
         print(f"Downloading {name}...")
         try:
             req = urllib.request.Request(info["url"], headers={"User-Agent": "Mozilla/5.0"})
-            resp = urllib.request.urlopen(req, timeout=60)
+            ssl_ctx = ssl.create_default_context()
+            resp = urllib.request.urlopen(req, timeout=60, context=ssl_ctx)
             data = resp.read()
         except Exception as e:
             print(f"  ERROR downloading {name}: {e}")

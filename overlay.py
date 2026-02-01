@@ -438,6 +438,9 @@ def save_config(cfg):
 # --- Main overlay class ---
 class OverlayApp:
     def __init__(self):
+        # Warm up psutil cpu_percent so first real call returns meaningful data
+        psutil.cpu_percent(interval=0)
+
         self.computer = init_hardware_monitor()
         self.config = load_config()
         # Validate saved position is within visible screen area
@@ -453,6 +456,7 @@ class OverlayApp:
         self.sensor_data = {}
         self.lock = threading.Lock()
         self.embedded = False
+        self._embed_scheduled = False
 
         # --- Alert system ---
         self.alerts_enabled = self.config.get("alerts_enabled", True)
@@ -468,6 +472,7 @@ class OverlayApp:
         # Max RPM for fan % estimation (auto-calibrated, persisted in config)
         self._GPU_FAN_MAX_RPM = self.config.get("gpu_fan_max_rpm", 2200)
         self._CPU_FAN_MAX_RPM = self.config.get("cpu_fan_max_rpm", 1800)
+        self._config_save_pending = False
 
         # --- tkinter setup ---
         self.root = tk.Tk()
@@ -485,6 +490,7 @@ class OverlayApp:
         # --- Drag support ---
         self._drag_x = 0
         self._drag_y = 0
+        self._dragged = False
 
         # --- Header ---
         header = tk.Frame(self.root, bg="#16213e", cursor="fleur")
@@ -628,6 +634,7 @@ class OverlayApp:
 
     def _embed_into_desktop(self):
         """Embed the window into the desktop layer (above wallpaper, below icons and apps)."""
+        self._embed_scheduled = False
         hwnd = self._get_hwnd()
         self._hwnd = hwnd
         set_tool_window(hwnd)
@@ -639,6 +646,12 @@ class OverlayApp:
                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
         # Show window after embedding to prevent blink
         self.root.deiconify()
+
+    def _schedule_embed(self, delay=50):
+        """Schedule _embed_into_desktop with dedup guard."""
+        if not self._embed_scheduled:
+            self._embed_scheduled = True
+            self.root.after(delay, self._embed_into_desktop)
 
     def _make_row(self, key, label_text, parent=None, label_fg="#a0a0c0"):
         parent = parent or self.content
@@ -760,7 +773,7 @@ class OverlayApp:
 
     def _peek_show(self):
         """Slide the overlay in from the right edge."""
-        if not self.running or self.peek_visible or self._peek_animating or self.topmost:
+        if not self.running or not self.peek_enabled or self.peek_visible or self._peek_animating or self.topmost:
             return
         if self._is_desktop_visible():
             return
@@ -880,7 +893,7 @@ class OverlayApp:
             self._saved_pos = None
 
         # Re-embed in desktop (deiconify happens inside _embed_into_desktop)
-        self.root.after(50, self._embed_into_desktop)
+        self._schedule_embed(50)
 
     def toggle_peek(self):
         self.peek_enabled = not self.peek_enabled
@@ -902,7 +915,7 @@ class OverlayApp:
                     self.config["x"] = x
                     self.config["y"] = y
                     self._saved_pos = None
-                self.root.after(50, self._embed_into_desktop)
+                self._schedule_embed(50)
         self._set_menu_label("peek",
             "Peek from edge: ON" if self.peek_enabled else "Peek from edge: OFF"
         )
@@ -928,7 +941,7 @@ class OverlayApp:
             self.root.wm_attributes("-topmost", True)
         else:
             self.root.wm_attributes("-topmost", False)
-            self.root.after(100, self._embed_into_desktop)
+            self._schedule_embed(100)
             # Restore peek trigger if enabled
             if self.peek_enabled:
                 self._trigger.deiconify()
@@ -952,6 +965,11 @@ class OverlayApp:
         self._set_menu_label("alerts",
             "Alerts: ON" if self.alerts_enabled else "Alerts: OFF"
         )
+
+    def _flush_config(self):
+        """Flush pending config changes to disk (debounced)."""
+        self._config_save_pending = False
+        save_config(self.config)
 
     def _check_alerts(self, data):
         """Play a warning beep if any value exceeds critical thresholds."""
@@ -986,9 +1004,12 @@ class OverlayApp:
             self._last_alert_time = now
             # Beep in a thread to avoid blocking UI
             def _alert_beep():
-                winsound.Beep(1000, 300)
-                time.sleep(0.15)
-                winsound.Beep(1000, 300)
+                try:
+                    winsound.Beep(1000, 300)
+                    time.sleep(0.15)
+                    winsound.Beep(1000, 300)
+                except Exception:
+                    pass  # No audio device or driver issue
             threading.Thread(target=_alert_beep, daemon=True).start()
 
     def start_drag(self, event):
@@ -1032,7 +1053,9 @@ class OverlayApp:
                     if not self.running:
                         break
                     computer = self.computer
-                    data = read_sensors(computer, update_storage=update_storage)
+                # Read sensors outside lock to avoid blocking UI thread
+                data = read_sensors(computer, update_storage=update_storage)
+                with self.lock:
                     self.sensor_data = data
                 consecutive_errors = 0
             except Exception as e:
@@ -1049,6 +1072,7 @@ class OverlayApp:
                         except Exception:
                             pass
                         self.computer = init_hardware_monitor()
+                        computer = self.computer
                     consecutive_errors = 0
             self._stop_event.wait(2)
 
@@ -1111,7 +1135,10 @@ class OverlayApp:
         if rpm_changed:
             self.config["gpu_fan_max_rpm"] = self._GPU_FAN_MAX_RPM
             self.config["cpu_fan_max_rpm"] = self._CPU_FAN_MAX_RPM
-            save_config(self.config)
+            # Debounce: schedule a single save instead of writing every 2 seconds
+            if not self._config_save_pending:
+                self._config_save_pending = True
+                self.root.after(30000, self._flush_config)
 
         # GPU FAN: prefer %, fallback RPM
         gpu_fan_pct = data.get("gpu_fan_pct")
