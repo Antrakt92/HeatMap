@@ -810,7 +810,6 @@ class OverlayApp:
                 target=lambda: winsound.Beep(1000, 300) or time.sleep(0.15) or winsound.Beep(1000, 300),
                 daemon=True
             ).start()
-            pass
 
     def start_drag(self, event):
         self._drag_x = event.x
@@ -820,11 +819,16 @@ class OverlayApp:
         x = self.root.winfo_x() + event.x - self._drag_x
         y = self.root.winfo_y() + event.y - self._drag_y
         self.root.geometry(f"+{x}+{y}")
-        self.config["x"] = x
-        self.config["y"] = y
+        if self.peek_visible:
+            # Update saved desktop position so peek-hide restores here
+            self._saved_pos = (x, y)
+        else:
+            self.config["x"] = x
+            self.config["y"] = y
 
     def end_drag(self, _event):
-        save_config(self.config)
+        if not self.peek_visible:
+            save_config(self.config)
 
     def show_menu(self, event):
         self.menu.tk_popup(event.x_root, event.y_root)
