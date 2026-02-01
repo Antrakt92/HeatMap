@@ -657,7 +657,7 @@ class OverlayApp:
         save_config(self.config)
 
     def show_menu(self, event):
-        self.menu.post(event.x_root, event.y_root)
+        self.menu.tk_popup(event.x_root, event.y_root)
 
     def sensor_loop(self):
         while self.running:
@@ -763,14 +763,18 @@ class OverlayApp:
             key = f"disk_{idx}"
             self._make_disk_row(key, disks[idx]["name"], parent=self.disk_frame)
             self.disk_labels.append(key)
-        for i, disk in enumerate(disks):
-            key = self.disk_labels[i]
-            self.rows[key].config(text=f"{disk['temp']}°C", fg=temp_color(disk["temp"]))
-            used = disk.get("used_pct")
-            if used is not None:
-                self.rows[key + "_usage"].config(text=f"{used}%", fg=disk_usage_color(used))
+        for i, key in enumerate(self.disk_labels):
+            if i < len(disks):
+                disk = disks[i]
+                self.rows[key].config(text=f"{disk['temp']}°C", fg=temp_color(disk["temp"]))
+                used = disk.get("used_pct")
+                if used is not None:
+                    self.rows[key + "_usage"].config(text=f"{used}%", fg=disk_usage_color(used))
+                else:
+                    self.rows[key + "_usage"].config(text="", fg="#888888")
+                self.rows[key].master.pack(fill="x", pady=1)
             else:
-                self.rows[key + "_usage"].config(text="", fg="#888888")
+                self.rows[key].master.pack_forget()
 
         # Check critical thresholds and alert
         self._check_alerts(data)
