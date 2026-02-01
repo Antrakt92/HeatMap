@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.pyo
+overlay_config.json
+nul
+lib/
