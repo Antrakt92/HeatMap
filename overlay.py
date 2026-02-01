@@ -392,6 +392,9 @@ class OverlayApp:
         self.root.wm_attributes("-alpha", 0.88)
         self.root.configure(bg="#1a1a2e")
 
+        # Hide until embedded in desktop to prevent blink
+        self.root.withdraw()
+
         # Position from saved config
         self.root.geometry(f"+{self.config.get('x', 50)}+{self.config.get('y', 50)}")
 
@@ -544,6 +547,8 @@ class OverlayApp:
             # Fallback: just send to bottom, no topmost
             user32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0,
                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+        # Show window after embedding to prevent blink
+        self.root.deiconify()
 
     def _make_row(self, key, label_text, parent=None, label_fg="#a0a0c0"):
         parent = parent or self.content
@@ -704,6 +709,9 @@ class OverlayApp:
         """Called when slide-out animation finishes."""
         self._peek_animating = False
 
+        # Hide before repositioning to prevent blink
+        self.root.withdraw()
+
         # Restore topmost off
         self.root.wm_attributes("-topmost", False)
 
@@ -713,7 +721,7 @@ class OverlayApp:
             self.root.geometry(f"+{x}+{y}")
             self._saved_pos = None
 
-        # Re-embed in desktop
+        # Re-embed in desktop (deiconify happens inside _embed_into_desktop)
         self.root.after(50, self._embed_into_desktop)
 
     def toggle_peek(self):
