@@ -226,20 +226,27 @@ def read_sensors(computer, update_storage=True):
     data = {
         "cpu_temp": None,
         "cpu_load": None,
+        "cpu_clock": None,
         "gpu_temp": None,
         "gpu_load": None,
+        "gpu_clock": None,
         "cpu_fan": None,
         "cpu_fan_pct": None,
         "gpu_fan": None,
         "gpu_fan_pct": None,
         "gpu_vram_pct": None,
         "ram_pct": None,
+        "ram_used_gb": None,
+        "ram_total_gb": None,
         "disks": [],
     }
 
     if computer is None:
         data["cpu_load"] = psutil.cpu_percent(interval=0)
-        data["ram_pct"] = round(psutil.virtual_memory().percent)
+        vm = psutil.virtual_memory()
+        data["ram_pct"] = round(vm.percent)
+        data["ram_used_gb"] = round(vm.used / (1024 ** 3), 1)
+        data["ram_total_gb"] = round(vm.total / (1024 ** 3), 1)
         return data
 
     from LibreHardwareMonitor.Hardware import HardwareType, SensorType
@@ -257,6 +264,7 @@ def read_sensors(computer, update_storage=True):
         hw_type = hw.HardwareType
 
         if hw_type == HardwareType.Cpu:
+            core_clocks = []
             for sensor in hw.Sensors:
                 if sensor.SensorType == SensorType.Temperature:
                     name = sensor.Name.lower()
@@ -269,6 +277,11 @@ def read_sensors(computer, update_storage=True):
                     if "total" in sensor.Name.lower():
                         if sensor.Value is not None:
                             data["cpu_load"] = round(float(sensor.Value))
+                elif sensor.SensorType == SensorType.Clock:
+                    if sensor.Value is not None and "core" in sensor.Name.lower():
+                        core_clocks.append(float(sensor.Value))
+            if core_clocks:
+                data["cpu_clock"] = round(max(core_clocks))
 
         elif hw_type in (HardwareType.GpuAmd, HardwareType.GpuNvidia, HardwareType.GpuIntel):
             # Skip integrated Intel GPU if we already have data from a discrete GPU
@@ -292,6 +305,9 @@ def read_sensors(computer, update_storage=True):
                 elif sensor.SensorType == SensorType.Control:
                     if sensor.Value is not None:
                         data["gpu_fan_pct"] = round(float(sensor.Value))
+                elif sensor.SensorType == SensorType.Clock:
+                    if "core" in sensor.Name.lower() and sensor.Value is not None:
+                        data["gpu_clock"] = round(float(sensor.Value))
                 elif sensor.SensorType == SensorType.SmallData:
                     name = sensor.Name.lower()
                     if name == "gpu memory used" and sensor.Value is not None:
@@ -357,8 +373,12 @@ def read_sensors(computer, update_storage=True):
 
     if data["cpu_load"] is None:
         data["cpu_load"] = psutil.cpu_percent(interval=0)
+    # Always get RAM used/total from psutil (LibreHardwareMonitor only has %)
+    vm = psutil.virtual_memory()
     if data["ram_pct"] is None:
-        data["ram_pct"] = round(psutil.virtual_memory().percent)
+        data["ram_pct"] = round(vm.percent)
+    data["ram_used_gb"] = round(vm.used / (1024 ** 3), 1)
+    data["ram_total_gb"] = round(vm.total / (1024 ** 3), 1)
 
     return data
 
@@ -526,7 +546,7 @@ class OverlayApp:
         # Create label rows in color-coded groups
         self.rows = {}
 
-        # CPU group — temp + load as two separate colored values
+        # CPU group — temp + clock + load as three separate colored values
         cpu_row = tk.Frame(self.content, bg="#1a1a2e")
         cpu_row.pack(fill="x", pady=1)
         tk.Label(cpu_row, text=" CPU", font=("Segoe UI", 10, "bold"),
@@ -534,6 +554,9 @@ class OverlayApp:
         self.rows["cpu_load"] = tk.Label(cpu_row, text="", font=("Segoe UI", 10),
                                          fg="#888888", bg="#1a1a2e", anchor="e")
         self.rows["cpu_load"].pack(side="right")
+        self.rows["cpu_clock"] = tk.Label(cpu_row, text="", font=("Segoe UI", 10),
+                                          fg="#888888", bg="#1a1a2e", anchor="e")
+        self.rows["cpu_clock"].pack(side="right", padx=(0, 4))
         self.rows["cpu_temp"] = tk.Label(cpu_row, text="--", font=("Segoe UI", 10),
                                          fg="#888888", bg="#1a1a2e", anchor="e")
         self.rows["cpu_temp"].pack(side="right", padx=(0, 4))
@@ -541,7 +564,7 @@ class OverlayApp:
         self._make_row("cpu_fan", "C.FAN", label_fg=CPU_CLR)
         tk.Frame(self.content, bg="#2a2a4e", height=1).pack(fill="x", pady=2)
 
-        # GPU group — temp + load as two separate colored values
+        # GPU group — temp + clock + load as three separate colored values
         gpu_row = tk.Frame(self.content, bg="#1a1a2e")
         gpu_row.pack(fill="x", pady=1)
         tk.Label(gpu_row, text=" GPU", font=("Segoe UI", 10, "bold"),
@@ -549,6 +572,9 @@ class OverlayApp:
         self.rows["gpu_load"] = tk.Label(gpu_row, text="", font=("Segoe UI", 10),
                                          fg="#888888", bg="#1a1a2e", anchor="e")
         self.rows["gpu_load"].pack(side="right")
+        self.rows["gpu_clock"] = tk.Label(gpu_row, text="", font=("Segoe UI", 10),
+                                          fg="#888888", bg="#1a1a2e", anchor="e")
+        self.rows["gpu_clock"].pack(side="right", padx=(0, 4))
         self.rows["gpu_temp"] = tk.Label(gpu_row, text="--", font=("Segoe UI", 10),
                                          fg="#888888", bg="#1a1a2e", anchor="e")
         self.rows["gpu_temp"].pack(side="right", padx=(0, 4))
@@ -557,8 +583,17 @@ class OverlayApp:
         self._make_row("gpu_fan", "G.FAN", label_fg=GPU_CLR)
         tk.Frame(self.content, bg="#2a2a4e", height=1).pack(fill="x", pady=2)
 
-        # RAM
-        self._make_row("ram", "RAM", label_fg=RAM_CLR)
+        # RAM — used/total + load% (like CPU row)
+        ram_row = tk.Frame(self.content, bg="#1a1a2e")
+        ram_row.pack(fill="x", pady=1)
+        tk.Label(ram_row, text=" RAM", font=("Segoe UI", 10, "bold"),
+                 fg=RAM_CLR, bg="#1a1a2e", width=6, anchor="w").pack(side="left")
+        self.rows["ram_pct"] = tk.Label(ram_row, text="", font=("Segoe UI", 10),
+                                        fg="#888888", bg="#1a1a2e", anchor="e")
+        self.rows["ram_pct"].pack(side="right")
+        self.rows["ram_gb"] = tk.Label(ram_row, text="--", font=("Segoe UI", 10),
+                                       fg="#888888", bg="#1a1a2e", anchor="e")
+        self.rows["ram_gb"].pack(side="right", padx=(0, 4))
         tk.Frame(self.content, bg="#2a2a4e", height=1).pack(fill="x", pady=2)
 
         # Disk rows created dynamically
@@ -1131,25 +1166,40 @@ class OverlayApp:
             self.root.after(2000, self.update_ui)
             return
 
-        # CPU: temp (colored by temp) + load% (colored by load)
+        # CPU: temp + clock + load%
         cpu_temp = data.get("cpu_temp")
         cpu_load = data.get("cpu_load")
+        cpu_clock = data.get("cpu_clock")
         self.rows["cpu_temp"].config(
             text=f"{cpu_temp}°C" if cpu_temp is not None else "--",
             fg=temp_color(cpu_temp)
         )
+        if cpu_clock is not None:
+            ghz = cpu_clock / 1000
+            self.rows["cpu_clock"].config(text=f"{ghz:.2f}G", fg="#4ade80")
+        else:
+            self.rows["cpu_clock"].config(text="", fg="#888888")
         self.rows["cpu_load"].config(
             text=f"{cpu_load}%" if cpu_load is not None else "",
             fg=load_color(cpu_load)
         )
 
-        # GPU: temp (colored by temp) + load% (colored by load)
+        # GPU: temp + clock + load%
         gpu_temp = data.get("gpu_temp")
         gpu_load = data.get("gpu_load")
+        gpu_clock = data.get("gpu_clock")
         self.rows["gpu_temp"].config(
             text=f"{gpu_temp}°C" if gpu_temp is not None else "--",
             fg=temp_color(gpu_temp)
         )
+        if gpu_clock is not None:
+            if gpu_clock >= 100:
+                ghz = gpu_clock / 1000
+                self.rows["gpu_clock"].config(text=f"{ghz:.2f}G", fg="#4ade80")
+            else:
+                self.rows["gpu_clock"].config(text=f"{gpu_clock}M", fg="#4ade80")
+        else:
+            self.rows["gpu_clock"].config(text="", fg="#888888")
         self.rows["gpu_load"].config(
             text=f"{gpu_load}%" if gpu_load is not None else "",
             fg=load_color(gpu_load)
@@ -1212,12 +1262,21 @@ class OverlayApp:
         else:
             self.rows["cpu_fan"].config(text="--", fg="#888888")
 
-        # RAM: usage %
+        # RAM: used/total GB + %
         ram_pct = data.get("ram_pct")
-        if ram_pct is not None:
-            self.rows["ram"].config(text=f"{ram_pct}%", fg=load_color(ram_pct))
+        ram_used = data.get("ram_used_gb")
+        ram_total = data.get("ram_total_gb")
+        if ram_used is not None and ram_total is not None:
+            self.rows["ram_gb"].config(
+                text=f"{ram_used}/{ram_total}G",
+                fg=load_color(ram_pct)
+            )
         else:
-            self.rows["ram"].config(text="--", fg="#888888")
+            self.rows["ram_gb"].config(text="--", fg="#888888")
+        if ram_pct is not None:
+            self.rows["ram_pct"].config(text=f"{ram_pct}%", fg=load_color(ram_pct))
+        else:
+            self.rows["ram_pct"].config(text="", fg="#888888")
 
         # Disks: orange name left, temp + usage% right
         disks = data.get("disks", [])
