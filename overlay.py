@@ -163,6 +163,10 @@ def enable_autostart():
     """Add to Windows startup registry with admin elevation."""
     try:
         pythonw = get_pythonw_path()
+        # Reject paths with double quotes to prevent command injection
+        if '"' in pythonw or '"' in SCRIPT_PATH:
+            log.warning("Cannot set autostart: path contains double-quote characters")
+            return False
         # Escape single quotes for PowerShell string literals
         safe_pythonw = pythonw.replace("'", "''")
         safe_script = SCRIPT_PATH.replace("'", "''")
@@ -232,7 +236,7 @@ def read_sensors(computer):
     }
 
     if computer is None:
-        data["cpu_load"] = psutil.cpu_percent(interval=0.1)
+        data["cpu_load"] = psutil.cpu_percent(interval=0)
         data["ram_pct"] = round(psutil.virtual_memory().percent)
         return data
 
@@ -346,7 +350,7 @@ def read_sensors(computer):
                         data["ram_pct"] = round(float(sensor.Value))
 
     if data["cpu_load"] is None:
-        data["cpu_load"] = psutil.cpu_percent(interval=0.1)
+        data["cpu_load"] = psutil.cpu_percent(interval=0)
     if data["ram_pct"] is None:
         data["ram_pct"] = round(psutil.virtual_memory().percent)
 
@@ -706,6 +710,8 @@ class OverlayApp:
 
     def _poll_screen_change(self):
         """Re-position trigger strip if screen geometry changed (resolution or monitor rearrangement)."""
+        if not self.running:
+            return
         screen_x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
         screen_y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
         screen_w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
@@ -743,7 +749,7 @@ class OverlayApp:
 
     def _peek_show(self):
         """Slide the overlay in from the right edge."""
-        if self.peek_visible or self._peek_animating or self.topmost:
+        if not self.running or self.peek_visible or self._peek_animating or self.topmost:
             return
         if self._is_desktop_visible():
             return
@@ -802,7 +808,7 @@ class OverlayApp:
 
     def _peek_check_mouse(self):
         """Poll mouse position — hide when cursor leaves overlay and trigger."""
-        if not self.peek_visible or self._peek_animating:
+        if not self.running or not self.peek_visible or self._peek_animating:
             return
 
         pt = POINT()
@@ -810,10 +816,13 @@ class OverlayApp:
         mx, my = pt.x, pt.y
 
         # Check if mouse is over the overlay
-        ox = self.root.winfo_rootx()
-        oy = self.root.winfo_rooty()
-        ow = self.root.winfo_width()
-        oh = self.root.winfo_height()
+        try:
+            ox = self.root.winfo_rootx()
+            oy = self.root.winfo_rooty()
+            ow = self.root.winfo_width()
+            oh = self.root.winfo_height()
+        except tk.TclError:
+            return
         over_overlay = ox <= mx <= ox + ow and oy <= my <= oy + oh
 
         # Check if mouse is over the trigger strip (right edge of virtual screen)
@@ -870,8 +879,19 @@ class OverlayApp:
             self._trigger.deiconify()
         else:
             self._trigger.withdraw()
-            if self.peek_visible:
-                self._peek_hide()
+            if self.peek_visible or self._peek_animating:
+                # Force-cancel any running animation and return to desktop
+                self._peek_animating = False
+                self.peek_visible = False
+                self.root.withdraw()
+                self.root.wm_attributes("-topmost", False)
+                if self._saved_pos:
+                    x, y = self._saved_pos
+                    self.root.geometry(f"+{x}+{y}")
+                    self.config["x"] = x
+                    self.config["y"] = y
+                    self._saved_pos = None
+                self.root.after(50, self._embed_into_desktop)
         self._set_menu_label("peek",
             "Peek from edge: ON" if self.peek_enabled else "Peek from edge: OFF"
         )
@@ -963,8 +983,10 @@ class OverlayApp:
     def start_drag(self, event):
         self._drag_x = event.x
         self._drag_y = event.y
+        self._dragged = False
 
     def on_drag(self, event):
+        self._dragged = True
         x = self.root.winfo_x() + event.x - self._drag_x
         y = self.root.winfo_y() + event.y - self._drag_y
         self.root.geometry(f"+{x}+{y}")
@@ -975,6 +997,8 @@ class OverlayApp:
             self.config["y"] = y
 
     def end_drag(self, _event):
+        if not self._dragged:
+            return
         # If dragged during peek, persist the new position into config
         if self._saved_pos:
             self.config["x"], self.config["y"] = self._saved_pos
@@ -988,9 +1012,10 @@ class OverlayApp:
         while not self._stop_event.is_set():
             try:
                 with self.lock:
+                    if not self.running:
+                        break
                     computer = self.computer
-                data = read_sensors(computer)
-                with self.lock:
+                    data = read_sensors(computer)
                     self.sensor_data = data
                 consecutive_errors = 0
             except Exception as e:
@@ -1059,10 +1084,17 @@ class OverlayApp:
         # Auto-calibrate fan RPM max from observed values
         gpu_fan = data.get("gpu_fan")
         cpu_fan = data.get("cpu_fan")
+        rpm_changed = False
         if gpu_fan is not None and gpu_fan > self._GPU_FAN_MAX_RPM:
             self._GPU_FAN_MAX_RPM = gpu_fan
+            rpm_changed = True
         if cpu_fan is not None and cpu_fan > self._CPU_FAN_MAX_RPM:
             self._CPU_FAN_MAX_RPM = cpu_fan
+            rpm_changed = True
+        if rpm_changed:
+            self.config["gpu_fan_max_rpm"] = self._GPU_FAN_MAX_RPM
+            self.config["cpu_fan_max_rpm"] = self._CPU_FAN_MAX_RPM
+            save_config(self.config)
 
         # GPU FAN: prefer %, fallback RPM
         gpu_fan_pct = data.get("gpu_fan_pct")
