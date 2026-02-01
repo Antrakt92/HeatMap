@@ -6,6 +6,7 @@ Requires admin privileges to read hardware sensors.
 """
 import copy
 import ctypes
+import re
 import ctypes.wintypes
 import json
 import logging
@@ -162,11 +163,13 @@ def enable_autostart():
     """Add to Windows startup registry with admin elevation."""
     try:
         pythonw = get_pythonw_path()
-        # Use encoded command to avoid all quoting/escaping issues with special chars in paths
+        # Escape single quotes for PowerShell string literals
+        safe_pythonw = pythonw.replace("'", "''")
+        safe_script = SCRIPT_PATH.replace("'", "''")
         ps_script = (
-            f'Start-Process \'{pythonw}\' '
-            f'-ArgumentList \'"{SCRIPT_PATH}"\' '
-            f'-Verb RunAs'
+            f"Start-Process '{safe_pythonw}' "
+            f"-ArgumentList '\"{safe_script}\"' "
+            f"-Verb RunAs"
         )
         encoded = base64.b64encode(ps_script.encode("utf-16-le")).decode("ascii")
         cmd = f'powershell -WindowStyle Hidden -EncodedCommand {encoded}'
@@ -299,7 +302,10 @@ def read_sensors(computer):
                     if "used space" in sensor.Name.lower() and sensor.Value is not None:
                         disk_used = round(float(sensor.Value))
             if disk_temp is not None or disk_used is not None:
-                name = str(hw.Name).replace("Samsung SSD ", "").replace("Samsung ", "")
+                name = re.sub(
+                    r"^(Samsung|WDC|Western Digital|Kingston|Crucial|Seagate|Toshiba|SK Hynix|Intel|Micron|SanDisk|ADATA|Corsair)\s*(SSD\s*)?",
+                    "", str(hw.Name), flags=re.IGNORECASE,
+                ).strip() or str(hw.Name)
                 data["disks"].append({
                     "name": name,
                     "temp": disk_temp,
@@ -380,7 +386,8 @@ def disk_usage_color(pct):
 
 # --- Config ---
 def load_config():
-    defaults = {"x": 50, "y": 50, "peek_enabled": True, "alerts_enabled": True}
+    defaults = {"x": 50, "y": 50, "peek_enabled": True, "alerts_enabled": True,
+                "gpu_fan_max_rpm": 2200, "cpu_fan_max_rpm": 1800}
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             cfg = json.load(f)
@@ -395,6 +402,11 @@ def load_config():
         for key in ("peek_enabled", "alerts_enabled"):
             if not isinstance(cfg.get(key), bool):
                 cfg[key] = defaults[key]
+        for key in ("gpu_fan_max_rpm", "cpu_fan_max_rpm"):
+            if not isinstance(cfg.get(key), (int, float)) or cfg[key] <= 0:
+                cfg[key] = defaults[key]
+            else:
+                cfg[key] = int(cfg[key])
         return cfg
     except Exception:
         return defaults
@@ -438,9 +450,9 @@ class OverlayApp:
             "disk_used": 90,
             "ram_pct": 95,
         }
-        # Initial max RPM for fan % estimation (auto-calibrated from observed values)
-        self._GPU_FAN_MAX_RPM = 2200
-        self._CPU_FAN_MAX_RPM = 1800
+        # Max RPM for fan % estimation (auto-calibrated, persisted in config)
+        self._GPU_FAN_MAX_RPM = self.config.get("gpu_fan_max_rpm", 2200)
+        self._CPU_FAN_MAX_RPM = self.config.get("cpu_fan_max_rpm", 1800)
 
         # --- tkinter setup ---
         self.root = tk.Tk()
@@ -839,10 +851,12 @@ class OverlayApp:
         # Restore topmost off
         self.root.wm_attributes("-topmost", False)
 
-        # Restore saved desktop position
+        # Restore saved desktop position and update config
         if self._saved_pos:
             x, y = self._saved_pos
             self.root.geometry(f"+{x}+{y}")
+            self.config["x"] = x
+            self.config["y"] = y
             self._saved_pos = None
 
         # Re-embed in desktop (deiconify happens inside _embed_into_desktop)
@@ -867,7 +881,7 @@ class OverlayApp:
         if self.topmost:
             # Hide peek trigger — not needed in topmost mode
             self._trigger.withdraw()
-            if self.peek_visible:
+            if self.peek_visible or self._peek_animating:
                 self.peek_visible = False
                 self._peek_animating = False
             # Unembed from desktop if embedded, make topmost
@@ -961,6 +975,9 @@ class OverlayApp:
             self.config["y"] = y
 
     def end_drag(self, _event):
+        # If dragged during peek, persist the new position into config
+        if self._saved_pos:
+            self.config["x"], self.config["y"] = self._saved_pos
         save_config(self.config)
 
     def show_menu(self, event):
@@ -970,7 +987,9 @@ class OverlayApp:
         consecutive_errors = 0
         while not self._stop_event.is_set():
             try:
-                data = read_sensors(self.computer)
+                with self.lock:
+                    computer = self.computer
+                data = read_sensors(computer)
                 with self.lock:
                     self.sensor_data = data
                 consecutive_errors = 0
@@ -980,7 +999,7 @@ class OverlayApp:
                 with self.lock:
                     self.sensor_data = {"error": str(e)}
                 # After 3 consecutive failures, try to reinitialize the hardware monitor
-                if consecutive_errors >= 3 and self.computer is not None:
+                if consecutive_errors >= 3 and computer is not None:
                     log.warning("Reinitializing hardware monitor after %d errors", consecutive_errors)
                     with self.lock:
                         try:
@@ -1146,6 +1165,8 @@ class OverlayApp:
             self.config["y"] = self.root.winfo_rooty()
         self.config["peek_enabled"] = self.peek_enabled
         self.config["alerts_enabled"] = self.alerts_enabled
+        self.config["gpu_fan_max_rpm"] = self._GPU_FAN_MAX_RPM
+        self.config["cpu_fan_max_rpm"] = self._CPU_FAN_MAX_RPM
         save_config(self.config)
         # Destroy trigger window
         try:
