@@ -65,7 +65,12 @@ def download_and_extract():
             sys.exit(1)
 
         print(f"  Extracting DLLs...")
-        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(data))
+        except zipfile.BadZipFile:
+            print(f"  ERROR: Downloaded package for {name} is not a valid zip file")
+            sys.exit(1)
+        with zf:
             all_files = zf.namelist()
             extracted = False
             for dll_path in info["dlls"]:

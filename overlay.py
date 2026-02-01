@@ -4,13 +4,11 @@ Desktop widget showing hardware temperatures and usage.
 Sits on the desktop layer — above wallpaper, below all app windows.
 Requires admin privileges to read hardware sensors.
 """
-import copy
 import ctypes
 import re
 import ctypes.wintypes
 import json
 import logging
-import base64
 import os
 import sys
 import threading
@@ -160,23 +158,21 @@ def is_autostart_enabled():
 
 
 def enable_autostart():
-    """Add to Windows startup registry with admin elevation."""
+    """Add to Windows startup registry with admin elevation via run_as_admin.bat."""
     try:
-        pythonw = get_pythonw_path()
-        # Reject paths with double quotes to prevent command injection
-        if '"' in pythonw or '"' in SCRIPT_PATH:
-            log.warning("Cannot set autostart: path contains double-quote characters")
-            return False
-        # Escape single quotes for PowerShell string literals
-        safe_pythonw = pythonw.replace("'", "''")
-        safe_script = SCRIPT_PATH.replace("'", "''")
-        ps_script = (
-            f"Start-Process '{safe_pythonw}' "
-            f"-ArgumentList '\"{safe_script}\"' "
-            f"-Verb RunAs"
-        )
-        encoded = base64.b64encode(ps_script.encode("utf-16-le")).decode("ascii")
-        cmd = f'powershell -WindowStyle Hidden -EncodedCommand {encoded}'
+        bat_path = os.path.join(APP_DIR, "run_as_admin.bat")
+        if not os.path.exists(bat_path):
+            # Fallback: direct pythonw command (no elevation, sensors may fail)
+            pythonw = get_pythonw_path()
+            if '"' in pythonw or '"' in SCRIPT_PATH:
+                log.warning("Cannot set autostart: path contains double-quote characters")
+                return False
+            cmd = f'"{pythonw}" "{SCRIPT_PATH}"'
+        else:
+            if '"' in bat_path:
+                log.warning("Cannot set autostart: path contains double-quote characters")
+                return False
+            cmd = f'"{bat_path}"'
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE) as key:
             winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, cmd)
         return True
@@ -310,22 +306,21 @@ def read_sensors(computer, update_storage=True):
             disk_used = None
             for sensor in hw.Sensors:
                 if sensor.SensorType == SensorType.Temperature:
-                    if sensor.Value is not None and "temperature" in sensor.Name.lower():
-                        if disk_temp is None:
-                            disk_temp = round(float(sensor.Value))
+                    if sensor.Value is not None and disk_temp is None:
+                        disk_temp = round(float(sensor.Value))
                 elif sensor.SensorType == SensorType.Load:
                     if "used space" in sensor.Name.lower() and sensor.Value is not None:
                         disk_used = round(float(sensor.Value))
-            if disk_temp is not None or disk_used is not None:
-                name = re.sub(
-                    r"^(Samsung|WDC|Western Digital|Kingston|Crucial|Seagate|Toshiba|SK Hynix|Intel|Micron|SanDisk|ADATA|Corsair)\s*(SSD\s*)?",
-                    "", str(hw.Name), flags=re.IGNORECASE,
-                ).strip() or str(hw.Name)
-                data["disks"].append({
-                    "name": name,
-                    "temp": disk_temp,
-                    "used_pct": disk_used,
-                })
+            # Always show storage devices — even without sensors
+            name = re.sub(
+                r"^(Samsung|WDC|Western Digital|Kingston|Crucial|Seagate|Toshiba|SK Hynix|Intel|Micron|SanDisk|ADATA|Corsair)\s*(SSD\s*)?",
+                "", str(hw.Name), flags=re.IGNORECASE,
+            ).strip() or str(hw.Name)
+            data["disks"].append({
+                "name": name,
+                "temp": disk_temp,
+                "used_pct": disk_used,
+            })
 
         elif hw_type == HardwareType.Motherboard:
             for sub in hw.SubHardware:
@@ -482,7 +477,9 @@ class OverlayApp:
         self.root.configure(bg="#1a1a2e")
 
         # Hide until embedded in desktop to prevent blink
-        self.root.withdraw()
+        # Use alpha=0 instead of withdraw() — withdraw/deiconify cycle resets
+        # z-order on Windows, causing the window to appear above app windows.
+        self.root.wm_attributes("-alpha", 0)
 
         # Position from saved config
         self.root.geometry(f"+{self.config.get('x', 50)}+{self.config.get('y', 50)}")
@@ -625,10 +622,10 @@ class OverlayApp:
         frame_id = self.root.wm_frame()
         if frame_id:
             try:
-                hwnd = int(frame_id, 16)
+                hwnd = int(frame_id, 16) if isinstance(frame_id, str) else int(frame_id)
             except (ValueError, TypeError):
                 hwnd = 0
-            if hwnd:
+            if hwnd and hwnd != 0:
                 return hwnd
         return self.root.winfo_id()
 
@@ -644,8 +641,8 @@ class OverlayApp:
             # Fallback: just send to bottom, no topmost
             user32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0,
                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
-        # Show window after embedding to prevent blink
-        self.root.deiconify()
+        # Restore opacity (window was hidden with alpha=0, not withdraw)
+        self.root.wm_attributes("-alpha", 0.88)
 
     def _schedule_embed(self, delay=50):
         """Schedule _embed_into_desktop with dedup guard."""
@@ -721,7 +718,9 @@ class OverlayApp:
         self._last_screen_y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
         self._last_screen_w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
         self._last_screen_h = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+        self._trigger_hidden_for_desktop = False
         self._poll_screen_change()
+        self._poll_trigger_visibility()
 
     def _update_trigger_geometry(self):
         """Position the trigger strip on the right edge of the virtual screen (all monitors)."""
@@ -749,33 +748,61 @@ class OverlayApp:
             self._update_trigger_geometry()
         self.root.after(5000, self._poll_screen_change)
 
-    def _is_desktop_visible(self):
-        """Check if the desktop is visible (no app windows covering the widget area)."""
-        # Check a point near the widget's actual desktop position
-        if self._saved_pos:
-            x, y = self._saved_pos[0] + 10, self._saved_pos[1] + 10
-        else:
-            x = self.root.winfo_rootx() + 10
-            y = self.root.winfo_rooty() + 10
+    def _poll_trigger_visibility(self):
+        """Hide the peek trigger strip when the desktop is visible (widget already shown)."""
+        if not self.running:
+            return
+        if self.peek_enabled and not self.topmost and not self.peek_visible and not self._peek_animating:
+            if self._is_desktop_at_widget():
+                if not self._trigger_hidden_for_desktop:
+                    self._trigger_hidden_for_desktop = True
+                    self._trigger.withdraw()
+            else:
+                if self._trigger_hidden_for_desktop:
+                    self._trigger_hidden_for_desktop = False
+                    self._trigger.deiconify()
+        self.root.after(500, self._poll_trigger_visibility)
+
+    def _is_desktop_at_cursor(self):
+        """Hide trigger momentarily and check if desktop is under the cursor."""
+        pt = POINT()
+        user32.GetCursorPos(ctypes.byref(pt))
+        # Temporarily hide trigger so WindowFromPoint sees what's beneath
+        self._trigger.withdraw()
+        self._trigger.update_idletasks()
+        hwnd = user32.WindowFromPoint(pt)
+        # Restore trigger (unless poll already hid it)
+        if self.peek_enabled and not self.topmost and not self._trigger_hidden_for_desktop:
+            self._trigger.deiconify()
+        return self._is_desktop_hwnd(hwnd)
+
+    def _is_desktop_at_widget(self):
+        """Check if the desktop is visible at the widget's position."""
+        x = self.config.get("x", 50) + 20
+        y = self.config.get("y", 50) + 20
         pt = POINT(x, y)
         hwnd = user32.WindowFromPoint(pt)
+        return self._is_desktop_hwnd(hwnd)
+
+    def _is_desktop_hwnd(self, hwnd):
+        """Check if the given HWND belongs to a desktop-layer window."""
         if not hwnd:
             return True
-        # Walk up to root window and check its class
         root_hwnd = user32.GetAncestor(hwnd, GA_ROOT)
         if not root_hwnd:
             root_hwnd = hwnd
         class_name = ctypes.create_unicode_buffer(256)
         user32.GetClassName(root_hwnd, class_name, 256)
         name = class_name.value
-        # Desktop-related window classes
         return name in ("Progman", "WorkerW", "")
 
     def _peek_show(self):
         """Slide the overlay in from the right edge."""
         if not self.running or not self.peek_enabled or self.peek_visible or self._peek_animating or self.topmost:
             return
-        if self._is_desktop_visible():
+        # Check what's actually under the cursor (with trigger hidden) —
+        # if it's the desktop, the widget is already visible, skip peek
+        if self._is_desktop_at_cursor():
             return
 
         self._peek_animating = True
@@ -795,8 +822,12 @@ class OverlayApp:
         virt_x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
         virt_w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
         screen_right = virt_x + virt_w
-        self.root.update_idletasks()
-        overlay_w = self.root.winfo_width()
+        try:
+            self.root.update_idletasks()
+            overlay_w = self.root.winfo_width()
+        except tk.TclError:
+            self._peek_animating = False
+            return
 
         # Keep the same Y position as on the desktop
         target_x = screen_right - overlay_w
@@ -813,16 +844,19 @@ class OverlayApp:
         """Animate horizontal slide."""
         if not self.running or not self._peek_animating:
             return
-        if step < 0 and current_x <= target_x:
-            self.root.geometry(f"+{target_x}+{y}")
-            callback()
-            return
-        if step > 0 and current_x >= target_x:
-            self.root.geometry(f"+{target_x}+{y}")
-            callback()
-            return
-        self.root.geometry(f"+{current_x}+{y}")
-        self.root.after(10, lambda: self._animate_slide(current_x + step, target_x, y, step, callback))
+        try:
+            if step < 0 and current_x <= target_x:
+                self.root.geometry(f"+{target_x}+{y}")
+                callback()
+                return
+            if step > 0 and current_x >= target_x:
+                self.root.geometry(f"+{target_x}+{y}")
+                callback()
+                return
+            self.root.geometry(f"+{current_x}+{y}")
+            self.root.after(10, lambda: self._animate_slide(current_x + step, target_x, y, step, callback))
+        except tk.TclError:
+            self._peek_animating = False
 
     def _peek_shown(self):
         """Called when slide-in animation finishes."""
@@ -878,8 +912,9 @@ class OverlayApp:
         self._peek_animating = False
         self.peek_visible = False
 
-        # Hide before repositioning to prevent blink
-        self.root.withdraw()
+        # Hide with alpha=0 before repositioning to prevent blink
+        # (withdraw/deiconify resets z-order on Windows)
+        self.root.wm_attributes("-alpha", 0)
 
         # Restore topmost off
         self.root.wm_attributes("-topmost", False)
@@ -892,13 +927,14 @@ class OverlayApp:
             self.config["y"] = y
             self._saved_pos = None
 
-        # Re-embed in desktop (deiconify happens inside _embed_into_desktop)
+        # Re-embed in desktop (alpha restored inside _embed_into_desktop)
         self._schedule_embed(50)
 
     def toggle_peek(self):
         self.peek_enabled = not self.peek_enabled
         self.config["peek_enabled"] = self.peek_enabled
         save_config(self.config)
+        self._trigger_hidden_for_desktop = False
         if self.peek_enabled and not self.topmost:
             self._trigger.deiconify()
         else:
@@ -907,7 +943,7 @@ class OverlayApp:
                 # Force-cancel any running animation and return to desktop
                 self._peek_animating = False
                 self.peek_visible = False
-                self.root.withdraw()
+                self.root.wm_attributes("-alpha", 0)
                 self.root.wm_attributes("-topmost", False)
                 if self._saved_pos:
                     x, y = self._saved_pos
@@ -938,11 +974,13 @@ class OverlayApp:
                 x, y = self._saved_pos
                 self.root.geometry(f"+{x}+{y}")
                 self._saved_pos = None
+            self.root.deiconify()
             self.root.wm_attributes("-topmost", True)
         else:
             self.root.wm_attributes("-topmost", False)
             self._schedule_embed(100)
-            # Restore peek trigger if enabled
+            # Restore peek trigger if enabled (poll will manage desktop visibility)
+            self._trigger_hidden_for_desktop = False
             if self.peek_enabled:
                 self._trigger.deiconify()
         self._set_menu_label("topmost",
@@ -969,6 +1007,8 @@ class OverlayApp:
     def _flush_config(self):
         """Flush pending config changes to disk (debounced)."""
         self._config_save_pending = False
+        if not self.running:
+            return
         save_config(self.config)
 
     def _check_alerts(self, data):
@@ -1041,7 +1081,7 @@ class OverlayApp:
 
     def sensor_loop(self):
         consecutive_errors = 0
-        _storage_counter = 0
+        _storage_counter = 14  # start at INTERVAL-1 so first cycle updates storage
         _STORAGE_INTERVAL = 15  # update storage every 15 cycles (~30s)
         while not self._stop_event.is_set():
             try:
@@ -1081,7 +1121,7 @@ class OverlayApp:
             return
 
         with self.lock:
-            data = copy.deepcopy(self.sensor_data)
+            data = self.sensor_data
 
         if not data:
             self.root.after(500, self.update_ui)
@@ -1234,7 +1274,9 @@ class OverlayApp:
         # Save desktop position (not peek/animation position)
         if self._saved_pos:
             self.config["x"], self.config["y"] = self._saved_pos
-        elif not self.peek_visible and not self._peek_animating:
+        elif not self.peek_visible and not self._peek_animating and not self.embedded:
+            # Only read winfo coordinates when NOT embedded (they are screen-relative)
+            # When embedded, config["x"]/["y"] already track position via on_drag
             self.config["x"] = self.root.winfo_rootx()
             self.config["y"] = self.root.winfo_rooty()
         self.config["peek_enabled"] = self.peek_enabled
@@ -1247,14 +1289,19 @@ class OverlayApp:
             self._trigger.destroy()
         except Exception:
             pass
-        # Close hardware monitor to release sensor handles
-        with self.lock:
-            if self.computer is not None:
-                try:
-                    self.computer.Close()
-                except Exception:
-                    pass
-                self.computer = None
+        # Wait for sensor thread to finish before closing hardware monitor
+        # _stop_event is already set above; join with timeout to avoid hanging
+        try:
+            self.sensor_thread.join(timeout=5)
+        except Exception:
+            pass
+        # Close hardware monitor to release sensor handles (sensor thread has stopped)
+        if self.computer is not None:
+            try:
+                self.computer.Close()
+            except Exception:
+                pass
+            self.computer = None
         self.root.destroy()
 
     def run(self):
