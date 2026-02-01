@@ -8,6 +8,7 @@ import copy
 import ctypes
 import ctypes.wintypes
 import json
+import logging
 import os
 import sys
 import threading
@@ -17,6 +18,13 @@ import winreg
 import winsound
 
 import psutil
+
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("HeatMap")
 
 # --- Paths ---
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -69,6 +77,14 @@ user32.GetClassName = user32.GetClassNameW
 user32.GetClassName.argtypes = [ctypes.wintypes.HWND, ctypes.c_wchar_p, ctypes.c_int]
 user32.GetClassName.restype = ctypes.c_int
 GA_ROOT = 2
+
+# Virtual screen metrics (all monitors combined)
+SM_XVIRTUALSCREEN = 76
+SM_YVIRTUALSCREEN = 77
+SM_CXVIRTUALSCREEN = 78
+SM_CYVIRTUALSCREEN = 79
+user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+user32.GetSystemMetrics.restype = ctypes.c_int
 
 HWND_TOPMOST = -1
 HWND_NOTOPMOST = -2
@@ -131,9 +147,8 @@ def get_pythonw_path():
 
 def is_autostart_enabled():
     try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_READ)
-        winreg.QueryValueEx(key, AUTOSTART_NAME)
-        winreg.CloseKey(key)
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_READ) as key:
+            winreg.QueryValueEx(key, AUTOSTART_NAME)
         return True
     except FileNotFoundError:
         return False
@@ -145,14 +160,17 @@ def enable_autostart():
     """Add to Windows startup registry with admin elevation."""
     try:
         pythonw = get_pythonw_path()
-        # Must self-elevate because LibreHardwareMonitor needs admin
-        cmd = (
-            f'powershell -WindowStyle Hidden -Command '
-            f'"Start-Process \'{pythonw}\' -ArgumentList \'\\"{SCRIPT_PATH}\\"\' -Verb RunAs"'
+        # Use encoded command to avoid all quoting/escaping issues with special chars in paths
+        import base64
+        ps_script = (
+            f'Start-Process \'{pythonw}\' '
+            f'-ArgumentList \'"{SCRIPT_PATH}"\' '
+            f'-Verb RunAs'
         )
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE)
-        winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, cmd)
-        winreg.CloseKey(key)
+        encoded = base64.b64encode(ps_script.encode("utf-16-le")).decode("ascii")
+        cmd = f'powershell -WindowStyle Hidden -EncodedCommand {encoded}'
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, cmd)
         return True
     except Exception:
         return False
@@ -160,9 +178,8 @@ def enable_autostart():
 
 def disable_autostart():
     try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE)
-        winreg.DeleteValue(key, AUTOSTART_NAME)
-        winreg.CloseKey(key)
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.DeleteValue(key, AUTOSTART_NAME)
         return True
     except Exception:
         return False
@@ -188,6 +205,7 @@ def init_hardware_monitor():
         computer.Open()
         return computer
     except Exception:
+        log.warning("Failed to init LibreHardwareMonitor, falling back to psutil", exc_info=True)
         return None
 
 
@@ -236,6 +254,9 @@ def read_sensors(computer):
                             data["cpu_load"] = round(float(sensor.Value))
 
         elif hw_type in (HardwareType.GpuAmd, HardwareType.GpuNvidia, HardwareType.GpuIntel):
+            # Skip integrated Intel GPU if we already have data from a discrete GPU
+            if hw_type == HardwareType.GpuIntel and data["gpu_temp"] is not None:
+                continue  # discrete GPU data already collected, skip Intel iGPU
             gpu_mem_used = None
             gpu_mem_total = None
             for sensor in hw.Sensors:
@@ -274,7 +295,7 @@ def read_sensors(computer):
                 elif sensor.SensorType == SensorType.Load:
                     if "used space" in sensor.Name.lower() and sensor.Value is not None:
                         disk_used = round(float(sensor.Value))
-            if disk_temp is not None:
+            if disk_temp is not None or disk_used is not None:
                 name = str(hw.Name).replace("Samsung SSD ", "").replace("Samsung ", "")
                 data["disks"].append({
                     "name": name,
@@ -356,19 +377,32 @@ def disk_usage_color(pct):
 
 # --- Config ---
 def load_config():
+    defaults = {"x": 50, "y": 50, "peek_enabled": True, "alerts_enabled": True}
     try:
-        with open(CONFIG_PATH, "r") as f:
-            return json.load(f)
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        if not isinstance(cfg, dict):
+            return defaults
+        # Validate types, fall back to defaults for bad values
+        for key in ("x", "y"):
+            if not isinstance(cfg.get(key), (int, float)):
+                cfg[key] = defaults[key]
+            else:
+                cfg[key] = int(cfg[key])
+        for key in ("peek_enabled", "alerts_enabled"):
+            if not isinstance(cfg.get(key), bool):
+                cfg[key] = defaults[key]
+        return cfg
     except Exception:
-        return {"x": 50, "y": 50, "peek_enabled": True}
+        return defaults
 
 
 def save_config(cfg):
     try:
-        with open(CONFIG_PATH, "w") as f:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f)
     except Exception:
-        pass
+        log.warning("Failed to save config to %s", CONFIG_PATH, exc_info=True)
 
 
 # --- Main overlay class ---
@@ -377,12 +411,13 @@ class OverlayApp:
         self.computer = init_hardware_monitor()
         self.config = load_config()
         self.running = True
+        self._stop_event = threading.Event()
         self.sensor_data = {}
         self.lock = threading.Lock()
         self.embedded = False
 
         # --- Alert system ---
-        self.alerts_enabled = True
+        self.alerts_enabled = self.config.get("alerts_enabled", True)
         self._last_alert_time = 0
         self._ALERT_COOLDOWN = 60  # seconds between repeated alerts
         self._CRITICAL = {
@@ -392,6 +427,9 @@ class OverlayApp:
             "disk_used": 90,
             "ram_pct": 95,
         }
+        # Typical max RPM for fan % estimation when only RPM is available
+        self._GPU_FAN_MAX_RPM = 2200
+        self._CPU_FAN_MAX_RPM = 1800
 
         # --- tkinter setup ---
         self.root = tk.Tk()
@@ -486,6 +524,7 @@ class OverlayApp:
         self.disk_frame = tk.Frame(self.content, bg="#1a1a2e")
         self.disk_frame.pack(fill="x")
         self.disk_labels = []
+        self._last_disk_names = []
 
         # Bottom padding
         tk.Frame(self.content, bg="#1a1a2e", height=2).pack()
@@ -495,23 +534,18 @@ class OverlayApp:
         self.menu = tk.Menu(self.root, tearoff=0, bg="#1a1a2e", fg="#a0a0c0",
                            activebackground="#2a2a4e", activeforeground="white",
                            font=("Segoe UI", 9))
-        self.menu.add_command(
-            label="Always on top: OFF",
-            command=self.toggle_topmost
-        )
-        self.menu.add_command(
-            label="Autostart: ON" if is_autostart_enabled() else "Autostart: OFF",
-            command=self.toggle_autostart
-        )
-        self.menu.add_command(
-            label="Alerts: ON",
-            command=self.toggle_alerts
-        )
+        self._menu_idx = {}  # label_key -> menu index
+        self._add_menu_item("topmost", "Always on top: OFF", self.toggle_topmost)
+        self._add_menu_item("autostart",
+            "Autostart: ON" if is_autostart_enabled() else "Autostart: OFF",
+            self.toggle_autostart)
+        self._add_menu_item("alerts",
+            "Alerts: ON" if self.alerts_enabled else "Alerts: OFF",
+            self.toggle_alerts)
         self.peek_enabled = self.config.get("peek_enabled", True)
-        self.menu.add_command(
-            label="Peek from edge: ON" if self.peek_enabled else "Peek from edge: OFF",
-            command=self.toggle_peek
-        )
+        self._add_menu_item("peek",
+            "Peek from edge: ON" if self.peek_enabled else "Peek from edge: OFF",
+            self.toggle_peek)
         self.menu.add_separator()
         self.menu.add_command(label="Close", command=self.quit)
         self.root.bind("<Button-3>", self.show_menu)
@@ -532,16 +566,26 @@ class OverlayApp:
         # --- Start UI update loop ---
         self.update_ui()
 
+    def _add_menu_item(self, key, label, command):
+        """Add a menu command and track its index by key."""
+        self.menu.add_command(label=label, command=command)
+        self._menu_idx[key] = self.menu.index("end")
+
+    def _set_menu_label(self, key, label):
+        """Update a menu item's label by its key."""
+        self.menu.entryconfig(self._menu_idx[key], label=label)
+
     def _get_hwnd(self):
         """Get the native Windows HWND for the tkinter root window."""
         self.root.update_idletasks()
-        # wm_frame() returns the frame window id as hex string
         frame_id = self.root.wm_frame()
-        if frame_id and frame_id != "0":
-            hwnd = int(frame_id, 16)
-            if hwnd:  # could be 0 if wm_frame() returned "0x0"
+        if frame_id:
+            try:
+                hwnd = int(frame_id, 16)
+            except (ValueError, TypeError):
+                hwnd = 0
+            if hwnd:
                 return hwnd
-        # Fallback: use winfo_id (the inner window)
         return self.root.winfo_id()
 
     def _embed_into_desktop(self):
@@ -606,14 +650,14 @@ class OverlayApp:
         self._trigger.wm_attributes("-topmost", True)
         self._trigger.configure(bg="black")
 
-        screen_w = self.root.winfo_screenwidth()
-        screen_h = self.root.winfo_screenheight()
-        trigger_w = 6
-        self._trigger.geometry(f"{trigger_w}x{screen_h}+{screen_w - trigger_w}+0")
+        self._update_trigger_geometry()
 
         # Make it a tool window (no taskbar, no alt-tab)
         self._trigger.update_idletasks()
-        trigger_hwnd = int(self._trigger.wm_frame(), 16) or self._trigger.winfo_id()
+        try:
+            trigger_hwnd = int(self._trigger.wm_frame(), 16) or self._trigger.winfo_id()
+        except (ValueError, TypeError):
+            trigger_hwnd = self._trigger.winfo_id()
         set_tool_window(trigger_hwnd)
 
         self._trigger.bind("<Enter>", lambda _: self._peek_show())
@@ -621,11 +665,45 @@ class OverlayApp:
         if not self.peek_enabled:
             self._trigger.withdraw()
 
+        # Periodically re-check screen geometry for resolution/monitor changes
+        self._last_screen_x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+        self._last_screen_y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+        self._last_screen_w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+        self._last_screen_h = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+        self._poll_screen_change()
+
+    def _update_trigger_geometry(self):
+        """Position the trigger strip on the right edge of the virtual screen (all monitors)."""
+        virt_x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+        virt_y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+        virt_w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+        virt_h = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+        trigger_w = 6
+        self._trigger.geometry(f"{trigger_w}x{virt_h}+{virt_x + virt_w - trigger_w}+{virt_y}")
+
+    def _poll_screen_change(self):
+        """Re-position trigger strip if screen geometry changed (resolution or monitor rearrangement)."""
+        screen_x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+        screen_y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+        screen_w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+        screen_h = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+        if (screen_x != self._last_screen_x or screen_y != self._last_screen_y
+                or screen_w != self._last_screen_w or screen_h != self._last_screen_h):
+            self._last_screen_x = screen_x
+            self._last_screen_y = screen_y
+            self._last_screen_w = screen_w
+            self._last_screen_h = screen_h
+            self._update_trigger_geometry()
+        self.root.after(5000, self._poll_screen_change)
+
     def _is_desktop_visible(self):
         """Check if the desktop is visible (no app windows covering the widget area)."""
-        # Check a point near the widget's desktop position
-        x = self.config.get("x", 50) + 10
-        y = self.config.get("y", 50) + 10
+        # Check a point near the widget's actual desktop position
+        if self._saved_pos:
+            x, y = self._saved_pos[0] + 10, self._saved_pos[1] + 10
+        else:
+            x = self.root.winfo_rootx() + 10
+            y = self.root.winfo_rooty() + 10
         pt = POINT(x, y)
         hwnd = user32.WindowFromPoint(pt)
         if not hwnd:
@@ -661,20 +739,22 @@ class OverlayApp:
         # Make topmost
         self.root.wm_attributes("-topmost", True)
 
-        screen_w = self.root.winfo_screenwidth()
+        virt_x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+        virt_w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+        screen_right = virt_x + virt_w
         self.root.update_idletasks()
         overlay_w = self.root.winfo_width()
 
         # Keep the same Y position as on the desktop
-        target_x = screen_w - overlay_w
+        target_x = screen_right - overlay_w
         target_y = self._saved_pos[1] if self._saved_pos else self.config.get("y", 50)
 
         # Start off-screen
-        self.root.geometry(f"+{screen_w}+{target_y}")
+        self.root.geometry(f"+{screen_right}+{target_y}")
         self.root.update_idletasks()
 
         # Animate slide-in
-        self._animate_slide(screen_w, target_x, target_y, step=-20, callback=self._peek_shown)
+        self._animate_slide(screen_right, target_x, target_y, step=-20, callback=self._peek_shown)
 
     def _animate_slide(self, current_x, target_x, y, step, callback):
         """Animate horizontal slide."""
@@ -711,9 +791,10 @@ class OverlayApp:
         oh = self.root.winfo_height()
         over_overlay = ox <= mx <= ox + ow and oy <= my <= oy + oh
 
-        # Check if mouse is over the trigger strip
-        screen_w = self.root.winfo_screenwidth()
-        over_trigger = mx >= screen_w - 10
+        # Check if mouse is over the trigger strip (right edge of virtual screen)
+        virt_x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+        virt_w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+        over_trigger = mx >= virt_x + virt_w - 10
 
         if over_overlay or over_trigger:
             self.root.after(200, self._peek_check_mouse)
@@ -728,11 +809,11 @@ class OverlayApp:
         self._peek_animating = True
         self.peek_visible = False
 
-        screen_w = self.root.winfo_screenwidth()
+        screen_right = user32.GetSystemMetrics(SM_XVIRTUALSCREEN) + user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
         current_x = self.root.winfo_rootx()
         current_y = self.root.winfo_rooty()
 
-        self._animate_slide(current_x, screen_w, current_y, step=20, callback=self._peek_hidden)
+        self._animate_slide(current_x, screen_right, current_y, step=20, callback=self._peek_hidden)
 
     def _peek_hidden(self):
         """Called when slide-out animation finishes."""
@@ -763,8 +844,8 @@ class OverlayApp:
             self._trigger.withdraw()
             if self.peek_visible:
                 self._peek_hide()
-        self.menu.entryconfig(3,
-            label="Peek from edge: ON" if self.peek_enabled else "Peek from edge: OFF"
+        self._set_menu_label("peek",
+            "Peek from edge: ON" if self.peek_enabled else "Peek from edge: OFF"
         )
 
     def toggle_topmost(self):
@@ -792,8 +873,8 @@ class OverlayApp:
             # Restore peek trigger if enabled
             if self.peek_enabled:
                 self._trigger.deiconify()
-        self.menu.entryconfig(0,
-            label="Always on top: ON" if self.topmost else "Always on top: OFF"
+        self._set_menu_label("topmost",
+            "Always on top: ON" if self.topmost else "Always on top: OFF"
         )
 
     def toggle_autostart(self):
@@ -801,14 +882,16 @@ class OverlayApp:
             disable_autostart()
         else:
             enable_autostart()
-        self.menu.entryconfig(1,
-            label="Autostart: ON" if is_autostart_enabled() else "Autostart: OFF"
+        self._set_menu_label("autostart",
+            "Autostart: ON" if is_autostart_enabled() else "Autostart: OFF"
         )
 
     def toggle_alerts(self):
         self.alerts_enabled = not self.alerts_enabled
-        self.menu.entryconfig(2,
-            label="Alerts: ON" if self.alerts_enabled else "Alerts: OFF"
+        self.config["alerts_enabled"] = self.alerts_enabled
+        save_config(self.config)
+        self._set_menu_label("alerts",
+            "Alerts: ON" if self.alerts_enabled else "Alerts: OFF"
         )
 
     def _check_alerts(self, data):
@@ -833,8 +916,9 @@ class OverlayApp:
             alerts.append(f"RAM {ram_pct}%")
 
         for disk in data.get("disks", []):
-            if disk["temp"] >= self._CRITICAL["disk_temp"]:
-                alerts.append(f"{disk['name']} {disk['temp']}°C")
+            dtemp = disk.get("temp")
+            if dtemp is not None and dtemp >= self._CRITICAL["disk_temp"]:
+                alerts.append(f"{disk['name']} {dtemp}°C")
             used = disk.get("used_pct")
             if used is not None and used >= self._CRITICAL["disk_used"]:
                 alerts.append(f"{disk['name']} {used}%")
@@ -842,10 +926,11 @@ class OverlayApp:
         if alerts:
             self._last_alert_time = now
             # Beep in a thread to avoid blocking UI
-            threading.Thread(
-                target=lambda: winsound.Beep(1000, 300) or time.sleep(0.15) or winsound.Beep(1000, 300),
-                daemon=True
-            ).start()
+            def _alert_beep():
+                winsound.Beep(1000, 300)
+                time.sleep(0.15)
+                winsound.Beep(1000, 300)
+            threading.Thread(target=_alert_beep, daemon=True).start()
 
     def start_drag(self, event):
         self._drag_x = event.x
@@ -855,32 +940,45 @@ class OverlayApp:
         x = self.root.winfo_x() + event.x - self._drag_x
         y = self.root.winfo_y() + event.y - self._drag_y
         self.root.geometry(f"+{x}+{y}")
+        self.config["x"] = x
+        self.config["y"] = y
         if self.peek_visible:
-            # Update saved desktop position so peek-hide restores here
             self._saved_pos = (x, y)
-        else:
-            self.config["x"] = x
-            self.config["y"] = y
 
     def end_drag(self, _event):
-        if not self.peek_visible:
-            save_config(self.config)
+        save_config(self.config)
 
     def show_menu(self, event):
         self.menu.tk_popup(event.x_root, event.y_root)
 
     def sensor_loop(self):
-        while self.running:
+        consecutive_errors = 0
+        while not self._stop_event.is_set():
             try:
                 data = read_sensors(self.computer)
                 with self.lock:
                     self.sensor_data = data
+                consecutive_errors = 0
             except Exception as e:
+                consecutive_errors += 1
+                log.error("Sensor read error: %s", e, exc_info=True)
                 with self.lock:
                     self.sensor_data = {"error": str(e)}
-            time.sleep(2)
+                # After 3 consecutive failures, try to reinitialize the hardware monitor
+                if consecutive_errors >= 3 and self.computer is not None:
+                    log.warning("Reinitializing hardware monitor after %d errors", consecutive_errors)
+                    try:
+                        self.computer.Close()
+                    except Exception:
+                        pass
+                    self.computer = init_hardware_monitor()
+                    consecutive_errors = 0
+            self._stop_event.wait(2)
 
     def update_ui(self):
+        if not self.running:
+            return
+
         with self.lock:
             data = copy.deepcopy(self.sensor_data)
 
@@ -935,7 +1033,7 @@ class OverlayApp:
             if gpu_fan == 0:
                 self.rows["gpu_fan"].config(text="OFF", fg="#4ade80")
             else:
-                est_pct = min(100, round(gpu_fan / 2200 * 100))
+                est_pct = min(100, round(gpu_fan / self._GPU_FAN_MAX_RPM * 100))
                 self.rows["gpu_fan"].config(text=f"~{est_pct}%", fg=load_color(est_pct))
         else:
             self.rows["gpu_fan"].config(text="--", fg="#888888")
@@ -952,8 +1050,7 @@ class OverlayApp:
             if cpu_fan == 0:
                 self.rows["cpu_fan"].config(text="OFF", fg="#4ade80")
             else:
-                # Estimate % from RPM (typical CPU fan max ~1500-2000 RPM)
-                est_pct = min(100, round(cpu_fan / 1800 * 100))
+                est_pct = min(100, round(cpu_fan / self._CPU_FAN_MAX_RPM * 100))
                 self.rows["cpu_fan"].config(text=f"~{est_pct}%", fg=load_color(est_pct))
         else:
             self.rows["cpu_fan"].config(text="--", fg="#888888")
@@ -967,23 +1064,40 @@ class OverlayApp:
 
         # Disks: orange name left, temp + usage% right
         disks = data.get("disks", [])
-        while len(self.disk_labels) < len(disks):
-            idx = len(self.disk_labels)
-            key = f"disk_{idx}"
-            self._make_disk_row(key, disks[idx]["name"], parent=self.disk_frame)
-            self.disk_labels.append(key)
+        disk_names = [d["name"] for d in disks]
+
+        # Rebuild disk rows if disk list changed
+        if disk_names != self._last_disk_names:
+            self._last_disk_names = disk_names
+            # Destroy old disk widgets
+            for key in list(self.disk_labels):
+                try:
+                    self.rows[key].master.destroy()
+                except Exception:
+                    pass
+                self.rows.pop(key, None)
+                self.rows.pop(key + "_usage", None)
+            self.disk_labels.clear()
+            # Create new rows
+            for idx, disk in enumerate(disks):
+                key = f"disk_{idx}"
+                self._make_disk_row(key, disk["name"], parent=self.disk_frame)
+                self.disk_labels.append(key)
+
         for i, key in enumerate(self.disk_labels):
-            if i < len(disks):
-                disk = disks[i]
-                self.rows[key].config(text=f"{disk['temp']}°C", fg=temp_color(disk["temp"]))
-                used = disk.get("used_pct")
-                if used is not None:
-                    self.rows[key + "_usage"].config(text=f"{used}%", fg=disk_usage_color(used))
-                else:
-                    self.rows[key + "_usage"].config(text="", fg="#888888")
-                self.rows[key].master.pack(fill="x", pady=1)
+            if i >= len(disks):
+                break
+            disk = disks[i]
+            dtemp = disk.get("temp")
+            if dtemp is not None:
+                self.rows[key].config(text=f"{dtemp}°C", fg=temp_color(dtemp))
             else:
-                self.rows[key].master.pack_forget()
+                self.rows[key].config(text="--", fg="#888888")
+            used = disk.get("used_pct")
+            if used is not None:
+                self.rows[key + "_usage"].config(text=f"{used}%", fg=disk_usage_color(used))
+            else:
+                self.rows[key + "_usage"].config(text="", fg="#888888")
 
         # Check critical thresholds and alert
         self._check_alerts(data)
@@ -992,6 +1106,16 @@ class OverlayApp:
 
     def quit(self):
         self.running = False
+        self._stop_event.set()
+        # Cancel all pending after() callbacks to prevent TclError on destroy
+        try:
+            for after_id in list(self.root.tk.call('after', 'info') or ()):
+                try:
+                    self.root.after_cancel(after_id)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # Save desktop position (not peek position)
         if self._saved_pos:
             self.config["x"], self.config["y"] = self._saved_pos
@@ -999,6 +1123,7 @@ class OverlayApp:
             self.config["x"] = self.root.winfo_rootx()
             self.config["y"] = self.root.winfo_rooty()
         self.config["peek_enabled"] = self.peek_enabled
+        self.config["alerts_enabled"] = self.alerts_enabled
         save_config(self.config)
         # Destroy trigger window
         try:
@@ -1018,16 +1143,20 @@ class OverlayApp:
 
 
 def kill_previous_instances():
-    """Kill any other overlay.py / overlay instances."""
+    """Kill any other overlay.py instances matching our script path."""
     my_pid = os.getpid()
+    script_lower = SCRIPT_PATH.lower()
     for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
         try:
             if proc.info['pid'] == my_pid:
                 continue
             cmdline = proc.info.get('cmdline') or []
-            cmdline_str = " ".join(cmdline).lower()
-            if "overlay.py" in cmdline_str:
-                proc.kill()
+            if any(script_lower == arg.strip('"').lower() for arg in cmdline):
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except psutil.TimeoutExpired:
+                    proc.kill()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
 
@@ -1044,7 +1173,10 @@ def main():
         sys.exit(1)
 
     app = OverlayApp()
-    app.run()
+    try:
+        app.run()
+    except KeyboardInterrupt:
+        app.quit()
 
 
 if __name__ == "__main__":
