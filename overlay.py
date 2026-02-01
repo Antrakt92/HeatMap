@@ -61,6 +61,14 @@ class POINT(ctypes.Structure):
 
 user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
 user32.GetCursorPos.restype = ctypes.c_bool
+user32.WindowFromPoint.argtypes = [POINT]
+user32.WindowFromPoint.restype = ctypes.wintypes.HWND
+user32.GetAncestor.argtypes = [ctypes.wintypes.HWND, ctypes.c_uint]
+user32.GetAncestor.restype = ctypes.wintypes.HWND
+user32.GetClassName = user32.GetClassNameW
+user32.GetClassName.argtypes = [ctypes.wintypes.HWND, ctypes.c_wchar_p, ctypes.c_int]
+user32.GetClassName.restype = ctypes.c_int
+GA_ROOT = 2
 
 HWND_TOPMOST = -1
 HWND_NOTOPMOST = -2
@@ -613,9 +621,30 @@ class OverlayApp:
         if not self.peek_enabled:
             self._trigger.withdraw()
 
+    def _is_desktop_visible(self):
+        """Check if the desktop is visible (no app windows covering the widget area)."""
+        # Check a point near the widget's desktop position
+        x = self.config.get("x", 50) + 10
+        y = self.config.get("y", 50) + 10
+        pt = POINT(x, y)
+        hwnd = user32.WindowFromPoint(pt)
+        if not hwnd:
+            return True
+        # Walk up to root window and check its class
+        root_hwnd = user32.GetAncestor(hwnd, GA_ROOT)
+        if not root_hwnd:
+            root_hwnd = hwnd
+        class_name = ctypes.create_unicode_buffer(256)
+        user32.GetClassName(root_hwnd, class_name, 256)
+        name = class_name.value
+        # Desktop-related window classes
+        return name in ("Progman", "WorkerW", "")
+
     def _peek_show(self):
         """Slide the overlay in from the right edge."""
         if self.peek_visible or self._peek_animating or self.topmost:
+            return
+        if self._is_desktop_visible():
             return
 
         self._peek_animating = True
