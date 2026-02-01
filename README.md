@@ -27,9 +27,7 @@
 
 ## Скриншот
 
-![image](https://github.com/user-attachments/assets/placeholder)
-
-*Замените ссылку выше на реальный скриншот вашего оверлея.*
+![HeatMap overlay](https://github.com/user-attachments/assets/8b58ff7c-3003-424c-b0aa-58bbc2b2c027)
 
 ## Установка
 
