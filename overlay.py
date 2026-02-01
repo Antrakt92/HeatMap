@@ -9,6 +9,7 @@ import ctypes
 import ctypes.wintypes
 import json
 import logging
+import base64
 import os
 import sys
 import threading
@@ -153,6 +154,7 @@ def is_autostart_enabled():
     except FileNotFoundError:
         return False
     except Exception:
+        log.warning("Failed to check autostart status", exc_info=True)
         return False
 
 
@@ -161,7 +163,6 @@ def enable_autostart():
     try:
         pythonw = get_pythonw_path()
         # Use encoded command to avoid all quoting/escaping issues with special chars in paths
-        import base64
         ps_script = (
             f'Start-Process \'{pythonw}\' '
             f'-ArgumentList \'"{SCRIPT_PATH}"\' '
@@ -173,6 +174,7 @@ def enable_autostart():
             winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, cmd)
         return True
     except Exception:
+        log.warning("Failed to enable autostart", exc_info=True)
         return False
 
 
@@ -182,6 +184,7 @@ def disable_autostart():
             winreg.DeleteValue(key, AUTOSTART_NAME)
         return True
     except Exception:
+        log.warning("Failed to disable autostart", exc_info=True)
         return False
 
 
@@ -410,6 +413,14 @@ class OverlayApp:
     def __init__(self):
         self.computer = init_hardware_monitor()
         self.config = load_config()
+        # Validate saved position is within visible screen area
+        virt_x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+        virt_y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+        virt_w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+        virt_h = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+        cx, cy = self.config.get("x", 50), self.config.get("y", 50)
+        if cx < virt_x or cx >= virt_x + virt_w or cy < virt_y or cy >= virt_y + virt_h:
+            self.config["x"], self.config["y"] = 50, 50
         self.running = True
         self._stop_event = threading.Event()
         self.sensor_data = {}
@@ -427,7 +438,7 @@ class OverlayApp:
             "disk_used": 90,
             "ram_pct": 95,
         }
-        # Typical max RPM for fan % estimation when only RPM is available
+        # Initial max RPM for fan % estimation (auto-calibrated from observed values)
         self._GPU_FAN_MAX_RPM = 2200
         self._CPU_FAN_MAX_RPM = 1800
 
@@ -758,6 +769,8 @@ class OverlayApp:
 
     def _animate_slide(self, current_x, target_x, y, step, callback):
         """Animate horizontal slide."""
+        if not self.running or not self._peek_animating:
+            return
         if step < 0 and current_x <= target_x:
             self.root.geometry(f"+{target_x}+{y}")
             callback()
@@ -807,7 +820,7 @@ class OverlayApp:
             return
 
         self._peek_animating = True
-        self.peek_visible = False
+        # peek_visible stays True until animation finishes (in _peek_hidden)
 
         screen_right = user32.GetSystemMetrics(SM_XVIRTUALSCREEN) + user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
         current_x = self.root.winfo_rootx()
@@ -818,6 +831,7 @@ class OverlayApp:
     def _peek_hidden(self):
         """Called when slide-out animation finishes."""
         self._peek_animating = False
+        self.peek_visible = False
 
         # Hide before repositioning to prevent blink
         self.root.withdraw()
@@ -940,10 +954,11 @@ class OverlayApp:
         x = self.root.winfo_x() + event.x - self._drag_x
         y = self.root.winfo_y() + event.y - self._drag_y
         self.root.geometry(f"+{x}+{y}")
-        self.config["x"] = x
-        self.config["y"] = y
-        if self.peek_visible:
+        if self.peek_visible or self._peek_animating:
             self._saved_pos = (x, y)
+        else:
+            self.config["x"] = x
+            self.config["y"] = y
 
     def end_drag(self, _event):
         save_config(self.config)
@@ -967,11 +982,12 @@ class OverlayApp:
                 # After 3 consecutive failures, try to reinitialize the hardware monitor
                 if consecutive_errors >= 3 and self.computer is not None:
                     log.warning("Reinitializing hardware monitor after %d errors", consecutive_errors)
-                    try:
-                        self.computer.Close()
-                    except Exception:
-                        pass
-                    self.computer = init_hardware_monitor()
+                    with self.lock:
+                        try:
+                            self.computer.Close()
+                        except Exception:
+                            pass
+                        self.computer = init_hardware_monitor()
                     consecutive_errors = 0
             self._stop_event.wait(2)
 
@@ -1021,9 +1037,16 @@ class OverlayApp:
         else:
             self.rows["vram"].config(text="--", fg="#888888")
 
+        # Auto-calibrate fan RPM max from observed values
+        gpu_fan = data.get("gpu_fan")
+        cpu_fan = data.get("cpu_fan")
+        if gpu_fan is not None and gpu_fan > self._GPU_FAN_MAX_RPM:
+            self._GPU_FAN_MAX_RPM = gpu_fan
+        if cpu_fan is not None and cpu_fan > self._CPU_FAN_MAX_RPM:
+            self._CPU_FAN_MAX_RPM = cpu_fan
+
         # GPU FAN: prefer %, fallback RPM
         gpu_fan_pct = data.get("gpu_fan_pct")
-        gpu_fan = data.get("gpu_fan")
         if gpu_fan_pct is not None:
             if gpu_fan_pct == 0:
                 self.rows["gpu_fan"].config(text="OFF", fg="#4ade80")
@@ -1040,7 +1063,6 @@ class OverlayApp:
 
         # CPU FAN: show % (same style as GPU fan)
         cpu_fan_pct = data.get("cpu_fan_pct")
-        cpu_fan = data.get("cpu_fan")
         if cpu_fan_pct is not None:
             if cpu_fan_pct == 0:
                 self.rows["cpu_fan"].config(text="OFF", fg="#4ade80")
@@ -1116,10 +1138,10 @@ class OverlayApp:
                     pass
         except Exception:
             pass
-        # Save desktop position (not peek position)
+        # Save desktop position (not peek/animation position)
         if self._saved_pos:
             self.config["x"], self.config["y"] = self._saved_pos
-        elif not self.peek_visible:
+        elif not self.peek_visible and not self._peek_animating:
             self.config["x"] = self.root.winfo_rootx()
             self.config["y"] = self.root.winfo_rooty()
         self.config["peek_enabled"] = self.peek_enabled
@@ -1131,11 +1153,13 @@ class OverlayApp:
         except Exception:
             pass
         # Close hardware monitor to release sensor handles
-        if self.computer is not None:
-            try:
-                self.computer.Close()
-            except Exception:
-                pass
+        with self.lock:
+            if self.computer is not None:
+                try:
+                    self.computer.Close()
+                except Exception:
+                    pass
+                self.computer = None
         self.root.destroy()
 
     def run(self):

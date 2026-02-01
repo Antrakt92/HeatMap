@@ -37,7 +37,8 @@ def _verify_hash(data, filename, expected_hashes):
     """Verify SHA256 hash of downloaded DLL data. Returns True if OK."""
     expected = expected_hashes.get(filename)
     if not expected:
-        return True
+        print(f"  WARNING: No expected hash for {filename}, rejecting")
+        return False
     actual = hashlib.sha256(data).hexdigest()
     if actual != expected:
         print(f"  ERROR: {filename} hash mismatch!")
