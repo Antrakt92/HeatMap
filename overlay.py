@@ -467,15 +467,8 @@ class OverlayApp:
         self.disk_frame.pack(fill="x")
         self.disk_labels = []
 
-        # Separator after disks
-        tk.Frame(self.content, bg="#2a2a4e", height=1).pack(fill="x", pady=2)
-
-        # Status label
-        self.status_label = tk.Label(
-            self.content, text="Starting...", font=("Segoe UI", 8),
-            fg="#555577", bg="#1a1a2e"
-        )
-        self.status_label.pack()
+        # Bottom padding
+        tk.Frame(self.content, bg="#1a1a2e", height=2).pack()
 
         # --- Right-click menu ---
         self.topmost = False
@@ -637,10 +630,7 @@ class OverlayApp:
                 target=lambda: winsound.Beep(1000, 300) or time.sleep(0.15) or winsound.Beep(1000, 300),
                 daemon=True
             ).start()
-            self.status_label.config(
-                text=f"⚠ {', '.join(alerts)}",
-                fg="#f87171"
-            )
+            pass
 
     def start_drag(self, event):
         self._drag_x = event.x
@@ -679,7 +669,6 @@ class OverlayApp:
             return
 
         if "error" in data:
-            self.status_label.config(text=f"Error: {data['error']}", fg="#f87171")
             self.root.after(2000, self.update_ui)
             return
 
@@ -778,14 +767,6 @@ class OverlayApp:
 
         # Check critical thresholds and alert
         self._check_alerts(data)
-
-        # Status (only update if no active alert showing)
-        now = time.time()
-        if now - self._last_alert_time >= 10:
-            self.status_label.config(
-                text="Desktop" if self.embedded else "Floating",
-                fg="#4ade80" if self.embedded else "#facc15"
-            )
 
         self.root.after(2000, self.update_ui)
 
