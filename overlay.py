@@ -630,11 +630,10 @@ class OverlayApp:
         screen_w = self.root.winfo_screenwidth()
         self.root.update_idletasks()
         overlay_w = self.root.winfo_width()
-        overlay_h = self.root.winfo_height()
 
-        # Center vertically on screen
+        # Keep the same Y position as on the desktop
         target_x = screen_w - overlay_w
-        target_y = (self.root.winfo_screenheight() - overlay_h) // 2
+        target_y = self._saved_pos[1] if self._saved_pos else self.config.get("y", 50)
 
         # Start off-screen
         self.root.geometry(f"+{screen_w}+{target_y}")
