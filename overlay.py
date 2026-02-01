@@ -56,6 +56,15 @@ user32.FindWindowExW.restype = ctypes.wintypes.HWND
 user32.SetParent.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.HWND]
 user32.SetParent.restype = ctypes.wintypes.HWND
 
+class POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
+user32.GetCursorPos.restype = ctypes.c_bool
+
+HWND_TOPMOST = -1
+HWND_NOTOPMOST = -2
+
 # --- Desktop widget: embed window into the desktop layer ---
 def find_desktop_worker_w():
     """Find the WorkerW window behind desktop icons for widget embedding."""
@@ -343,7 +352,7 @@ def load_config():
         with open(CONFIG_PATH, "r") as f:
             return json.load(f)
     except Exception:
-        return {"x": 50, "y": 50}
+        return {"x": 50, "y": 50, "peek_enabled": True}
 
 
 def save_config(cfg):
@@ -487,9 +496,20 @@ class OverlayApp:
             label="Alerts: ON",
             command=self.toggle_alerts
         )
+        self.peek_enabled = self.config.get("peek_enabled", True)
+        self.menu.add_command(
+            label="Peek from edge: ON" if self.peek_enabled else "Peek from edge: OFF",
+            command=self.toggle_peek
+        )
         self.menu.add_separator()
         self.menu.add_command(label="Close", command=self.quit)
         self.root.bind("<Button-3>", self.show_menu)
+
+        # --- Peek from edge ---
+        self.peek_visible = False
+        self._peek_animating = False
+        self._saved_pos = None  # saved desktop position before peek
+        self._create_peek_trigger()
 
         # --- Embed into desktop after window is drawn ---
         self.root.after(100, self._embed_into_desktop)
@@ -564,18 +584,178 @@ class OverlayApp:
         self.rows[key] = temp_lbl
         self.rows[key + "_usage"] = usage_lbl
 
+    # --- Peek from edge methods ---
+    def _create_peek_trigger(self):
+        """Create an invisible strip on the right edge of the screen."""
+        self._trigger = tk.Toplevel(self.root)
+        self._trigger.overrideredirect(True)
+        self._trigger.wm_attributes("-alpha", 0.01)
+        self._trigger.wm_attributes("-topmost", True)
+        self._trigger.configure(bg="black")
+
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        trigger_w = 6
+        self._trigger.geometry(f"{trigger_w}x{screen_h}+{screen_w - trigger_w}+0")
+
+        # Make it a tool window (no taskbar, no alt-tab)
+        self._trigger.update_idletasks()
+        trigger_hwnd = int(self._trigger.wm_frame(), 16) or self._trigger.winfo_id()
+        set_tool_window(trigger_hwnd)
+
+        self._trigger.bind("<Enter>", lambda _: self._peek_show())
+
+        if not self.peek_enabled:
+            self._trigger.withdraw()
+
+    def _peek_show(self):
+        """Slide the overlay in from the right edge."""
+        if self.peek_visible or self._peek_animating or self.topmost:
+            return
+
+        self._peek_animating = True
+
+        # Save current desktop position
+        self._saved_pos = (self.config.get("x", 50), self.config.get("y", 50))
+
+        # Unembed from desktop
+        if self.embedded:
+            hwnd = self._get_hwnd()
+            user32.SetParent(hwnd, 0)
+            self.embedded = False
+
+        # Make topmost
+        self.root.wm_attributes("-topmost", True)
+
+        screen_w = self.root.winfo_screenwidth()
+        self.root.update_idletasks()
+        overlay_w = self.root.winfo_width()
+        overlay_h = self.root.winfo_height()
+
+        # Center vertically on screen
+        target_x = screen_w - overlay_w
+        target_y = (self.root.winfo_screenheight() - overlay_h) // 2
+
+        # Start off-screen
+        self.root.geometry(f"+{screen_w}+{target_y}")
+        self.root.update_idletasks()
+
+        # Animate slide-in
+        self._animate_slide(screen_w, target_x, target_y, step=-20, callback=self._peek_shown)
+
+    def _animate_slide(self, current_x, target_x, y, step, callback):
+        """Animate horizontal slide."""
+        if step < 0 and current_x <= target_x:
+            self.root.geometry(f"+{target_x}+{y}")
+            callback()
+            return
+        if step > 0 and current_x >= target_x:
+            self.root.geometry(f"+{target_x}+{y}")
+            callback()
+            return
+        self.root.geometry(f"+{current_x}+{y}")
+        self.root.after(10, lambda: self._animate_slide(current_x + step, target_x, y, step, callback))
+
+    def _peek_shown(self):
+        """Called when slide-in animation finishes."""
+        self._peek_animating = False
+        self.peek_visible = True
+        self._peek_check_mouse()
+
+    def _peek_check_mouse(self):
+        """Poll mouse position — hide when cursor leaves overlay and trigger."""
+        if not self.peek_visible or self._peek_animating:
+            return
+
+        pt = POINT()
+        user32.GetCursorPos(ctypes.byref(pt))
+        mx, my = pt.x, pt.y
+
+        # Check if mouse is over the overlay
+        ox = self.root.winfo_rootx()
+        oy = self.root.winfo_rooty()
+        ow = self.root.winfo_width()
+        oh = self.root.winfo_height()
+        over_overlay = ox <= mx <= ox + ow and oy <= my <= oy + oh
+
+        # Check if mouse is over the trigger strip
+        screen_w = self.root.winfo_screenwidth()
+        over_trigger = mx >= screen_w - 10
+
+        if over_overlay or over_trigger:
+            self.root.after(200, self._peek_check_mouse)
+        else:
+            self._peek_hide()
+
+    def _peek_hide(self):
+        """Slide the overlay back off-screen and re-embed in desktop."""
+        if not self.peek_visible or self._peek_animating:
+            return
+
+        self._peek_animating = True
+        self.peek_visible = False
+
+        screen_w = self.root.winfo_screenwidth()
+        current_x = self.root.winfo_rootx()
+        current_y = self.root.winfo_rooty()
+
+        self._animate_slide(current_x, screen_w, current_y, step=20, callback=self._peek_hidden)
+
+    def _peek_hidden(self):
+        """Called when slide-out animation finishes."""
+        self._peek_animating = False
+
+        # Restore topmost off
+        self.root.wm_attributes("-topmost", False)
+
+        # Restore saved desktop position
+        if self._saved_pos:
+            x, y = self._saved_pos
+            self.root.geometry(f"+{x}+{y}")
+            self._saved_pos = None
+
+        # Re-embed in desktop
+        self.root.after(50, self._embed_into_desktop)
+
+    def toggle_peek(self):
+        self.peek_enabled = not self.peek_enabled
+        self.config["peek_enabled"] = self.peek_enabled
+        save_config(self.config)
+        if self.peek_enabled and not self.topmost:
+            self._trigger.deiconify()
+        else:
+            self._trigger.withdraw()
+            if self.peek_visible:
+                self._peek_hide()
+        self.menu.entryconfig(3,
+            label="Peek from edge: ON" if self.peek_enabled else "Peek from edge: OFF"
+        )
+
     def toggle_topmost(self):
         self.topmost = not self.topmost
         if self.topmost:
+            # Hide peek trigger — not needed in topmost mode
+            self._trigger.withdraw()
+            if self.peek_visible:
+                self.peek_visible = False
+                self._peek_animating = False
             # Unembed from desktop if embedded, make topmost
             if self.embedded:
                 hwnd = self._get_hwnd()
                 user32.SetParent(hwnd, 0)
                 self.embedded = False
+            # Restore saved position if we were peeking
+            if self._saved_pos:
+                x, y = self._saved_pos
+                self.root.geometry(f"+{x}+{y}")
+                self._saved_pos = None
             self.root.wm_attributes("-topmost", True)
         else:
             self.root.wm_attributes("-topmost", False)
             self.root.after(100, self._embed_into_desktop)
+            # Restore peek trigger if enabled
+            if self.peek_enabled:
+                self._trigger.deiconify()
         self.menu.entryconfig(0,
             label="Always on top: ON" if self.topmost else "Always on top: OFF"
         )
@@ -772,10 +952,19 @@ class OverlayApp:
 
     def quit(self):
         self.running = False
-        # Save position
-        self.config["x"] = self.root.winfo_rootx()
-        self.config["y"] = self.root.winfo_rooty()
+        # Save desktop position (not peek position)
+        if self._saved_pos:
+            self.config["x"], self.config["y"] = self._saved_pos
+        elif not self.peek_visible:
+            self.config["x"] = self.root.winfo_rootx()
+            self.config["y"] = self.root.winfo_rooty()
+        self.config["peek_enabled"] = self.peek_enabled
         save_config(self.config)
+        # Destroy trigger window
+        try:
+            self._trigger.destroy()
+        except Exception:
+            pass
         # Close hardware monitor to release sensor handles
         if self.computer is not None:
             try:
