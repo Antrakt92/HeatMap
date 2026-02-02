@@ -209,10 +209,40 @@ def init_hardware_monitor():
         computer.IsMemoryEnabled = True
         computer.IsMotherboardEnabled = True
         computer.Open()
+
+        # Sanity check: verify kernel driver loaded (CPU temp should be non-zero)
+        _has_cpu_temp = False
+        for hw in computer.Hardware:
+            hw.Update()
+            from LibreHardwareMonitor.Hardware import HardwareType, SensorType
+            if hw.HardwareType == HardwareType.Cpu:
+                for s in hw.Sensors:
+                    if s.SensorType == SensorType.Temperature and s.Value is not None:
+                        if float(s.Value) > 0:
+                            _has_cpu_temp = True
+                break
+        if not _has_cpu_temp:
+            log.warning(
+                "LHM kernel driver may be blocked (CPU temp unavailable). "
+                "Check Windows Vulnerable Driver Blocklist "
+                "(HKLM\\SYSTEM\\CurrentControlSet\\Control\\CI\\Config"
+                "\\VulnerableDriverBlocklistEnable)."
+            )
+
         return computer
     except Exception:
         log.warning("Failed to init LibreHardwareMonitor, falling back to psutil", exc_info=True)
         return None
+
+
+def _safe_round(value):
+    """Convert sensor value to rounded int, returning None for None/NaN."""
+    if value is None:
+        return None
+    v = float(value)
+    if v != v:  # NaN check
+        return None
+    return round(v)
 
 
 def read_sensors(computer, update_storage=True):
@@ -268,18 +298,22 @@ def read_sensors(computer, update_storage=True):
             for sensor in hw.Sensors:
                 if sensor.SensorType == SensorType.Temperature:
                     name = sensor.Name.lower()
-                    if sensor.Value is not None:
+                    val = _safe_round(sensor.Value)
+                    if val is not None and val > 0:  # 0°C = driver failure
                         if "tctl" in name or "tdie" in name or "package" in name:
-                            data["cpu_temp"] = round(float(sensor.Value))
+                            data["cpu_temp"] = val
                         elif data["cpu_temp"] is None:
-                            data["cpu_temp"] = round(float(sensor.Value))
+                            data["cpu_temp"] = val
                 elif sensor.SensorType == SensorType.Load:
                     if "total" in sensor.Name.lower():
-                        if sensor.Value is not None:
-                            data["cpu_load"] = round(float(sensor.Value))
+                        val = _safe_round(sensor.Value)
+                        if val is not None:
+                            data["cpu_load"] = val
                 elif sensor.SensorType == SensorType.Clock:
-                    if sensor.Value is not None and "core" in sensor.Name.lower():
-                        core_clocks.append(float(sensor.Value))
+                    if "core" in sensor.Name.lower():
+                        val = _safe_round(sensor.Value)
+                        if val is not None:
+                            core_clocks.append(val)
             if core_clocks:
                 data["cpu_clock"] = round(max(core_clocks))
 
@@ -292,28 +326,38 @@ def read_sensors(computer, update_storage=True):
             for sensor in hw.Sensors:
                 if sensor.SensorType == SensorType.Temperature:
                     if "core" in sensor.Name.lower() or "gpu" in sensor.Name.lower():
-                        if sensor.Value is not None:
-                            data["gpu_temp"] = round(float(sensor.Value))
+                        val = _safe_round(sensor.Value)
+                        if val is not None:
+                            data["gpu_temp"] = val
                 elif sensor.SensorType == SensorType.Load:
                     name = sensor.Name.lower()
                     if name == "gpu core":
-                        if sensor.Value is not None:
-                            data["gpu_load"] = round(float(sensor.Value))
+                        val = _safe_round(sensor.Value)
+                        if val is not None:
+                            data["gpu_load"] = val
                 elif sensor.SensorType == SensorType.Fan:
-                    if sensor.Value is not None:
-                        data["gpu_fan"] = round(float(sensor.Value))
+                    val = _safe_round(sensor.Value)
+                    if val is not None:
+                        data["gpu_fan"] = val
                 elif sensor.SensorType == SensorType.Control:
-                    if sensor.Value is not None:
-                        data["gpu_fan_pct"] = round(float(sensor.Value))
+                    val = _safe_round(sensor.Value)
+                    if val is not None:
+                        data["gpu_fan_pct"] = val
                 elif sensor.SensorType == SensorType.Clock:
-                    if "core" in sensor.Name.lower() and sensor.Value is not None:
-                        data["gpu_clock"] = round(float(sensor.Value))
+                    if "core" in sensor.Name.lower():
+                        val = _safe_round(sensor.Value)
+                        if val is not None:
+                            data["gpu_clock"] = val
                 elif sensor.SensorType == SensorType.SmallData:
                     name = sensor.Name.lower()
-                    if name == "gpu memory used" and sensor.Value is not None:
-                        gpu_mem_used = float(sensor.Value)
-                    elif name == "gpu memory total" and sensor.Value is not None:
-                        gpu_mem_total = float(sensor.Value)
+                    if name == "gpu memory used":
+                        val = _safe_round(sensor.Value)
+                        if val is not None:
+                            gpu_mem_used = float(sensor.Value)
+                    elif name == "gpu memory total":
+                        val = _safe_round(sensor.Value)
+                        if val is not None:
+                            gpu_mem_total = float(sensor.Value)
             if gpu_mem_used is not None and gpu_mem_total and gpu_mem_total > 0:
                 data["gpu_vram_pct"] = round(gpu_mem_used / gpu_mem_total * 100)
 
@@ -322,11 +366,13 @@ def read_sensors(computer, update_storage=True):
             disk_used = None
             for sensor in hw.Sensors:
                 if sensor.SensorType == SensorType.Temperature:
-                    if sensor.Value is not None and disk_temp is None:
-                        disk_temp = round(float(sensor.Value))
+                    if disk_temp is None:
+                        disk_temp = _safe_round(sensor.Value)
                 elif sensor.SensorType == SensorType.Load:
-                    if "used space" in sensor.Name.lower() and sensor.Value is not None:
-                        disk_used = round(float(sensor.Value))
+                    if "used space" in sensor.Name.lower():
+                        val = _safe_round(sensor.Value)
+                        if val is not None:
+                            disk_used = val
             # Always show storage devices — even without sensors
             name = re.sub(
                 r"^(Samsung|WDC|Western Digital|Kingston|Crucial|Seagate|Toshiba|SK Hynix|Intel|Micron|SanDisk|ADATA|Corsair)\s*(SSD\s*)?",
@@ -344,12 +390,14 @@ def read_sensors(computer, update_storage=True):
                 for sensor in sub.Sensors:
                     name = sensor.Name.lower()
                     if sensor.SensorType == SensorType.Fan:
-                        if sensor.Value is not None:
+                        val = _safe_round(sensor.Value)
+                        if val is not None:
                             if "cpu" in name and "optional" not in name:
-                                data["cpu_fan"] = round(float(sensor.Value))
+                                data["cpu_fan"] = val
                     elif sensor.SensorType == SensorType.Control:
-                        if sensor.Value is not None:
-                            control_sensors.append((name, round(float(sensor.Value))))
+                        val = _safe_round(sensor.Value)
+                        if val is not None:
+                            control_sensors.append((name, val))
                 # Match CPU fan percentage: prefer "cpu" in name, then "#1", then first control
                 if data["cpu_fan_pct"] is None:
                     for cname, cval in control_sensors:
@@ -368,8 +416,10 @@ def read_sensors(computer, update_storage=True):
         elif hw_type == HardwareType.Memory:
             for sensor in hw.Sensors:
                 if sensor.SensorType == SensorType.Load:
-                    if sensor.Name.lower() == "memory" and sensor.Value is not None:
-                        data["ram_pct"] = round(float(sensor.Value))
+                    if sensor.Name.lower() == "memory":
+                        val = _safe_round(sensor.Value)
+                        if val is not None:
+                            data["ram_pct"] = val
 
     if data["cpu_load"] is None:
         data["cpu_load"] = psutil.cpu_percent(interval=0)
