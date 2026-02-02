@@ -3,4 +3,4 @@ __pycache__/
 *.pyo
 overlay_config.json
 nul
-lib/
+lib/*.bak
