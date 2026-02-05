@@ -58,8 +58,8 @@ def download_and_extract():
         try:
             req = urllib.request.Request(info["url"], headers={"User-Agent": "Mozilla/5.0"})
             ssl_ctx = ssl.create_default_context()
-            resp = urllib.request.urlopen(req, timeout=60, context=ssl_ctx)
-            data = resp.read()
+            with urllib.request.urlopen(req, timeout=60, context=ssl_ctx) as resp:
+                data = resp.read()
         except Exception as e:
             print(f"  ERROR downloading {name}: {e}")
             sys.exit(1)
@@ -81,8 +81,12 @@ def download_and_extract():
                     if not _verify_hash(dll_data, out_name, info.get("sha256", {})):
                         sys.exit(1)
                     out_path = os.path.join(LIB_DIR, out_name)
-                    with open(out_path, "wb") as f:
-                        f.write(dll_data)
+                    try:
+                        with open(out_path, "wb") as f:
+                            f.write(dll_data)
+                    except OSError as e:
+                        print(f"  ERROR writing {out_name}: {e}")
+                        sys.exit(1)
                     print(f"  Extracted: {out_name}")
                     extracted = True
                 else:
@@ -95,15 +99,20 @@ def download_and_extract():
                             if not _verify_hash(dll_data, out_name, info.get("sha256", {})):
                                 sys.exit(1)
                             out_path = os.path.join(LIB_DIR, out_name)
-                            with open(out_path, "wb") as f:
-                                f.write(dll_data)
+                            try:
+                                with open(out_path, "wb") as f:
+                                    f.write(dll_data)
+                            except OSError as e:
+                                print(f"  ERROR writing {out_name}: {e}")
+                                sys.exit(1)
                             print(f"  Extracted: {out_name} (from {entry})")
                             extracted = True
                             break
 
             if not extracted:
-                print(f"  WARNING: Could not find DLLs for {name}")
+                print(f"  ERROR: Could not find DLLs for {name}")
                 print(f"  Available files in package: {[f for f in all_files if f.endswith('.dll')]}")
+                sys.exit(1)
 
     print("\nSetup complete! DLLs are in the 'lib' directory.")
     print("You can now run the overlay with: run_as_admin.bat")
