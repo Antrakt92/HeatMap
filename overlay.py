@@ -152,7 +152,7 @@ def is_autostart_enabled():
         return True
     except FileNotFoundError:
         return False
-    except Exception:
+    except OSError:
         log.warning("Failed to check autostart status", exc_info=True)
         return False
 
@@ -176,7 +176,7 @@ def enable_autostart():
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE) as key:
             winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, cmd)
         return True
-    except Exception:
+    except OSError:
         log.warning("Failed to enable autostart", exc_info=True)
         return False
 
@@ -186,7 +186,7 @@ def disable_autostart():
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE) as key:
             winreg.DeleteValue(key, AUTOSTART_NAME)
         return True
-    except Exception:
+    except OSError:
         log.warning("Failed to disable autostart", exc_info=True)
         return False
 
@@ -515,7 +515,7 @@ class OverlayApp:
         virt_h = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
         cx, cy = self.config.get("x", 50), self.config.get("y", 50)
         if cx < virt_x or cx >= virt_x + virt_w or cy < virt_y or cy >= virt_y + virt_h:
-            self.config["x"], self.config["y"] = 50, 50
+            self.config["x"], self.config["y"] = virt_x + 50, virt_y + 50
         self.running = True
         self._stop_event = threading.Event()
         self.sensor_data = {}
@@ -912,6 +912,11 @@ class OverlayApp:
             overlay_w = self.root.winfo_width()
         except tk.TclError:
             self._peek_animating = False
+            self.root.wm_attributes("-topmost", False)
+            if self._saved_pos:
+                self.root.geometry(f"+{self._saved_pos[0]}+{self._saved_pos[1]}")
+                self._saved_pos = None
+            self._schedule_embed(50)
             return
 
         # Keep the same Y position as on the desktop
@@ -942,6 +947,15 @@ class OverlayApp:
             self.root.after(10, lambda: self._animate_slide(current_x + step, target_x, y, step, callback))
         except tk.TclError:
             self._peek_animating = False
+            self.peek_visible = False
+            try:
+                self.root.wm_attributes("-topmost", False)
+                if self._saved_pos:
+                    self.root.geometry(f"+{self._saved_pos[0]}+{self._saved_pos[1]}")
+                    self._saved_pos = None
+                self._schedule_embed(50)
+            except tk.TclError:
+                pass
 
     def _peek_shown(self):
         """Called when slide-in animation finishes."""
@@ -1195,7 +1209,7 @@ class OverlayApp:
                         try:
                             self.computer.Close()
                         except Exception:
-                            pass
+                            log.debug("Failed to close hardware monitor", exc_info=True)
                         self.computer = init_hardware_monitor()
                         computer = self.computer
                     consecutive_errors = 0
@@ -1263,13 +1277,14 @@ class OverlayApp:
             self.rows["vram"].config(text="--", fg="#888888")
 
         # Auto-calibrate fan RPM max from observed values
+        _MAX_SANE_RPM = 10000  # reject glitchy outliers above this
         gpu_fan = data.get("gpu_fan")
         cpu_fan = data.get("cpu_fan")
         rpm_changed = False
-        if gpu_fan is not None and gpu_fan > self._GPU_FAN_MAX_RPM:
+        if gpu_fan is not None and gpu_fan > self._GPU_FAN_MAX_RPM and gpu_fan <= _MAX_SANE_RPM:
             self._GPU_FAN_MAX_RPM = gpu_fan
             rpm_changed = True
-        if cpu_fan is not None and cpu_fan > self._CPU_FAN_MAX_RPM:
+        if cpu_fan is not None and cpu_fan > self._CPU_FAN_MAX_RPM and cpu_fan <= _MAX_SANE_RPM:
             self._CPU_FAN_MAX_RPM = cpu_fan
             rpm_changed = True
         if rpm_changed:
@@ -1377,9 +1392,9 @@ class OverlayApp:
                 try:
                     self.root.after_cancel(after_id)
                 except Exception:
-                    pass
+                    log.debug("Failed to cancel after callback", exc_info=True)
         except Exception:
-            pass
+            log.debug("Failed to enumerate after callbacks", exc_info=True)
         # Save desktop position (not peek/animation position)
         if self._saved_pos:
             self.config["x"], self.config["y"] = self._saved_pos
@@ -1397,19 +1412,19 @@ class OverlayApp:
         try:
             self._trigger.destroy()
         except Exception:
-            pass
+            log.debug("Failed to destroy trigger window", exc_info=True)
         # Wait for sensor thread to finish before closing hardware monitor
         # _stop_event is already set above; join with timeout to avoid hanging
         try:
             self.sensor_thread.join(timeout=5)
         except Exception:
-            pass
+            log.debug("Failed to join sensor thread", exc_info=True)
         # Close hardware monitor to release sensor handles (sensor thread has stopped)
         if self.computer is not None:
             try:
                 self.computer.Close()
             except Exception:
-                pass
+                log.debug("Failed to close hardware monitor", exc_info=True)
             self.computer = None
         self.root.destroy()
 
