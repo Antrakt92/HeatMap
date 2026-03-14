@@ -14,12 +14,12 @@ LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
 
 PACKAGES = {
     "LibreHardwareMonitorLib": {
-        "url": "https://www.nuget.org/api/v2/package/LibreHardwareMonitorLib/0.9.4",
+        "url": "https://www.nuget.org/api/v2/package/LibreHardwareMonitorLib/0.9.5",
         "dlls": [
             "lib/net4/LibreHardwareMonitorLib.dll",
         ],
         "sha256": {
-            "LibreHardwareMonitorLib.dll": "a0f2728f1734c236a9d02d9e25a88bc4f8cb7bd1faff1770726beb7af06bf8dc",
+            "LibreHardwareMonitorLib.dll": "21673a431323cd350f31f7598d3e1a161bf9d0a4c030b76ef475441fbd30ac33",
         },
     },
     "HidSharp": {
@@ -28,7 +28,7 @@ PACKAGES = {
             "lib/net4/HidSharp.dll",
         ],
         "sha256": {
-            "HidSharp.dll": "8c58e5fba22acc751032dfe97ce633e4f8a4c96089749bf316d55283b36649c2",
+            "HidSharp.dll": "d86690efde30ea9179f669320f39148853793b743a98b531afeaf30598e22f54",
         },
     },
 }

@@ -10,6 +10,7 @@ import ctypes.wintypes
 import json
 import logging
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -131,9 +132,11 @@ def set_tool_window(hwnd):
     user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
 
 
-# --- Autostart management ---
-AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-AUTOSTART_NAME = "HWMonitorOverlay"
+# --- Autostart management (Task Scheduler — no UAC prompt at login) ---
+_CREATE_NO_WINDOW = 0x08000000
+AUTOSTART_TASK = "HWMonitorOverlay"
+# Legacy registry key — cleaned up when switching to Task Scheduler
+_LEGACY_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 
 def get_pythonw_path():
@@ -146,47 +149,64 @@ def get_pythonw_path():
 
 
 def is_autostart_enabled():
+    """Check if our Task Scheduler task exists."""
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_READ) as key:
-            winreg.QueryValueEx(key, AUTOSTART_NAME)
-        return True
-    except FileNotFoundError:
-        return False
-    except OSError:
+        result = subprocess.run(
+            ["schtasks", "/Query", "/TN", AUTOSTART_TASK],
+            capture_output=True, timeout=10, creationflags=_CREATE_NO_WINDOW,
+        )
+        return result.returncode == 0
+    except Exception:
         log.warning("Failed to check autostart status", exc_info=True)
         return False
 
 
 def enable_autostart():
-    """Add to Windows startup registry with admin elevation via run_as_admin.bat."""
+    """Create a Task Scheduler task that runs at logon with highest privileges (no UAC prompt)."""
     try:
-        bat_path = os.path.join(APP_DIR, "run_as_admin.bat")
-        if not os.path.exists(bat_path):
-            # Fallback: direct pythonw command (no elevation, sensors may fail)
-            pythonw = get_pythonw_path()
-            if '"' in pythonw or '"' in SCRIPT_PATH:
-                log.warning("Cannot set autostart: path contains double-quote characters")
-                return False
-            cmd = f'"{pythonw}" "{SCRIPT_PATH}"'
-        else:
-            if '"' in bat_path:
-                log.warning("Cannot set autostart: path contains double-quote characters")
-                return False
-            cmd = f'"{bat_path}"'
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE) as key:
-            winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, cmd)
+        pythonw = get_pythonw_path()
+        # Remove legacy registry entry if present
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _LEGACY_REG_KEY, 0, winreg.KEY_SET_VALUE) as key:
+                winreg.DeleteValue(key, AUTOSTART_TASK)
+        except OSError:
+            pass
+        # Create scheduled task: run at logon, highest privileges, no time limit
+        result = subprocess.run(
+            [
+                "schtasks", "/Create",
+                "/TN", AUTOSTART_TASK,
+                "/TR", f'"{pythonw}" "{SCRIPT_PATH}"',
+                "/SC", "ONLOGON",
+                "/RL", "HIGHEST",
+                "/F",  # force overwrite if exists
+            ],
+            capture_output=True, timeout=10, creationflags=_CREATE_NO_WINDOW,
+        )
+        if result.returncode != 0:
+            log.warning("schtasks /Create failed: %s", result.stderr.decode(errors="replace"))
+            return False
         return True
-    except OSError:
+    except Exception:
         log.warning("Failed to enable autostart", exc_info=True)
         return False
 
 
 def disable_autostart():
+    """Remove the Task Scheduler task."""
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE) as key:
-            winreg.DeleteValue(key, AUTOSTART_NAME)
-        return True
-    except OSError:
+        result = subprocess.run(
+            ["schtasks", "/Delete", "/TN", AUTOSTART_TASK, "/F"],
+            capture_output=True, timeout=10, creationflags=_CREATE_NO_WINDOW,
+        )
+        # Also clean up legacy registry entry
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _LEGACY_REG_KEY, 0, winreg.KEY_SET_VALUE) as key:
+                winreg.DeleteValue(key, AUTOSTART_TASK)
+        except OSError:
+            pass
+        return result.returncode == 0
+    except Exception:
         log.warning("Failed to disable autostart", exc_info=True)
         return False
 
@@ -272,7 +292,7 @@ def read_sensors(computer, update_storage=True):
     }
 
     if computer is None:
-        data["cpu_load"] = psutil.cpu_percent(interval=0)
+        data["cpu_load"] = round(psutil.cpu_percent(interval=0))
         vm = psutil.virtual_memory()
         data["ram_pct"] = round(vm.percent)
         data["ram_used_gb"] = round(vm.used / (1024 ** 3), 1)
@@ -422,7 +442,7 @@ def read_sensors(computer, update_storage=True):
                             data["ram_pct"] = val
 
     if data["cpu_load"] is None:
-        data["cpu_load"] = psutil.cpu_percent(interval=0)
+        data["cpu_load"] = round(psutil.cpu_percent(interval=0))
     # Always get RAM used/total from psutil (LibreHardwareMonitor only has %)
     vm = psutil.virtual_memory()
     if data["ram_pct"] is None:
@@ -1158,8 +1178,9 @@ class OverlayApp:
 
     def on_drag(self, event):
         self._dragged = True
-        x = self.root.winfo_x() + event.x - self._drag_x
-        y = self.root.winfo_y() + event.y - self._drag_y
+        # Use winfo_rootx/rooty for screen-absolute coords (correct when embedded in WorkerW)
+        x = self.root.winfo_rootx() + event.x - self._drag_x
+        y = self.root.winfo_rooty() + event.y - self._drag_y
         self.root.geometry(f"+{x}+{y}")
         if self.peek_visible or self._peek_animating:
             self._saved_pos = (x, y)
@@ -1257,7 +1278,7 @@ class OverlayApp:
             fg=temp_color(gpu_temp)
         )
         if gpu_clock is not None:
-            if gpu_clock >= 100:
+            if gpu_clock >= 1000:
                 ghz = gpu_clock / 1000
                 self.rows["gpu_clock"].config(text=f"{ghz:.2f}G", fg="#4ade80")
             else:

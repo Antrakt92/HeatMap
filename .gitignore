@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 *.pyo
+*.exe
 overlay_config.json
 nul
 lib/*.bak
+.claude/
