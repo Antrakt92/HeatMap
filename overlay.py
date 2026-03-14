@@ -27,6 +27,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("HeatMap")
 
+
 # --- Paths ---
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LIB_DIR = os.path.join(APP_DIR, "lib")
@@ -77,7 +78,10 @@ user32.GetAncestor.restype = ctypes.wintypes.HWND
 user32.GetClassName = user32.GetClassNameW
 user32.GetClassName.argtypes = [ctypes.wintypes.HWND, ctypes.c_wchar_p, ctypes.c_int]
 user32.GetClassName.restype = ctypes.c_int
-GA_ROOT = 2
+GA_PARENT = 1
+user32.GetWindowThreadProcessId.argtypes = [ctypes.wintypes.HWND, ctypes.POINTER(ctypes.wintypes.DWORD)]
+user32.GetWindowThreadProcessId.restype = ctypes.wintypes.DWORD
+_MY_PID = os.getpid()
 
 # Virtual screen metrics (all monitors combined)
 SM_XVIRTUALSCREEN = 76
@@ -232,9 +236,9 @@ def init_hardware_monitor():
 
         # Sanity check: verify kernel driver loaded (CPU temp should be non-zero)
         _has_cpu_temp = False
+        from LibreHardwareMonitor.Hardware import HardwareType, SensorType
         for hw in computer.Hardware:
             hw.Update()
-            from LibreHardwareMonitor.Hardware import HardwareType, SensorType
             if hw.HardwareType == HardwareType.Cpu:
                 for s in hw.Sensors:
                     if s.SensorType == SensorType.Temperature and s.Value is not None:
@@ -869,16 +873,18 @@ class OverlayApp:
         self.root.after(500, self._poll_trigger_visibility)
 
     def _is_desktop_at_cursor(self):
-        """Hide trigger momentarily and check if desktop is under the cursor."""
+        """Hide trigger and check if desktop is under the cursor.
+
+        Does NOT restore the trigger — _poll_trigger_visibility handles that.
+        Restoring (deiconify) here would fire a new <Enter> event while the
+        cursor is still over the trigger, creating an infinite event loop.
+        """
         pt = POINT()
         user32.GetCursorPos(ctypes.byref(pt))
-        # Temporarily hide trigger so WindowFromPoint sees what's beneath
         self._trigger.withdraw()
         self._trigger.update_idletasks()
+        self._trigger_hidden_for_desktop = True  # poll will restore if needed
         hwnd = user32.WindowFromPoint(pt)
-        # Restore trigger (unless poll already hid it)
-        if self.peek_enabled and not self.topmost and not self._trigger_hidden_for_desktop:
-            self._trigger.deiconify()
         return self._is_desktop_hwnd(hwnd)
 
     def _is_desktop_at_widget(self):
@@ -893,13 +899,30 @@ class OverlayApp:
         """Check if the given HWND belongs to a desktop-layer window."""
         if not hwnd:
             return True
-        root_hwnd = user32.GetAncestor(hwnd, GA_ROOT)
-        if not root_hwnd:
-            root_hwnd = hwnd
+        # Any window from our own process IS the overlay widget — treat as desktop.
+        # (trigger strip is always withdrawn before WindowFromPoint calls,
+        #  so it can't be returned here)
+        # Works regardless of embedded state (HWND_BOTTOM fallback also counts).
+        pid = ctypes.wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == _MY_PID:
+            return True
+        # Check window class for actual desktop windows
         class_name = ctypes.create_unicode_buffer(256)
-        user32.GetClassName(root_hwnd, class_name, 256)
-        name = class_name.value
-        return name in ("Progman", "WorkerW", "")
+        user32.GetClassName(hwnd, class_name, 256)
+        if class_name.value in ("Progman", "WorkerW"):
+            return True
+        # Walk parent chain as fallback
+        current = hwnd
+        for _ in range(20):
+            parent = user32.GetAncestor(current, GA_PARENT)
+            if not parent or parent == current:
+                break
+            current = parent
+            user32.GetClassName(current, class_name, 256)
+            if class_name.value in ("Progman", "WorkerW"):
+                return True
+        return False
 
     def _peek_show(self):
         """Slide the overlay in from the right edge."""
