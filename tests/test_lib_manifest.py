@@ -1,8 +1,10 @@
 import hashlib
+import io
 import json
 import os
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 
 import setup
@@ -162,6 +164,88 @@ class LibManifestTests(unittest.TestCase):
         ):
             self.assertEqual(setup.main([]), 1)
 
+    def test_default_main_returns_failure_when_download_fails(self):
+        with (
+            mock.patch.object(setup, "download_and_extract", side_effect=setup.SetupError("network down")),
+            mock.patch.object(setup, "verify_lib_manifest") as verify,
+            mock.patch("builtins.print") as printed,
+        ):
+            self.assertEqual(setup.main([]), 1)
+
+        verify.assert_not_called()
+        self.assertIn("network down", printed.call_args.args[0])
+
+    def test_download_and_extract_raises_on_download_failure(self):
+        with self._patched_download_setup():
+            with (
+                mock.patch.object(setup.urllib.request, "urlopen", side_effect=OSError("network down")),
+                mock.patch("builtins.print"),
+            ):
+                with self.assertRaisesRegex(setup.SetupError, "network down"):
+                    setup.download_and_extract()
+
+    def test_download_and_extract_raises_on_bad_zip(self):
+        with self._patched_download_setup(response_data=b"not a zip"):
+            with mock.patch("builtins.print"):
+                with self.assertRaisesRegex(setup.SetupError, "not a valid zip file"):
+                    setup.download_and_extract()
+
+    def test_download_and_extract_raises_on_missing_exact_package_path(self):
+        zip_data = _zip_bytes({"other/Test.dll": b"good"})
+
+        with self._patched_download_setup(response_data=zip_data):
+            with mock.patch("builtins.print"):
+                with self.assertRaisesRegex(setup.SetupError, "could not find exact DLL path"):
+                    setup.download_and_extract()
+
+    def test_download_and_extract_raises_on_hash_mismatch(self):
+        zip_data = _zip_bytes({TEST_PACKAGE_DLL_PATH: b"bad"})
+
+        with self._patched_download_setup(response_data=zip_data):
+            with mock.patch("builtins.print"):
+                with self.assertRaisesRegex(setup.SetupError, "hash verification failed"):
+                    setup.download_and_extract()
+
+    def test_download_and_extract_raises_on_write_failure(self):
+        zip_data = _zip_bytes({TEST_PACKAGE_DLL_PATH: TEST_DLL_DATA})
+
+        with self._patched_download_setup(response_data=zip_data):
+            with (
+                mock.patch("builtins.open", side_effect=OSError("denied")),
+                mock.patch("builtins.print"),
+            ):
+                with self.assertRaisesRegex(setup.SetupError, "denied"):
+                    setup.download_and_extract()
+
+    def test_download_and_extract_writes_verified_dll(self):
+        zip_data = _zip_bytes({TEST_PACKAGE_DLL_PATH: TEST_DLL_DATA})
+
+        with self._patched_download_setup(response_data=zip_data) as lib_dir:
+            with mock.patch("builtins.print"):
+                setup.download_and_extract()
+
+            with open(os.path.join(lib_dir, TEST_DLL_NAME), "rb") as f:
+                self.assertEqual(f.read(), TEST_DLL_DATA)
+
+    def _patched_download_setup(self, response_data=None):
+        tmpdir = tempfile.TemporaryDirectory()
+        package = {
+            "url": "https://example.invalid/test.nupkg",
+            "dlls": [TEST_PACKAGE_DLL_PATH],
+            "sha256": {TEST_DLL_NAME: hashlib.sha256(TEST_DLL_DATA).hexdigest()},
+        }
+        patches = [
+            mock.patch.object(setup, "LIB_DIR", tmpdir.name),
+            mock.patch.object(setup, "PACKAGES", {"TestPackage": package}),
+        ]
+        if response_data is not None:
+            patches.append(mock.patch.object(
+                setup.urllib.request,
+                "urlopen",
+                return_value=_FakeResponse(response_data),
+            ))
+        return _PatchContext(tmpdir, patches)
+
 
 def _entry(file_path, size=3, sha256=None, source=None):
     return {
@@ -179,6 +263,50 @@ def _write_manifest(directory, entries):
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump({"manifest_version": setup.MANIFEST_VERSION, "files": entries}, f)
     return manifest_path
+
+
+TEST_DLL_NAME = "Test.dll"
+TEST_PACKAGE_DLL_PATH = f"lib/net35/{TEST_DLL_NAME}"
+TEST_DLL_DATA = b"good"
+
+
+def _zip_bytes(files):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for path, data in files.items():
+            zf.writestr(path, data)
+    return buf.getvalue()
+
+
+class _FakeResponse:
+    def __init__(self, data):
+        self._data = data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return self._data
+
+
+class _PatchContext:
+    def __init__(self, tmpdir, patches):
+        self._tmpdir = tmpdir
+        self._patches = patches
+
+    def __enter__(self):
+        self._tmpdir.__enter__()
+        for patch in self._patches:
+            patch.__enter__()
+        return self._tmpdir.name
+
+    def __exit__(self, exc_type, exc, tb):
+        for patch in reversed(self._patches):
+            patch.__exit__(exc_type, exc, tb)
+        return self._tmpdir.__exit__(exc_type, exc, tb)
 
 
 if __name__ == "__main__":

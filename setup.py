@@ -22,6 +22,11 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MANIFEST_DLL_RE = re.compile(r"^lib/[^/\\]+\.dll$")
 _SOURCE_TYPES = {"nuget", "bundled-unknown"}
 
+
+class SetupError(Exception):
+    """Recoverable setup failure that should become a non-zero CLI exit code."""
+
+
 PACKAGES = {
     "LibreHardwareMonitorLib": {
         "version": "0.9.5",
@@ -207,35 +212,33 @@ def download_and_extract():
             with urllib.request.urlopen(req, timeout=60, context=ssl_ctx) as resp:
                 data = resp.read()
         except Exception as e:
-            print(f"  ERROR downloading {name}: {e}")
-            sys.exit(1)
+            raise SetupError(f"error downloading {name}: {e}") from e
 
         print(f"  Extracting DLLs...")
         try:
             zf = zipfile.ZipFile(io.BytesIO(data))
         except zipfile.BadZipFile:
-            print(f"  ERROR: Downloaded package for {name} is not a valid zip file")
-            sys.exit(1)
+            raise SetupError(f"downloaded package for {name} is not a valid zip file") from None
         with zf:
             all_files = zf.namelist()
             for dll_path in info["dlls"]:
                 if dll_path not in all_files:
-                    print(f"  ERROR: Could not find exact DLL path for {name}: {dll_path}")
                     candidates = _dll_candidates(all_files, dll_path)
-                    print(f"  Available matching DLLs: {candidates}")
-                    sys.exit(1)
+                    raise SetupError(
+                        f"could not find exact DLL path for {name}: {dll_path}. "
+                        f"Available matching DLLs: {candidates}"
+                    )
 
                 dll_data = zf.read(dll_path)
                 out_name = os.path.basename(dll_path)
                 if not _verify_hash(dll_data, out_name, info.get("sha256", {})):
-                    sys.exit(1)
+                    raise SetupError(f"hash verification failed for {out_name}")
                 out_path = os.path.join(LIB_DIR, out_name)
                 try:
                     with open(out_path, "wb") as f:
                         f.write(dll_data)
                 except OSError as e:
-                    print(f"  ERROR writing {out_name}: {e}")
-                    sys.exit(1)
+                    raise SetupError(f"error writing {out_name}: {e}") from e
                 print(f"  Extracted: {out_name}")
 
 
@@ -249,7 +252,11 @@ def main(argv=None):
         _print_manifest_result(ok, messages)
         return 0 if ok else 1
 
-    download_and_extract()
+    try:
+        download_and_extract()
+    except SetupError as e:
+        print(f"Setup failed: {e}")
+        return 1
     ok, messages = verify_lib_manifest()
     _print_manifest_result(ok, messages)
     if not ok:
