@@ -1,10 +1,11 @@
 import json
 import math
 import os
+import sys
 import tempfile
 import threading
 import unittest
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest import mock
 
 import overlay
@@ -258,6 +259,111 @@ class OverlayHelperTests(unittest.TestCase):
 
         self.assertEqual(app.menu_labels, [("autostart", "Autostart: ON")])
 
+    def test_read_sensors_without_computer_returns_psutil_fallback(self):
+        with (
+            mock.patch.object(overlay.psutil, "cpu_percent", return_value=42.4),
+            mock.patch.object(overlay.psutil, "virtual_memory", return_value=_memory(percent=63.6, used_gb=2, total_gb=8)),
+        ):
+            data = overlay.read_sensors(None)
+
+        self.assertEqual(data["cpu_load"], 42)
+        self.assertEqual(data["ram_pct"], 64)
+        self.assertEqual(data["ram_used_gb"], 2.0)
+        self.assertEqual(data["ram_total_gb"], 8.0)
+        self.assertEqual(data["disks"], [])
+
+    def test_read_sensors_skips_failing_hardware_and_keeps_partial_sample(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        bad_cpu = _FakeHardware("Bad CPU", HardwareType.Cpu, update_error=RuntimeError("driver timeout"))
+        memory = _FakeHardware(
+            "Memory",
+            HardwareType.Memory,
+            sensors=[_FakeSensor("Memory", SensorType.Load, 77)],
+        )
+        computer = SimpleNamespace(Hardware=[bad_cpu, memory])
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.psutil, "cpu_percent", return_value=22),
+            mock.patch.object(overlay.psutil, "virtual_memory", return_value=_memory(percent=55, used_gb=3, total_gb=16)),
+            self.assertLogs("HeatMap", level="WARNING") as logs,
+        ):
+            data = overlay.read_sensors(computer)
+
+        self.assertEqual(data["cpu_load"], 22)
+        self.assertEqual(data["ram_pct"], 77)
+        self.assertEqual(data["ram_used_gb"], 3.0)
+        self.assertEqual(data["ram_total_gb"], 16.0)
+        self.assertTrue(any("Skipping hardware block" in message and "Bad CPU" in message for message in logs.output))
+
+    def test_read_sensors_handles_hardware_enumeration_failure(self):
+        modules, _, _ = _fake_lhm_modules()
+        computer = _FailingHardwareComputer(RuntimeError("enumeration failed"))
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.psutil, "cpu_percent", return_value=19),
+            mock.patch.object(overlay.psutil, "virtual_memory", return_value=_memory(percent=31, used_gb=4, total_gb=32)),
+            self.assertLogs("HeatMap", level="WARNING") as logs,
+        ):
+            data = overlay.read_sensors(computer)
+
+        self.assertEqual(data["cpu_load"], 19)
+        self.assertEqual(data["ram_pct"], 31)
+        self.assertEqual(data["ram_used_gb"], 4.0)
+        self.assertEqual(data["ram_total_gb"], 32.0)
+        self.assertEqual(data["disks"], [])
+        self.assertTrue(any("Failed to enumerate" in message for message in logs.output))
+
+    def test_read_sensors_storage_skip_update_reads_cached_values(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        storage = _FakeHardware(
+            "Samsung SSD 980",
+            HardwareType.Storage,
+            sensors=[
+                _FakeSensor("Temperature", SensorType.Temperature, 41),
+                _FakeSensor("Used Space", SensorType.Load, 68),
+            ],
+        )
+        computer = SimpleNamespace(Hardware=[storage])
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.psutil, "cpu_percent", return_value=11),
+            mock.patch.object(overlay.psutil, "virtual_memory", return_value=_memory(percent=22, used_gb=5, total_gb=10)),
+        ):
+            data = overlay.read_sensors(computer, update_storage=False)
+
+        self.assertEqual(storage.update_calls, 0)
+        self.assertEqual(data["disks"], [{"name": "980", "temp": 41, "used_pct": 68}])
+        self.assertEqual(data["cpu_load"], 11)
+        self.assertEqual(data["ram_pct"], 22)
+
+    def test_read_sensors_logs_and_skips_sensor_value_failure(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        bad_gpu = _FakeHardware(
+            "Bad GPU",
+            HardwareType.GpuNvidia,
+            sensors=[_FakeSensor("GPU Core", SensorType.Temperature, RuntimeError("bad value"))],
+        )
+        cpu = _FakeHardware(
+            "CPU",
+            HardwareType.Cpu,
+            sensors=[_FakeSensor("CPU Total", SensorType.Load, 35)],
+        )
+        computer = SimpleNamespace(Hardware=[bad_gpu, cpu])
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.psutil, "virtual_memory", return_value=_memory(percent=44, used_gb=6, total_gb=12)),
+            self.assertLogs("HeatMap", level="WARNING") as logs,
+        ):
+            data = overlay.read_sensors(computer)
+
+        self.assertIsNone(data["gpu_temp"])
+        self.assertEqual(data["cpu_load"], 35)
+        self.assertTrue(any("Bad GPU" in message for message in logs.output))
+
 
 class _FakeLabel:
     def __init__(self):
@@ -291,8 +397,81 @@ class _FakeRoot:
         self.after_calls.append((delay, callback))
 
 
+class _FakeSensor:
+    def __init__(self, name, sensor_type, value):
+        self.Name = name
+        self.SensorType = sensor_type
+        self._value = value
+
+    @property
+    def Value(self):
+        if isinstance(self._value, Exception):
+            raise self._value
+        return self._value
+
+
+class _FakeHardware:
+    def __init__(self, name, hardware_type, sensors=None, sub_hardware=None, update_error=None):
+        self.Name = name
+        self.HardwareType = hardware_type
+        self.Sensors = sensors or []
+        self.SubHardware = sub_hardware or []
+        self._update_error = update_error
+        self.update_calls = 0
+
+    def Update(self):
+        self.update_calls += 1
+        if self._update_error is not None:
+            raise self._update_error
+
+
+class _FailingHardwareComputer:
+    def __init__(self, error):
+        self._error = error
+
+    @property
+    def Hardware(self):
+        raise self._error
+
+
 def _completed(returncode=0, stdout=b"", stderr=b""):
     return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+def _fake_lhm_modules():
+    hardware_type = SimpleNamespace(
+        Cpu="Cpu",
+        GpuAmd="GpuAmd",
+        GpuNvidia="GpuNvidia",
+        GpuIntel="GpuIntel",
+        Storage="Storage",
+        Motherboard="Motherboard",
+        Memory="Memory",
+    )
+    sensor_type = SimpleNamespace(
+        Temperature="Temperature",
+        Load="Load",
+        Clock="Clock",
+        Fan="Fan",
+        Control="Control",
+        SmallData="SmallData",
+    )
+    root_module = ModuleType("LibreHardwareMonitor")
+    hardware_module = ModuleType("LibreHardwareMonitor.Hardware")
+    hardware_module.HardwareType = hardware_type
+    hardware_module.SensorType = sensor_type
+    return {
+        "LibreHardwareMonitor": root_module,
+        "LibreHardwareMonitor.Hardware": hardware_module,
+    }, hardware_type, sensor_type
+
+
+def _memory(percent, used_gb, total_gb):
+    return SimpleNamespace(
+        percent=percent,
+        used=used_gb * 1024 ** 3,
+        total=total_gb * 1024 ** 3,
+    )
 
 
 def _task_xml(command, arguments):
