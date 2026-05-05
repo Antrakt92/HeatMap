@@ -9,7 +9,9 @@ import math
 import re
 import ctypes.wintypes
 import json
+import locale
 import logging
+import logging.handlers
 import os
 import subprocess
 import sys
@@ -18,15 +20,9 @@ import time
 import tkinter as tk
 import winreg
 import winsound
+import xml.etree.ElementTree as ET
 
 import psutil
-
-logging.basicConfig(
-    level=logging.WARNING,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
-log = logging.getLogger("HeatMap")
 
 
 # --- Paths ---
@@ -35,6 +31,48 @@ LIB_DIR = os.path.join(APP_DIR, "lib")
 CONFIG_PATH = os.path.join(APP_DIR, "overlay_config.json")
 SCRIPT_PATH = os.path.join(APP_DIR, "overlay.py")
 REQUIRED_DLLS = ("LibreHardwareMonitorLib.dll", "HidSharp.dll")
+
+
+_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+_LOG_DATEFMT = "%H:%M:%S"
+
+
+def _get_log_path(env=None, app_dir=APP_DIR):
+    env = os.environ if env is None else env
+    local_appdata = env.get("LOCALAPPDATA")
+    if local_appdata:
+        return os.path.join(local_appdata, "HeatMap", "HeatMap.log")
+    return os.path.join(app_dir, "HeatMap.log")
+
+
+log = logging.getLogger("HeatMap")
+
+
+def _configure_logging():
+    logging.basicConfig(level=logging.WARNING, format=_LOG_FORMAT, datefmt=_LOG_DATEFMT)
+    log.setLevel(logging.WARNING)
+
+    log_path = _get_log_path()
+    abs_log_path = os.path.abspath(log_path)
+    for handler in log.handlers:
+        if getattr(handler, "_heatmap_log_path", None) == abs_log_path:
+            return log_path
+
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(
+            log_path, maxBytes=1024 * 1024, backupCount=3, encoding="utf-8"
+        )
+        handler.setLevel(logging.WARNING)
+        handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT))
+        handler._heatmap_log_path = abs_log_path
+        log.addHandler(handler)
+    except Exception:
+        log.warning("Failed to configure file logging at %s", log_path, exc_info=True)
+    return log_path
+
+
+LOG_PATH = _configure_logging()
 
 # --- Windows API constants ---
 GWL_EXSTYLE = -20
@@ -135,11 +173,19 @@ def set_tool_window(hwnd):
     user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
 
 
+def _show_error_message(title, message):
+    try:
+        ctypes.windll.user32.MessageBoxW(0, message, title, 0x10)
+    except Exception:
+        log.warning("Failed to show error message: %s - %s", title, message, exc_info=True)
+
+
 # --- Autostart management (Task Scheduler — no UAC prompt at login) ---
 _CREATE_NO_WINDOW = 0x08000000
 AUTOSTART_TASK = "HWMonitorOverlay"
 # Legacy registry key — cleaned up when switching to Task Scheduler
 _LEGACY_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_TASK_XML_DECL_RE = re.compile(r"^\s*<\?xml[^>]*\?>", re.IGNORECASE)
 
 
 def get_pythonw_path():
@@ -151,67 +197,191 @@ def get_pythonw_path():
     return sys.executable
 
 
-def is_autostart_enabled():
-    """Check if our Task Scheduler task exists."""
+def _strip_outer_quotes(value):
+    value = (value or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        return value[1:-1]
+    return value
+
+
+def _normalize_path_for_compare(path):
+    return os.path.normcase(os.path.abspath(_strip_outer_quotes(path)))
+
+
+def _expected_autostart_action(pythonw_path=None, script_path=None):
+    return pythonw_path or get_pythonw_path(), script_path or SCRIPT_PATH
+
+
+def _format_autostart_task_run(command_path, script_path):
+    return f'"{command_path}" "{script_path}"'
+
+
+def _decode_output(data):
+    if not data:
+        return ""
+    if isinstance(data, str):
+        return data
+    for encoding in (locale.getpreferredencoding(False), "utf-8", "utf-16"):
+        try:
+            return data.decode(encoding)
+        except UnicodeError:
+            continue
+    return data.decode(errors="replace")
+
+
+def _completed_process_message(result):
+    stdout = _decode_output(getattr(result, "stdout", b"")).strip()
+    stderr = _decode_output(getattr(result, "stderr", b"")).strip()
+    detail = stderr or stdout or "no output"
+    return f"exit code {result.returncode}: {detail}"
+
+
+def _run_schtasks(args):
     try:
-        result = subprocess.run(
-            ["schtasks", "/Query", "/TN", AUTOSTART_TASK],
+        return subprocess.run(
+            ["schtasks", *args],
             capture_output=True, timeout=10, creationflags=_CREATE_NO_WINDOW,
-        )
-        return result.returncode == 0
-    except Exception:
-        log.warning("Failed to check autostart status", exc_info=True)
+        ), None
+    except Exception as e:
+        return None, str(e)
+
+
+def _decode_task_xml(xml_data):
+    if isinstance(xml_data, str):
+        text = xml_data
+    else:
+        last_error = None
+        if b"\x00" in xml_data[:120]:
+            encodings = ("utf-16", "utf-8-sig", locale.getpreferredencoding(False))
+        else:
+            encodings = ("utf-8-sig", locale.getpreferredencoding(False), "utf-16")
+        for encoding in encodings:
+            try:
+                text = xml_data.decode(encoding)
+                break
+            except UnicodeError as e:
+                last_error = e
+        else:
+            raise ValueError(f"could not decode task XML: {last_error}")
+    return _TASK_XML_DECL_RE.sub("", text, count=1).lstrip("\ufeff")
+
+
+def _local_xml_name(tag):
+    return tag.rsplit("}", 1)[-1]
+
+
+def _parse_autostart_task_xml(xml_data):
+    try:
+        root = ET.fromstring(_decode_task_xml(xml_data))
+    except Exception as e:
+        raise ValueError(f"could not parse task XML: {e}") from e
+
+    command = None
+    arguments = None
+    for elem in root.iter():
+        name = _local_xml_name(elem.tag)
+        if name == "Command" and command is None:
+            command = elem.text or ""
+        elif name == "Arguments" and arguments is None:
+            arguments = elem.text or ""
+    if command is None:
+        raise ValueError("task XML does not contain Exec/Command")
+    return command, arguments or ""
+
+
+def _autostart_action_matches(command, arguments, pythonw_path=None, script_path=None):
+    expected_command, expected_script = _expected_autostart_action(pythonw_path, script_path)
+    if not command or not arguments:
         return False
+    return (
+        _normalize_path_for_compare(command) == _normalize_path_for_compare(expected_command)
+        and _normalize_path_for_compare(arguments) == _normalize_path_for_compare(expected_script)
+    )
+
+
+def _query_autostart_task_action():
+    result, error = _run_schtasks(["/Query", "/TN", AUTOSTART_TASK, "/XML"])
+    if error:
+        return None, None, f"failed to query task: {error}"
+    if result.returncode != 0:
+        return None, None, _completed_process_message(result)
+    try:
+        command, arguments = _parse_autostart_task_xml(result.stdout)
+    except ValueError as e:
+        return None, None, str(e)
+    return command, arguments, None
+
+
+def is_autostart_enabled():
+    """Check if our Task Scheduler task exists and points at this checkout."""
+    command, arguments, error = _query_autostart_task_action()
+    if error:
+        log.debug("Autostart task is not enabled for current app: %s", error)
+        return False
+    matches = _autostart_action_matches(command, arguments)
+    if not matches:
+        log.warning(
+            "Autostart task exists but points elsewhere: command=%r arguments=%r",
+            command, arguments,
+        )
+    return matches
+
+
+def _delete_legacy_autostart_value():
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _LEGACY_REG_KEY, 0, winreg.KEY_SET_VALUE) as key:
+            try:
+                winreg.DeleteValue(key, AUTOSTART_TASK)
+            except FileNotFoundError:
+                return True, "legacy registry entry not present"
+    except FileNotFoundError:
+        return True, "legacy registry key not present"
+    except OSError as e:
+        return False, f"failed to remove legacy registry entry: {e}"
+    return True, "legacy registry entry removed"
 
 
 def enable_autostart():
     """Create a Task Scheduler task that runs at logon with highest privileges (no UAC prompt)."""
-    try:
-        pythonw = get_pythonw_path()
-        # Remove legacy registry entry if present
-        try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _LEGACY_REG_KEY, 0, winreg.KEY_SET_VALUE) as key:
-                winreg.DeleteValue(key, AUTOSTART_TASK)
-        except OSError:
-            pass
-        # Create scheduled task: run at logon, highest privileges, no time limit
-        result = subprocess.run(
-            [
-                "schtasks", "/Create",
-                "/TN", AUTOSTART_TASK,
-                "/TR", f'"{pythonw}" "{SCRIPT_PATH}"',
-                "/SC", "ONLOGON",
-                "/RL", "HIGHEST",
-                "/F",  # force overwrite if exists
-            ],
-            capture_output=True, timeout=10, creationflags=_CREATE_NO_WINDOW,
-        )
-        if result.returncode != 0:
-            log.warning("schtasks /Create failed: %s", result.stderr.decode(errors="replace"))
-            return False
-        return True
-    except Exception:
-        log.warning("Failed to enable autostart", exc_info=True)
-        return False
+    pythonw, script_path = _expected_autostart_action()
+    result, error = _run_schtasks([
+        "/Create",
+        "/TN", AUTOSTART_TASK,
+        "/TR", _format_autostart_task_run(pythonw, script_path),
+        "/SC", "ONLOGON",
+        "/RL", "HIGHEST",
+        "/F",
+    ])
+    if error:
+        log.warning("Failed to enable autostart: %s", error)
+        return False, error
+    if result.returncode != 0:
+        message = _completed_process_message(result)
+        log.warning("schtasks /Create failed: %s", message)
+        return False, message
+
+    ok, message = _delete_legacy_autostart_value()
+    if not ok:
+        log.warning(message)
+    return True, "Autostart enabled"
 
 
 def disable_autostart():
     """Remove the Task Scheduler task."""
-    try:
-        result = subprocess.run(
-            ["schtasks", "/Delete", "/TN", AUTOSTART_TASK, "/F"],
-            capture_output=True, timeout=10, creationflags=_CREATE_NO_WINDOW,
-        )
-        # Also clean up legacy registry entry
-        try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _LEGACY_REG_KEY, 0, winreg.KEY_SET_VALUE) as key:
-                winreg.DeleteValue(key, AUTOSTART_TASK)
-        except OSError:
-            pass
-        return result.returncode == 0
-    except Exception:
-        log.warning("Failed to disable autostart", exc_info=True)
-        return False
+    result, error = _run_schtasks(["/Delete", "/TN", AUTOSTART_TASK, "/F"])
+    if error:
+        log.warning("Failed to disable autostart: %s", error)
+        return False, error
+    if result.returncode != 0:
+        message = _completed_process_message(result)
+        log.warning("schtasks /Delete failed: %s", message)
+        return False, message
+
+    ok, message = _delete_legacy_autostart_value()
+    if not ok:
+        log.warning(message)
+        return False, message
+    return True, "Autostart disabled"
 
 
 # --- Load LibreHardwareMonitor ---
@@ -1157,9 +1327,17 @@ class OverlayApp:
 
     def toggle_autostart(self):
         if is_autostart_enabled():
-            disable_autostart()
+            ok, message = disable_autostart()
         else:
-            enable_autostart()
+            ok, message = enable_autostart()
+        if not ok:
+            log.warning("Autostart toggle failed: %s", message)
+            self._set_menu_label("autostart", "Autostart: ERROR")
+            _show_error_message(
+                "Autostart",
+                f"{message}\n\nSee log for details:\n{LOG_PATH}",
+            )
+            return
         self._set_menu_label("autostart",
             "Autostart: ON" if is_autostart_enabled() else "Autostart: OFF"
         )
@@ -1572,9 +1750,9 @@ def main():
     missing_dlls = _missing_required_dlls()
     if missing_dlls:
         missing = "\n".join(f"- {dll_name}" for dll_name in missing_dlls)
-        ctypes.windll.user32.MessageBoxW(
-            0, f"Required DLLs not found:\n{missing}\n\nRun: python setup.py",
-            "HW Monitor", 0x10
+        _show_error_message(
+            "HW Monitor",
+            f"Required DLLs not found:\n{missing}\n\nRun: python setup.py",
         )
         sys.exit(1)
 
