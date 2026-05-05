@@ -59,10 +59,68 @@ class OverlayHelperTests(unittest.TestCase):
             "cpu_fan_max_rpm": 2222,
         }
 
-        overlay.save_config(cfg)
+        ok, message = overlay.save_config(cfg)
 
+        self.assertTrue(ok)
+        self.assertEqual(message, "Config saved")
         self.assertFalse(os.path.exists(f"{overlay.CONFIG_PATH}.tmp"))
         self.assertEqual(overlay.load_config(), cfg)
+
+    def test_load_config_result_missing_file_is_not_warning(self):
+        cfg, message = overlay.load_config_result()
+
+        self.assertEqual(cfg, {
+            "x": 50,
+            "y": 50,
+            "peek_enabled": True,
+            "alerts_enabled": True,
+            "gpu_fan_max_rpm": 2200,
+            "cpu_fan_max_rpm": 1800,
+        })
+        self.assertIsNone(message)
+
+    def test_load_config_result_invalid_json_returns_warning(self):
+        with open(overlay.CONFIG_PATH, "w", encoding="utf-8") as f:
+            f.write("{broken")
+
+        with self.assertLogs("HeatMap", level="WARNING"):
+            cfg, message = overlay.load_config_result()
+
+        self.assertEqual(cfg["x"], 50)
+        self.assertIn("Failed to load config", message)
+
+    def test_load_config_result_non_dict_returns_warning(self):
+        with open(overlay.CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(["not", "dict"], f)
+
+        with self.assertLogs("HeatMap", level="WARNING"):
+            cfg, message = overlay.load_config_result()
+
+        self.assertEqual(cfg["x"], 50)
+        self.assertEqual(message, "Invalid config format")
+
+    def test_load_config_result_read_failure_returns_warning(self):
+        open(overlay.CONFIG_PATH, "w", encoding="utf-8").close()
+
+        with (
+            mock.patch("builtins.open", side_effect=OSError("denied")),
+            self.assertLogs("HeatMap", level="WARNING"),
+        ):
+            cfg, message = overlay.load_config_result()
+
+        self.assertEqual(cfg["x"], 50)
+        self.assertIn("denied", message)
+
+    def test_save_config_failure_returns_message_and_removes_tmp(self):
+        with (
+            mock.patch("builtins.open", side_effect=OSError("denied")),
+            self.assertLogs("HeatMap", level="WARNING"),
+        ):
+            ok, message = overlay.save_config({"x": 1})
+
+        self.assertFalse(ok)
+        self.assertIn("denied", message)
+        self.assertFalse(os.path.exists(f"{overlay.CONFIG_PATH}.tmp"))
 
     def test_disk_temperature_color_matches_critical_alert_threshold(self):
         self.assertEqual(overlay.disk_temp_color(None), "#888888")
@@ -271,6 +329,7 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["ram_used_gb"], 2.0)
         self.assertEqual(data["ram_total_gb"], 8.0)
         self.assertEqual(data["disks"], [])
+        self.assertEqual(data[overlay.SENSOR_STATUS_KEY], overlay.SENSOR_STATUS_PSUTIL_FALLBACK)
 
     def test_read_sensors_skips_failing_hardware_and_keeps_partial_sample(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
@@ -294,6 +353,7 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["ram_pct"], 77)
         self.assertEqual(data["ram_used_gb"], 3.0)
         self.assertEqual(data["ram_total_gb"], 16.0)
+        self.assertEqual(data[overlay.SENSOR_STATUS_KEY], overlay.SENSOR_STATUS_PARTIAL)
         self.assertTrue(any("Skipping hardware block" in message and "Bad CPU" in message for message in logs.output))
 
     def test_read_sensors_handles_hardware_enumeration_failure(self):
@@ -313,7 +373,23 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["ram_used_gb"], 4.0)
         self.assertEqual(data["ram_total_gb"], 32.0)
         self.assertEqual(data["disks"], [])
+        self.assertEqual(data[overlay.SENSOR_STATUS_KEY], overlay.SENSOR_STATUS_PSUTIL_FALLBACK)
         self.assertTrue(any("Failed to enumerate" in message for message in logs.output))
+
+    def test_read_sensors_lhm_import_failure_marks_psutil_fallback(self):
+        computer = SimpleNamespace(Hardware=[])
+
+        with (
+            mock.patch.dict(sys.modules, {"LibreHardwareMonitor.Hardware": None}),
+            mock.patch.object(overlay.psutil, "cpu_percent", return_value=15),
+            mock.patch.object(overlay.psutil, "virtual_memory", return_value=_memory(percent=25, used_gb=2, total_gb=4)),
+            self.assertLogs("HeatMap", level="WARNING"),
+        ):
+            data = overlay.read_sensors(computer)
+
+        self.assertEqual(data["cpu_load"], 15)
+        self.assertEqual(data["ram_pct"], 25)
+        self.assertEqual(data[overlay.SENSOR_STATUS_KEY], overlay.SENSOR_STATUS_PSUTIL_FALLBACK)
 
     def test_read_sensors_storage_skip_update_reads_cached_values(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
@@ -364,13 +440,123 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["cpu_load"], 35)
         self.assertTrue(any("Bad GPU" in message for message in logs.output))
 
+    def test_runtime_status_hides_ok_and_config_overrides_sensor_warning(self):
+        app = _status_app()
+
+        app._set_sensor_status(overlay.SENSOR_STATUS_PARTIAL)
+        self.assertTrue(app.status_label.packed)
+        self.assertEqual(app.status_label.options["text"], "Sensors: partial data")
+        self.assertEqual(app.status_label.options["fg"], "#facc15")
+
+        app._set_config_status("failed")
+        self.assertTrue(app.status_label.packed)
+        self.assertEqual(app.status_label.options["text"], "Config save failed")
+        self.assertEqual(app.status_label.options["fg"], "#f87171")
+
+        app._set_config_status(None)
+        self.assertTrue(app.status_label.packed)
+        self.assertEqual(app.status_label.options["text"], "Sensors: partial data")
+
+        app._set_sensor_status(None)
+        self.assertFalse(app.status_label.packed)
+
+    def test_update_ui_applies_and_clears_sensor_status(self):
+        app = _update_ui_app()
+        app.sensor_data = _sample_data(status=overlay.SENSOR_STATUS_PSUTIL_FALLBACK)
+
+        app.update_ui()
+
+        self.assertTrue(app.status_label.packed)
+        self.assertEqual(app.status_label.options["text"], "Sensors: psutil fallback")
+
+        app.sensor_data = _sample_data()
+        app.update_ui()
+
+        self.assertFalse(app.status_label.packed)
+
+    def test_save_config_wrapper_sets_and_clears_config_status(self):
+        app = _status_app()
+        app.config = {"x": 1}
+
+        with mock.patch.object(overlay, "save_config", return_value=(False, "failed")):
+            ok, message = app._save_config()
+
+        self.assertFalse(ok)
+        self.assertEqual(message, "failed")
+        self.assertTrue(app.status_label.packed)
+        self.assertEqual(app.status_label.options["text"], "Config save failed")
+
+        with mock.patch.object(overlay, "save_config", return_value=(True, "Config saved")):
+            ok, message = app._save_config()
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "Config saved")
+        self.assertFalse(app.status_label.packed)
+
+    def test_open_log_file_opens_existing_file(self):
+        app = _status_app()
+        log_path = os.path.join(self._tmpdir.name, "HeatMap.log")
+        open(log_path, "w", encoding="utf-8").close()
+
+        with (
+            mock.patch.object(overlay, "LOG_PATH", log_path),
+            mock.patch.object(overlay.os, "startfile") as startfile,
+        ):
+            app.open_log_file()
+
+        startfile.assert_called_once_with(os.path.abspath(log_path))
+
+    def test_open_log_file_falls_back_to_log_directory(self):
+        app = _status_app()
+        log_path = os.path.join(self._tmpdir.name, "logs", "HeatMap.log")
+
+        with (
+            mock.patch.object(overlay, "LOG_PATH", log_path),
+            mock.patch.object(overlay.os, "startfile") as startfile,
+        ):
+            app.open_log_file()
+
+        self.assertTrue(os.path.isdir(os.path.dirname(log_path)))
+        startfile.assert_called_once_with(os.path.abspath(os.path.dirname(log_path)))
+
+    def test_copy_log_path_uses_clipboard(self):
+        app = _status_app()
+        log_path = os.path.join(self._tmpdir.name, "HeatMap.log")
+
+        with mock.patch.object(overlay, "LOG_PATH", log_path):
+            app.copy_log_path()
+
+        self.assertEqual(app.root.clipboard_value, os.path.abspath(log_path))
+
+    def test_log_action_failure_shows_error_message(self):
+        app = _status_app()
+
+        with (
+            mock.patch.object(overlay.os, "startfile", side_effect=OSError("blocked")),
+            mock.patch.object(overlay, "_show_error_message") as show_error,
+            self.assertLogs("HeatMap", level="WARNING"),
+        ):
+            app.open_log_file()
+
+        show_error.assert_called_once()
+        self.assertIn("blocked", show_error.call_args.args[1])
+
 
 class _FakeLabel:
     def __init__(self):
         self.options = {}
+        self.packed = False
+        self.pack_options = {}
 
     def config(self, **kwargs):
         self.options.update(kwargs)
+
+    def pack(self, **kwargs):
+        self.packed = True
+        self.pack_options = kwargs
+
+    def pack_forget(self):
+        self.packed = False
 
 
 class _FakeChild:
@@ -392,9 +578,16 @@ class _FakeFrame:
 class _FakeRoot:
     def __init__(self):
         self.after_calls = []
+        self.clipboard_value = None
 
     def after(self, delay, callback):
         self.after_calls.append((delay, callback))
+
+    def clipboard_clear(self):
+        self.clipboard_value = ""
+
+    def clipboard_append(self, value):
+        self.clipboard_value += value
 
 
 class _FakeSensor:
@@ -436,6 +629,68 @@ class _FailingHardwareComputer:
 
 def _completed(returncode=0, stdout=b"", stderr=b""):
     return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+def _status_app():
+    app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+    app.running = True
+    app.root = _FakeRoot()
+    app.status_label = _FakeLabel()
+    app._status_label_visible = False
+    app._config_status = None
+    app._sensor_status = None
+    return app
+
+
+def _update_ui_app():
+    app = _status_app()
+    app.lock = threading.Lock()
+    app.disk_frame = _FakeFrame([])
+    app.disk_labels = []
+    app._last_disk_names = []
+    app.rows = {
+        "cpu_temp": _FakeLabel(),
+        "cpu_clock": _FakeLabel(),
+        "cpu_load": _FakeLabel(),
+        "gpu_temp": _FakeLabel(),
+        "gpu_clock": _FakeLabel(),
+        "gpu_load": _FakeLabel(),
+        "vram": _FakeLabel(),
+        "gpu_fan": _FakeLabel(),
+        "cpu_fan": _FakeLabel(),
+        "ram_gb": _FakeLabel(),
+        "ram_pct": _FakeLabel(),
+    }
+    app._GPU_FAN_MAX_RPM = 2200
+    app._CPU_FAN_MAX_RPM = 1800
+    app._config_save_pending = False
+    app.config = {}
+    app.alerts_enabled = False
+    app._check_alerts = lambda _data: None
+    return app
+
+
+def _sample_data(status=None):
+    data = {
+        "cpu_temp": None,
+        "cpu_load": 10,
+        "cpu_clock": None,
+        "gpu_temp": None,
+        "gpu_load": None,
+        "gpu_clock": None,
+        "cpu_fan": None,
+        "cpu_fan_pct": None,
+        "gpu_fan": None,
+        "gpu_fan_pct": None,
+        "gpu_vram_pct": None,
+        "ram_pct": 20,
+        "ram_used_gb": 2.0,
+        "ram_total_gb": 8.0,
+        "disks": [],
+    }
+    if status:
+        data[overlay.SENSOR_STATUS_KEY] = status
+    return data
 
 
 def _fake_lhm_modules():

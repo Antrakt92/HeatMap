@@ -74,6 +74,21 @@ def _configure_logging():
 
 LOG_PATH = _configure_logging()
 
+SENSOR_STATUS_KEY = "_sensor_status"
+SENSOR_STATUS_PSUTIL_FALLBACK = "psutil_fallback"
+SENSOR_STATUS_PARTIAL = "partial"
+STATUS_CONFIG_ERROR = "config_error"
+STATUS_TEXT = {
+    STATUS_CONFIG_ERROR: "Config save failed",
+    SENSOR_STATUS_PSUTIL_FALLBACK: "Sensors: psutil fallback",
+    SENSOR_STATUS_PARTIAL: "Sensors: partial data",
+}
+STATUS_COLOR = {
+    STATUS_CONFIG_ERROR: "#f87171",
+    SENSOR_STATUS_PSUTIL_FALLBACK: "#facc15",
+    SENSOR_STATUS_PARTIAL: "#facc15",
+}
+
 # --- Windows API constants ---
 GWL_EXSTYLE = -20
 WS_EX_TOOLWINDOW = 0x00000080
@@ -632,24 +647,28 @@ def read_sensors(computer, update_storage=True):
     data = _empty_sensor_data()
 
     if computer is None:
+        data[SENSOR_STATUS_KEY] = SENSOR_STATUS_PSUTIL_FALLBACK
         return _apply_psutil_fallbacks(data)
 
     try:
         from LibreHardwareMonitor.Hardware import HardwareType, SensorType
     except Exception:
         log.warning("Failed to import LibreHardwareMonitor sensor enums, falling back to psutil", exc_info=True)
+        data[SENSOR_STATUS_KEY] = SENSOR_STATUS_PSUTIL_FALLBACK
         return _apply_psutil_fallbacks(data)
 
     try:
         hardware_items = list(computer.Hardware)
     except Exception:
         log.warning("Failed to enumerate LibreHardwareMonitor hardware, falling back to psutil", exc_info=True)
+        data[SENSOR_STATUS_KEY] = SENSOR_STATUS_PSUTIL_FALLBACK
         return _apply_psutil_fallbacks(data)
 
     for hw in hardware_items:
         try:
             _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=update_storage)
         except Exception:
+            data[SENSOR_STATUS_KEY] = SENSOR_STATUS_PARTIAL
             log.warning("Skipping hardware block after sensor read failure: %s", _hardware_label(hw), exc_info=True)
 
     _apply_psutil_fallbacks(data)
@@ -699,33 +718,48 @@ def disk_usage_color(pct):
 
 
 # --- Config ---
-def load_config():
-    defaults = {"x": 50, "y": 50, "peek_enabled": True, "alerts_enabled": True,
-                "gpu_fan_max_rpm": 2200, "cpu_fan_max_rpm": 1800}
+def _default_config():
+    return {"x": 50, "y": 50, "peek_enabled": True, "alerts_enabled": True,
+            "gpu_fan_max_rpm": 2200, "cpu_fan_max_rpm": 1800}
+
+
+def load_config_result():
+    defaults = _default_config()
+    if not os.path.exists(CONFIG_PATH):
+        return defaults, None
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             cfg = json.load(f)
-        if not isinstance(cfg, dict):
-            return defaults
-        # Validate types, fall back to defaults for bad values
-        for key in ("x", "y"):
-            value = cfg.get(key)
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                cfg[key] = defaults[key]
-            else:
-                cfg[key] = int(value)
-        for key in ("peek_enabled", "alerts_enabled"):
-            if not isinstance(cfg.get(key), bool):
-                cfg[key] = defaults[key]
-        for key in ("gpu_fan_max_rpm", "cpu_fan_max_rpm"):
-            value = cfg.get(key)
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-                cfg[key] = defaults[key]
-            else:
-                cfg[key] = int(value)
-        return cfg
-    except Exception:
-        return defaults
+    except Exception as e:
+        message = f"Failed to load config: {e}"
+        log.warning("%s (%s)", message, CONFIG_PATH, exc_info=True)
+        return defaults, message
+    if not isinstance(cfg, dict):
+        message = "Invalid config format"
+        log.warning("%s in %s", message, CONFIG_PATH)
+        return defaults, message
+    # Validate types, fall back to defaults for bad values
+    for key in ("x", "y"):
+        value = cfg.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            cfg[key] = defaults[key]
+        else:
+            cfg[key] = int(value)
+    for key in ("peek_enabled", "alerts_enabled"):
+        if not isinstance(cfg.get(key), bool):
+            cfg[key] = defaults[key]
+    for key in ("gpu_fan_max_rpm", "cpu_fan_max_rpm"):
+        value = cfg.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            cfg[key] = defaults[key]
+        else:
+            cfg[key] = int(value)
+    return cfg, None
+
+
+def load_config():
+    cfg, _message = load_config_result()
+    return cfg
 
 
 def save_config(cfg):
@@ -736,13 +770,16 @@ def save_config(cfg):
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, CONFIG_PATH)
-    except Exception:
-        log.warning("Failed to save config to %s", CONFIG_PATH, exc_info=True)
+        return True, "Config saved"
+    except Exception as e:
+        message = f"Failed to save config: {e}"
+        log.warning("%s (%s)", message, CONFIG_PATH, exc_info=True)
         try:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
         except OSError:
             log.debug("Failed to remove temporary config file", exc_info=True)
+        return False, message
 
 
 def _missing_required_dlls(lib_dir=LIB_DIR):
@@ -759,7 +796,9 @@ class OverlayApp:
         psutil.cpu_percent(interval=0)
 
         self.computer = init_hardware_monitor()
-        self.config = load_config()
+        self.config, config_warning = load_config_result()
+        self._config_status = STATUS_CONFIG_ERROR if config_warning else None
+        self._sensor_status = SENSOR_STATUS_PSUTIL_FALLBACK if self.computer is None else None
         # Validate saved position is within visible screen area
         virt_x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
         virt_y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
@@ -906,6 +945,12 @@ class OverlayApp:
 
         # Bottom padding
         tk.Frame(self.content, bg="#1a1a2e", height=2).pack()
+        self.status_label = tk.Label(
+            self.content, text="", font=("Segoe UI", 8),
+            fg="#facc15", bg="#1a1a2e", anchor="w"
+        )
+        self._status_label_visible = False
+        self._refresh_runtime_status()
 
         # --- Right-click menu ---
         self.topmost = False
@@ -924,6 +969,9 @@ class OverlayApp:
         self._add_menu_item("peek",
             "Peek from edge: ON" if self.peek_enabled else "Peek from edge: OFF",
             self.toggle_peek)
+        self.menu.add_separator()
+        self.menu.add_command(label="Open log file", command=self.open_log_file)
+        self.menu.add_command(label="Copy log path", command=self.copy_log_path)
         self.menu.add_separator()
         self.menu.add_command(label="Close", command=self.quit)
         self.root.bind("<Button-3>", self.show_menu)
@@ -952,6 +1000,66 @@ class OverlayApp:
     def _set_menu_label(self, key, label):
         """Update a menu item's label by its key."""
         self.menu.entryconfig(self._menu_idx[key], label=label)
+
+    def _current_runtime_status(self):
+        if getattr(self, "_config_status", None):
+            return self._config_status
+        return getattr(self, "_sensor_status", None)
+
+    def _refresh_runtime_status(self):
+        if not hasattr(self, "status_label"):
+            return
+        status = self._current_runtime_status()
+        if not status:
+            if getattr(self, "_status_label_visible", False):
+                self.status_label.pack_forget()
+                self._status_label_visible = False
+            return
+        self.status_label.config(
+            text=STATUS_TEXT.get(status, ""),
+            fg=STATUS_COLOR.get(status, "#facc15"),
+        )
+        if not getattr(self, "_status_label_visible", False):
+            self.status_label.pack(fill="x", pady=(2, 0))
+            self._status_label_visible = True
+
+    def _set_sensor_status(self, status):
+        if status not in (SENSOR_STATUS_PSUTIL_FALLBACK, SENSOR_STATUS_PARTIAL):
+            status = None
+        self._sensor_status = status
+        self._refresh_runtime_status()
+
+    def _set_config_status(self, message):
+        self._config_status = STATUS_CONFIG_ERROR if message else None
+        self._refresh_runtime_status()
+
+    def _save_config(self, update_status=True):
+        ok, message = save_config(self.config)
+        if update_status and getattr(self, "running", False):
+            self._set_config_status(None if ok else message)
+        return ok, message
+
+    def open_log_file(self):
+        try:
+            log_path = os.path.abspath(LOG_PATH)
+            log_dir = os.path.dirname(log_path)
+            if os.path.exists(log_path):
+                target = log_path
+            else:
+                os.makedirs(log_dir, exist_ok=True)
+                target = log_dir
+            os.startfile(target)
+        except Exception as e:
+            log.warning("Failed to open log file location: %s", e, exc_info=True)
+            _show_error_message("HeatMap Log", f"Failed to open log file:\n{e}\n\nLog path:\n{LOG_PATH}")
+
+    def copy_log_path(self):
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(os.path.abspath(LOG_PATH))
+        except Exception as e:
+            log.warning("Failed to copy log path: %s", e, exc_info=True)
+            _show_error_message("HeatMap Log", f"Failed to copy log path:\n{e}\n\nLog path:\n{LOG_PATH}")
 
     def _get_hwnd(self):
         """Get the native Windows HWND for the tkinter root window."""
@@ -1302,7 +1410,7 @@ class OverlayApp:
     def toggle_peek(self):
         self.peek_enabled = not self.peek_enabled
         self.config["peek_enabled"] = self.peek_enabled
-        save_config(self.config)
+        self._save_config()
         self._trigger_hidden_for_desktop = False
         if self.peek_enabled and not self.topmost:
             self._trigger.deiconify()
@@ -1376,7 +1484,7 @@ class OverlayApp:
     def toggle_alerts(self):
         self.alerts_enabled = not self.alerts_enabled
         self.config["alerts_enabled"] = self.alerts_enabled
-        save_config(self.config)
+        self._save_config()
         self._set_menu_label("alerts",
             "Alerts: ON" if self.alerts_enabled else "Alerts: OFF"
         )
@@ -1386,7 +1494,7 @@ class OverlayApp:
         self._config_save_pending = False
         if not self.running:
             return
-        save_config(self.config)
+        self._save_config()
 
     def _check_alerts(self, data):
         """Play a warning beep if any value exceeds critical thresholds."""
@@ -1452,7 +1560,7 @@ class OverlayApp:
         # If dragged during peek, persist the new position into config
         if self._saved_pos:
             self.config["x"], self.config["y"] = self._saved_pos
-        save_config(self.config)
+        self._save_config()
 
     def show_menu(self, event):
         self.menu.tk_popup(event.x_root, event.y_root)
@@ -1506,9 +1614,12 @@ class OverlayApp:
             return
 
         if "error" in data:
+            self._set_sensor_status(None)
             self._show_sensor_error()
             self.root.after(2000, self.update_ui)
             return
+
+        self._set_sensor_status(data.get(SENSOR_STATUS_KEY))
 
         # CPU: temp + clock + load%
         cpu_temp = data.get("cpu_temp")
@@ -1699,7 +1810,7 @@ class OverlayApp:
         self.config["alerts_enabled"] = self.alerts_enabled
         self.config["gpu_fan_max_rpm"] = self._GPU_FAN_MAX_RPM
         self.config["cpu_fan_max_rpm"] = self._CPU_FAN_MAX_RPM
-        save_config(self.config)
+        self._save_config(update_status=False)
         # Destroy trigger window
         try:
             self._trigger.destroy()
