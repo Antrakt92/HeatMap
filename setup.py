@@ -16,16 +16,16 @@ PACKAGES = {
     "LibreHardwareMonitorLib": {
         "url": "https://www.nuget.org/api/v2/package/LibreHardwareMonitorLib/0.9.5",
         "dlls": [
-            "lib/net4/LibreHardwareMonitorLib.dll",
+            "runtimes/win-x64/lib/net472/LibreHardwareMonitorLib.dll",
         ],
         "sha256": {
             "LibreHardwareMonitorLib.dll": "21673a431323cd350f31f7598d3e1a161bf9d0a4c030b76ef475441fbd30ac33",
         },
     },
     "HidSharp": {
-        "url": "https://www.nuget.org/api/v2/package/HidSharp/2.1.0",
+        "url": "https://www.nuget.org/api/v2/package/HidSharp/2.6.4",
         "dlls": [
-            "lib/net4/HidSharp.dll",
+            "lib/net35/HidSharp.dll",
         ],
         "sha256": {
             "HidSharp.dll": "d86690efde30ea9179f669320f39148853793b743a98b531afeaf30598e22f54",
@@ -50,6 +50,15 @@ def _verify_hash(data, filename, expected_hashes):
     return True
 
 
+def _dll_candidates(all_files, dll_path):
+    """Return DLL entries with the same filename for diagnostics."""
+    target = os.path.basename(dll_path).lower()
+    return [
+        entry for entry in all_files
+        if entry.lower().endswith(".dll") and os.path.basename(entry).lower() == target
+    ]
+
+
 def download_and_extract():
     os.makedirs(LIB_DIR, exist_ok=True)
 
@@ -72,47 +81,25 @@ def download_and_extract():
             sys.exit(1)
         with zf:
             all_files = zf.namelist()
-            extracted = False
             for dll_path in info["dlls"]:
-                # Try exact path first
-                if dll_path in all_files:
-                    dll_data = zf.read(dll_path)
-                    out_name = os.path.basename(dll_path)
-                    if not _verify_hash(dll_data, out_name, info.get("sha256", {})):
-                        sys.exit(1)
-                    out_path = os.path.join(LIB_DIR, out_name)
-                    try:
-                        with open(out_path, "wb") as f:
-                            f.write(dll_data)
-                    except OSError as e:
-                        print(f"  ERROR writing {out_name}: {e}")
-                        sys.exit(1)
-                    print(f"  Extracted: {out_name}")
-                    extracted = True
-                else:
-                    # Search for the DLL by name in any path
-                    target = os.path.basename(dll_path).lower()
-                    for entry in all_files:
-                        if os.path.basename(entry).lower() == target:
-                            dll_data = zf.read(entry)
-                            out_name = os.path.basename(dll_path)
-                            if not _verify_hash(dll_data, out_name, info.get("sha256", {})):
-                                sys.exit(1)
-                            out_path = os.path.join(LIB_DIR, out_name)
-                            try:
-                                with open(out_path, "wb") as f:
-                                    f.write(dll_data)
-                            except OSError as e:
-                                print(f"  ERROR writing {out_name}: {e}")
-                                sys.exit(1)
-                            print(f"  Extracted: {out_name} (from {entry})")
-                            extracted = True
-                            break
+                if dll_path not in all_files:
+                    print(f"  ERROR: Could not find exact DLL path for {name}: {dll_path}")
+                    candidates = _dll_candidates(all_files, dll_path)
+                    print(f"  Available matching DLLs: {candidates}")
+                    sys.exit(1)
 
-            if not extracted:
-                print(f"  ERROR: Could not find DLLs for {name}")
-                print(f"  Available files in package: {[f for f in all_files if f.endswith('.dll')]}")
-                sys.exit(1)
+                dll_data = zf.read(dll_path)
+                out_name = os.path.basename(dll_path)
+                if not _verify_hash(dll_data, out_name, info.get("sha256", {})):
+                    sys.exit(1)
+                out_path = os.path.join(LIB_DIR, out_name)
+                try:
+                    with open(out_path, "wb") as f:
+                        f.write(dll_data)
+                except OSError as e:
+                    print(f"  ERROR writing {out_name}: {e}")
+                    sys.exit(1)
+                print(f"  Extracted: {out_name}")
 
     print("\nSetup complete! DLLs are in the 'lib' directory.")
     print("You can now run the overlay with: run_as_admin.bat")

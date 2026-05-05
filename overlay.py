@@ -5,6 +5,7 @@ Sits on the desktop layer — above wallpaper, below all app windows.
 Requires admin privileges to read hardware sensors.
 """
 import ctypes
+import math
 import re
 import ctypes.wintypes
 import json
@@ -90,9 +91,6 @@ SM_CXVIRTUALSCREEN = 78
 SM_CYVIRTUALSCREEN = 79
 user32.GetSystemMetrics.argtypes = [ctypes.c_int]
 user32.GetSystemMetrics.restype = ctypes.c_int
-
-HWND_TOPMOST = -1
-HWND_NOTOPMOST = -2
 
 # --- Desktop widget: embed window into the desktop layer ---
 def find_desktop_worker_w():
@@ -260,11 +258,11 @@ def init_hardware_monitor():
 
 
 def _safe_round(value):
-    """Convert sensor value to rounded int, returning None for None/NaN."""
+    """Convert sensor value to rounded int, returning None for invalid values."""
     if value is None:
         return None
     v = float(value)
-    if v != v:  # NaN check
+    if not math.isfinite(v):
         return None
     return round(v)
 
@@ -468,6 +466,16 @@ def temp_color(temp):
     return "#f87171"
 
 
+def disk_temp_color(temp):
+    if temp is None:
+        return "#888888"
+    if temp < 45:
+        return "#4ade80"
+    if temp < 55:
+        return "#facc15"
+    return "#f87171"
+
+
 def load_color(load):
     if load is None:
         return "#888888"
@@ -499,29 +507,40 @@ def load_config():
             return defaults
         # Validate types, fall back to defaults for bad values
         for key in ("x", "y"):
-            if not isinstance(cfg.get(key), (int, float)):
+            value = cfg.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
                 cfg[key] = defaults[key]
             else:
-                cfg[key] = int(cfg[key])
+                cfg[key] = int(value)
         for key in ("peek_enabled", "alerts_enabled"):
             if not isinstance(cfg.get(key), bool):
                 cfg[key] = defaults[key]
         for key in ("gpu_fan_max_rpm", "cpu_fan_max_rpm"):
-            if not isinstance(cfg.get(key), (int, float)) or cfg[key] <= 0:
+            value = cfg.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
                 cfg[key] = defaults[key]
             else:
-                cfg[key] = int(cfg[key])
+                cfg[key] = int(value)
         return cfg
     except Exception:
         return defaults
 
 
 def save_config(cfg):
+    tmp_path = f"{CONFIG_PATH}.tmp"
     try:
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(cfg, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, CONFIG_PATH)
     except Exception:
         log.warning("Failed to save config to %s", CONFIG_PATH, exc_info=True)
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            log.debug("Failed to remove temporary config file", exc_info=True)
 
 
 # --- Main overlay class ---
@@ -742,7 +761,6 @@ class OverlayApp:
         """Embed the window into the desktop layer (above wallpaper, below icons and apps)."""
         self._embed_scheduled = False
         hwnd = self._get_hwnd()
-        self._hwnd = hwnd
         set_tool_window(hwnd)
         if embed_in_desktop(hwnd):
             self.embedded = True
@@ -1413,7 +1431,7 @@ class OverlayApp:
             disk = disks[i]
             dtemp = disk.get("temp")
             if dtemp is not None:
-                self.rows[key].config(text=f"{dtemp}°C", fg=temp_color(dtemp))
+                self.rows[key].config(text=f"{dtemp}°C", fg=disk_temp_color(dtemp))
             else:
                 self.rows[key].config(text="--", fg="#888888")
             used = disk.get("used_pct")
@@ -1463,13 +1481,15 @@ class OverlayApp:
             self.sensor_thread.join(timeout=5)
         except Exception:
             log.debug("Failed to join sensor thread", exc_info=True)
-        # Close hardware monitor to release sensor handles (sensor thread has stopped)
-        if self.computer is not None:
+        # Close hardware monitor only after the sensor thread has stopped using it.
+        if self.computer is not None and not self.sensor_thread.is_alive():
             try:
                 self.computer.Close()
             except Exception:
                 log.debug("Failed to close hardware monitor", exc_info=True)
             self.computer = None
+        elif self.computer is not None:
+            log.warning("Sensor thread did not stop in time; leaving hardware monitor open")
         self.root.destroy()
 
     def run(self):
