@@ -34,6 +34,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LIB_DIR = os.path.join(APP_DIR, "lib")
 CONFIG_PATH = os.path.join(APP_DIR, "overlay_config.json")
 SCRIPT_PATH = os.path.join(APP_DIR, "overlay.py")
+REQUIRED_DLLS = ("LibreHardwareMonitorLib.dll", "HidSharp.dll")
 
 # --- Windows API constants ---
 GWL_EXSTYLE = -20
@@ -541,6 +542,13 @@ def save_config(cfg):
                 os.remove(tmp_path)
         except OSError:
             log.debug("Failed to remove temporary config file", exc_info=True)
+
+
+def _missing_required_dlls(lib_dir=LIB_DIR):
+    return [
+        dll_name for dll_name in REQUIRED_DLLS
+        if not os.path.exists(os.path.join(lib_dir, dll_name))
+    ]
 
 
 # --- Main overlay class ---
@@ -1289,6 +1297,7 @@ class OverlayApp:
             return
 
         if "error" in data:
+            self._show_sensor_error()
             self.root.after(2000, self.update_ui)
             return
 
@@ -1445,6 +1454,18 @@ class OverlayApp:
 
         self.root.after(2000, self.update_ui)
 
+    def _show_sensor_error(self):
+        for child in list(self.disk_frame.winfo_children()):
+            child.destroy()
+        for key in list(self.disk_labels):
+            self.rows.pop(key, None)
+            self.rows.pop(key + "_usage", None)
+        self.disk_labels.clear()
+        self._last_disk_names = []
+
+        for label in self.rows.values():
+            label.config(text="ERR", fg="#f87171")
+
     def quit(self):
         self.running = False
         self._stop_event.set()
@@ -1499,13 +1520,17 @@ class OverlayApp:
 def kill_previous_instances():
     """Kill any other overlay.py instances matching our script path."""
     my_pid = os.getpid()
-    script_lower = SCRIPT_PATH.lower()
     for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
         try:
             if proc.info['pid'] == my_pid:
                 continue
             cmdline = proc.info.get('cmdline') or []
-            if any(script_lower == arg.strip('"').lower() for arg in cmdline):
+            proc_cwd = None
+            try:
+                proc_cwd = proc.cwd()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+            if any(is_same_script_invocation(SCRIPT_PATH, arg, proc_cwd) for arg in cmdline):
                 proc.terminate()
                 try:
                     proc.wait(timeout=3)
@@ -1513,6 +1538,26 @@ def kill_previous_instances():
                     proc.kill()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
+
+
+def is_same_script_invocation(script_path, arg, cwd=None):
+    if not arg:
+        return False
+
+    candidate = arg.strip().strip('"')
+    if not candidate:
+        return False
+
+    script_name = os.path.basename(script_path)
+    if os.path.basename(candidate).lower() != script_name.lower():
+        return False
+
+    if not os.path.isabs(candidate):
+        if not cwd:
+            return False
+        candidate = os.path.join(cwd, candidate)
+
+    return os.path.normcase(os.path.abspath(candidate)) == os.path.normcase(os.path.abspath(script_path))
 
 
 def _is_admin():
@@ -1524,15 +1569,16 @@ def _is_admin():
 
 
 def main():
-    kill_previous_instances()
-
-    dll_path = os.path.join(LIB_DIR, "LibreHardwareMonitorLib.dll")
-    if not os.path.exists(dll_path):
+    missing_dlls = _missing_required_dlls()
+    if missing_dlls:
+        missing = "\n".join(f"- {dll_name}" for dll_name in missing_dlls)
         ctypes.windll.user32.MessageBoxW(
-            0, "LibreHardwareMonitorLib.dll not found!\nRun: python setup.py",
+            0, f"Required DLLs not found:\n{missing}\n\nRun: python setup.py",
             "HW Monitor", 0x10
         )
         sys.exit(1)
+
+    kill_previous_instances()
 
     if not _is_admin():
         log.warning("Running without admin privileges — hardware sensors may be unavailable")
