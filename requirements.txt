@@ -1,2 +1,3 @@
+# Tested with Python 3.13.11, pythonnet 3.0.5, psutil 7.2.2.
 pythonnet>=3.0.0
 psutil>=5.9.0

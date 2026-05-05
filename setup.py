@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import platform
 import posixpath
 import re
 import ssl
@@ -21,10 +22,29 @@ MANIFEST_VERSION = 1
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MANIFEST_DLL_RE = re.compile(r"^lib/[^/\\]+\.dll$")
 _SOURCE_TYPES = {"nuget", "bundled-unknown"}
+_SUPPORTED_MACHINES = {"amd64", "x86_64", "x64"}
 
 
 class SetupError(Exception):
     """Recoverable setup failure that should become a non-zero CLI exit code."""
+
+
+def _unsupported_runtime_message(sys_platform=None, maxsize=None, machine=None):
+    sys_platform = sys.platform if sys_platform is None else sys_platform
+    maxsize = sys.maxsize if maxsize is None else maxsize
+    machine = platform.machine() if machine is None else machine
+
+    if sys_platform != "win32":
+        return "HeatMap setup supports 64-bit Windows only."
+    if maxsize <= 2 ** 32:
+        return "HeatMap setup requires 64-bit Python."
+    normalized_machine = str(machine or "").strip().lower()
+    if normalized_machine not in _SUPPORTED_MACHINES:
+        return (
+            "HeatMap setup currently supports x64 Windows/Python only "
+            f"(detected machine: {machine or 'unknown'})."
+        )
+    return None
 
 
 PACKAGES = {
@@ -251,6 +271,11 @@ def main(argv=None):
         ok, messages = verify_lib_manifest()
         _print_manifest_result(ok, messages)
         return 0 if ok else 1
+
+    unsupported = _unsupported_runtime_message()
+    if unsupported:
+        print(f"Setup failed: {unsupported}")
+        return 1
 
     try:
         download_and_extract()

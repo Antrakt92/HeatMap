@@ -32,9 +32,11 @@
 ## Установка
 
 ### Требования
-- Python 3.7+
-- Windows
+- 64-bit Python 3.10+
+- 64-bit Windows
 - Права администратора (необходимы для чтения датчиков)
+
+Проверенная среда: Python 3.13.11, pythonnet 3.0.5, psutil 7.2.2.
 
 ### Шаги
 
@@ -46,7 +48,7 @@
 
 2. **Установите зависимости:**
    ```bash
-   pip install -r requirements.txt
+   python -m pip install -r requirements.txt
    ```
 
 3. **Скачайте и проверьте библиотеки для мониторинга:**

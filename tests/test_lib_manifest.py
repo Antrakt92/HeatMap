@@ -134,17 +134,22 @@ class LibManifestTests(unittest.TestCase):
         with (
             mock.patch.object(setup, "verify_lib_manifest", return_value=(True, [])),
             mock.patch.object(setup, "_print_manifest_result"),
+            mock.patch.object(setup, "_unsupported_runtime_message") as runtime_check,
         ):
             self.assertEqual(setup.main(["--verify"]), 0)
+        runtime_check.assert_not_called()
 
         with (
             mock.patch.object(setup, "verify_lib_manifest", return_value=(False, ["bad"])),
             mock.patch.object(setup, "_print_manifest_result"),
+            mock.patch.object(setup, "_unsupported_runtime_message") as runtime_check,
         ):
             self.assertEqual(setup.main(["--verify"]), 1)
+        runtime_check.assert_not_called()
 
     def test_default_main_downloads_then_verifies(self):
         with (
+            mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
             mock.patch.object(setup, "download_and_extract") as download,
             mock.patch.object(setup, "verify_lib_manifest", return_value=(True, [])) as verify,
             mock.patch.object(setup, "_print_manifest_result"),
@@ -157,6 +162,7 @@ class LibManifestTests(unittest.TestCase):
 
     def test_default_main_returns_failure_when_manifest_verification_fails(self):
         with (
+            mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
             mock.patch.object(setup, "download_and_extract"),
             mock.patch.object(setup, "verify_lib_manifest", return_value=(False, ["missing"])),
             mock.patch.object(setup, "_print_manifest_result"),
@@ -166,6 +172,7 @@ class LibManifestTests(unittest.TestCase):
 
     def test_default_main_returns_failure_when_download_fails(self):
         with (
+            mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
             mock.patch.object(setup, "download_and_extract", side_effect=setup.SetupError("network down")),
             mock.patch.object(setup, "verify_lib_manifest") as verify,
             mock.patch("builtins.print") as printed,
@@ -174,6 +181,50 @@ class LibManifestTests(unittest.TestCase):
 
         verify.assert_not_called()
         self.assertIn("network down", printed.call_args.args[0])
+
+    def test_runtime_policy_accepts_windows_x64_variants(self):
+        for machine in ("AMD64", "amd64", "x86_64", "X64"):
+            with self.subTest(machine=machine):
+                self.assertIsNone(
+                    setup._unsupported_runtime_message(
+                        sys_platform="win32",
+                        maxsize=2 ** 63,
+                        machine=machine,
+                    )
+                )
+
+    def test_runtime_policy_rejects_unsupported_platforms(self):
+        cases = [
+            ("linux", 2 ** 63, "x86_64", "Windows"),
+            ("darwin", 2 ** 63, "x86_64", "Windows"),
+            ("win32", 2 ** 31 - 1, "AMD64", "64-bit Python"),
+            ("win32", 2 ** 63, "ARM64", "x64"),
+            ("win32", 2 ** 63, "x86", "x64"),
+            ("win32", 2 ** 63, "", "unknown"),
+        ]
+        for sys_platform, maxsize, machine, expected in cases:
+            with self.subTest(sys_platform=sys_platform, maxsize=maxsize, machine=machine):
+                message = setup._unsupported_runtime_message(
+                    sys_platform=sys_platform,
+                    maxsize=maxsize,
+                    machine=machine,
+                )
+
+            self.assertIsNotNone(message)
+            self.assertIn(expected, message)
+
+    def test_default_main_rejects_unsupported_runtime_before_download(self):
+        with (
+            mock.patch.object(setup, "_unsupported_runtime_message", return_value="unsupported runtime"),
+            mock.patch.object(setup, "download_and_extract") as download,
+            mock.patch.object(setup, "verify_lib_manifest") as verify,
+            mock.patch("builtins.print") as printed,
+        ):
+            self.assertEqual(setup.main([]), 1)
+
+        download.assert_not_called()
+        verify.assert_not_called()
+        self.assertEqual(printed.call_args.args[0], "Setup failed: unsupported runtime")
 
     def test_download_and_extract_raises_on_download_failure(self):
         with self._patched_download_setup():
