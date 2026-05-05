@@ -77,14 +77,18 @@ LOG_PATH = _configure_logging()
 SENSOR_STATUS_KEY = "_sensor_status"
 SENSOR_STATUS_PSUTIL_FALLBACK = "psutil_fallback"
 SENSOR_STATUS_PARTIAL = "partial"
-STATUS_CONFIG_ERROR = "config_error"
+STATUS_CONFIG_SAVE_ERROR = "config_save_error"
+STATUS_CONFIG_ADJUSTED = "config_adjusted"
+CONFIG_STATUSES = (STATUS_CONFIG_SAVE_ERROR, STATUS_CONFIG_ADJUSTED)
 STATUS_TEXT = {
-    STATUS_CONFIG_ERROR: "Config save failed",
+    STATUS_CONFIG_SAVE_ERROR: "Config save failed",
+    STATUS_CONFIG_ADJUSTED: "Config adjusted",
     SENSOR_STATUS_PSUTIL_FALLBACK: "Sensors: psutil fallback",
     SENSOR_STATUS_PARTIAL: "Sensors: partial data",
 }
 STATUS_COLOR = {
-    STATUS_CONFIG_ERROR: "#f87171",
+    STATUS_CONFIG_SAVE_ERROR: "#f87171",
+    STATUS_CONFIG_ADJUSTED: "#facc15",
     SENSOR_STATUS_PSUTIL_FALLBACK: "#facc15",
     SENSOR_STATUS_PARTIAL: "#facc15",
 }
@@ -498,6 +502,9 @@ def _hardware_label(hw):
 
 def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True):
     hw_type = hw.HardwareType
+    # Skip intentionally ignored iGPU before touching its driver-backed sensors.
+    if hw_type == HardwareType.GpuIntel and data["gpu_temp"] is not None:
+        return
     is_storage = hw_type == HardwareType.Storage
     if is_storage and not update_storage:
         # Skip Update() but still read cached sensor values
@@ -532,9 +539,6 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
             data["cpu_clock"] = round(max(core_clocks))
 
     elif hw_type in (HardwareType.GpuAmd, HardwareType.GpuNvidia, HardwareType.GpuIntel):
-        # Skip integrated Intel GPU if we already have data from a discrete GPU
-        if hw_type == HardwareType.GpuIntel and data["gpu_temp"] is not None:
-            return  # discrete GPU data already collected, skip Intel iGPU
         gpu_mem_used = None
         gpu_mem_total = None
         for sensor in hw.Sensors:
@@ -723,6 +727,30 @@ def _default_config():
             "gpu_fan_max_rpm": 2200, "cpu_fan_max_rpm": 1800}
 
 
+def _normalize_config(cfg, defaults):
+    invalid_keys = []
+    normalized = dict(cfg)
+    for key in ("x", "y"):
+        value = normalized.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            normalized[key] = defaults[key]
+            invalid_keys.append(key)
+        else:
+            normalized[key] = int(value)
+    for key in ("peek_enabled", "alerts_enabled"):
+        if not isinstance(normalized.get(key), bool):
+            normalized[key] = defaults[key]
+            invalid_keys.append(key)
+    for key in ("gpu_fan_max_rpm", "cpu_fan_max_rpm"):
+        value = normalized.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            normalized[key] = defaults[key]
+            invalid_keys.append(key)
+        else:
+            normalized[key] = int(value)
+    return normalized, invalid_keys
+
+
 def load_config_result():
     defaults = _default_config()
     if not os.path.exists(CONFIG_PATH):
@@ -738,22 +766,11 @@ def load_config_result():
         message = "Invalid config format"
         log.warning("%s in %s", message, CONFIG_PATH)
         return defaults, message
-    # Validate types, fall back to defaults for bad values
-    for key in ("x", "y"):
-        value = cfg.get(key)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            cfg[key] = defaults[key]
-        else:
-            cfg[key] = int(value)
-    for key in ("peek_enabled", "alerts_enabled"):
-        if not isinstance(cfg.get(key), bool):
-            cfg[key] = defaults[key]
-    for key in ("gpu_fan_max_rpm", "cpu_fan_max_rpm"):
-        value = cfg.get(key)
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-            cfg[key] = defaults[key]
-        else:
-            cfg[key] = int(value)
+    cfg, invalid_keys = _normalize_config(cfg, defaults)
+    if invalid_keys:
+        message = f"Adjusted invalid config fields: {', '.join(invalid_keys)}"
+        log.warning("%s in %s", message, CONFIG_PATH)
+        return cfg, message
     return cfg, None
 
 
@@ -797,7 +814,7 @@ class OverlayApp:
 
         self.computer = init_hardware_monitor()
         self.config, config_warning = load_config_result()
-        self._config_status = STATUS_CONFIG_ERROR if config_warning else None
+        self._config_status = STATUS_CONFIG_ADJUSTED if config_warning else None
         self._sensor_status = SENSOR_STATUS_PSUTIL_FALLBACK if self.computer is None else None
         # Validate saved position is within visible screen area
         virt_x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
@@ -1029,14 +1046,16 @@ class OverlayApp:
         self._sensor_status = status
         self._refresh_runtime_status()
 
-    def _set_config_status(self, message):
-        self._config_status = STATUS_CONFIG_ERROR if message else None
+    def _set_config_status(self, status):
+        if status not in CONFIG_STATUSES:
+            status = None
+        self._config_status = status
         self._refresh_runtime_status()
 
     def _save_config(self, update_status=True):
         ok, message = save_config(self.config)
         if update_status and getattr(self, "running", False):
-            self._set_config_status(None if ok else message)
+            self._set_config_status(None if ok else STATUS_CONFIG_SAVE_ERROR)
         return ok, message
 
     def open_log_file(self):

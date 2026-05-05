@@ -40,7 +40,8 @@ class OverlayHelperTests(unittest.TestCase):
                 "cpu_fan_max_rpm": False,
             }, f)
 
-        cfg = overlay.load_config()
+        with self.assertLogs("HeatMap", level="WARNING"):
+            cfg = overlay.load_config()
 
         self.assertEqual(cfg["x"], 50)
         self.assertEqual(cfg["y"], 50)
@@ -48,6 +49,30 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertTrue(cfg["alerts_enabled"])
         self.assertEqual(cfg["gpu_fan_max_rpm"], 2200)
         self.assertEqual(cfg["cpu_fan_max_rpm"], 1800)
+
+    def test_load_config_result_warns_for_invalid_individual_fields(self):
+        with open(overlay.CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump({
+                "x": True,
+                "y": 20.8,
+                "peek_enabled": "yes",
+                "alerts_enabled": False,
+                "gpu_fan_max_rpm": -1,
+                "cpu_fan_max_rpm": 2500.2,
+            }, f)
+
+        with self.assertLogs("HeatMap", level="WARNING"):
+            cfg, message = overlay.load_config_result()
+
+        self.assertEqual(cfg, {
+            "x": 50,
+            "y": 20,
+            "peek_enabled": True,
+            "alerts_enabled": False,
+            "gpu_fan_max_rpm": 2200,
+            "cpu_fan_max_rpm": 2500,
+        })
+        self.assertEqual(message, "Adjusted invalid config fields: x, peek_enabled, gpu_fan_max_rpm")
 
     def test_save_config_writes_atomically_loadable_json(self):
         cfg = {
@@ -65,6 +90,23 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(message, "Config saved")
         self.assertFalse(os.path.exists(f"{overlay.CONFIG_PATH}.tmp"))
         self.assertEqual(overlay.load_config(), cfg)
+
+    def test_load_config_result_valid_config_has_no_warning(self):
+        cfg = {
+            "x": 123,
+            "y": 456,
+            "peek_enabled": False,
+            "alerts_enabled": True,
+            "gpu_fan_max_rpm": 3333,
+            "cpu_fan_max_rpm": 2222,
+        }
+        with open(overlay.CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+
+        loaded, message = overlay.load_config_result()
+
+        self.assertEqual(loaded, cfg)
+        self.assertIsNone(message)
 
     def test_load_config_result_missing_file_is_not_warning(self):
         cfg, message = overlay.load_config_result()
@@ -415,6 +457,156 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["cpu_load"], 11)
         self.assertEqual(data["ram_pct"], 22)
 
+    def test_read_sensors_gpu_vram_fan_and_clock_parsing(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        gpu = _FakeHardware(
+            "NVIDIA GPU",
+            HardwareType.GpuNvidia,
+            sensors=[
+                _FakeSensor("GPU Core", SensorType.Temperature, 62),
+                _FakeSensor("GPU Core", SensorType.Load, 71),
+                _FakeSensor("GPU Core", SensorType.Clock, 1845),
+                _FakeSensor("GPU Fan", SensorType.Fan, 1420),
+                _FakeSensor("GPU Fan", SensorType.Control, 57),
+                _FakeSensor("GPU Memory Used", SensorType.SmallData, 6144),
+                _FakeSensor("GPU Memory Total", SensorType.SmallData, 12288),
+            ],
+        )
+        computer = SimpleNamespace(Hardware=[gpu])
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.psutil, "cpu_percent", return_value=10),
+            mock.patch.object(overlay.psutil, "virtual_memory", return_value=_memory(percent=20, used_gb=2, total_gb=8)),
+        ):
+            data = overlay.read_sensors(computer)
+
+        self.assertEqual(data["gpu_temp"], 62)
+        self.assertEqual(data["gpu_load"], 71)
+        self.assertEqual(data["gpu_clock"], 1845)
+        self.assertEqual(data["gpu_fan"], 1420)
+        self.assertEqual(data["gpu_fan_pct"], 57)
+        self.assertEqual(data["gpu_vram_pct"], 50)
+        self.assertNotIn(overlay.SENSOR_STATUS_KEY, data)
+
+    def test_read_sensors_skips_intel_igpu_before_update_when_discrete_gpu_exists(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        discrete_gpu = _FakeHardware(
+            "NVIDIA GPU",
+            HardwareType.GpuNvidia,
+            sensors=[_FakeSensor("GPU Core", SensorType.Temperature, 60)],
+        )
+        intel_gpu = _FakeHardware("Intel GPU", HardwareType.GpuIntel, update_error=RuntimeError("should skip"))
+        computer = SimpleNamespace(Hardware=[discrete_gpu, intel_gpu])
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.psutil, "cpu_percent", return_value=10),
+            mock.patch.object(overlay.psutil, "virtual_memory", return_value=_memory(percent=20, used_gb=2, total_gb=8)),
+        ):
+            data = overlay.read_sensors(computer)
+
+        self.assertEqual(data["gpu_temp"], 60)
+        self.assertEqual(intel_gpu.update_calls, 0)
+        self.assertNotIn(overlay.SENSOR_STATUS_KEY, data)
+
+    def test_read_sensors_reads_intel_gpu_when_discrete_gpu_has_no_temperature(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        discrete_gpu = _FakeHardware(
+            "NVIDIA GPU",
+            HardwareType.GpuNvidia,
+            sensors=[_FakeSensor("GPU Core", SensorType.Load, 80)],
+        )
+        intel_gpu = _FakeHardware(
+            "Intel GPU",
+            HardwareType.GpuIntel,
+            sensors=[_FakeSensor("GPU Core", SensorType.Temperature, 45)],
+        )
+        computer = SimpleNamespace(Hardware=[discrete_gpu, intel_gpu])
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.psutil, "cpu_percent", return_value=10),
+            mock.patch.object(overlay.psutil, "virtual_memory", return_value=_memory(percent=20, used_gb=2, total_gb=8)),
+        ):
+            data = overlay.read_sensors(computer)
+
+        self.assertEqual(data["gpu_load"], 80)
+        self.assertEqual(data["gpu_temp"], 45)
+        self.assertEqual(intel_gpu.update_calls, 1)
+
+    def test_read_sensors_cpu_fan_control_priority(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        motherboard = _FakeHardware(
+            "Motherboard",
+            HardwareType.Motherboard,
+            sub_hardware=[
+                _FakeHardware(
+                    "Controller",
+                    "Controller",
+                    sensors=[
+                        _FakeSensor("CPU Fan", SensorType.Fan, 1300),
+                        _FakeSensor("Case #1", SensorType.Control, 40),
+                        _FakeSensor("CPU", SensorType.Control, 55),
+                    ],
+                ),
+            ],
+        )
+        computer = SimpleNamespace(Hardware=[motherboard])
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.psutil, "cpu_percent", return_value=10),
+            mock.patch.object(overlay.psutil, "virtual_memory", return_value=_memory(percent=20, used_gb=2, total_gb=8)),
+        ):
+            data = overlay.read_sensors(computer)
+
+        self.assertEqual(data["cpu_fan"], 1300)
+        self.assertEqual(data["cpu_fan_pct"], 55)
+
+    def test_read_sensors_cpu_fan_control_falls_back_to_hash_one_then_first(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        motherboard_hash_one = _FakeHardware(
+            "Motherboard",
+            HardwareType.Motherboard,
+            sub_hardware=[
+                _FakeHardware(
+                    "Controller",
+                    "Controller",
+                    sensors=[
+                        _FakeSensor("CPU Fan", SensorType.Fan, 1300),
+                        _FakeSensor("Fan #1", SensorType.Control, 42),
+                        _FakeSensor("Fan #2", SensorType.Control, 66),
+                    ],
+                ),
+            ],
+        )
+        motherboard_first = _FakeHardware(
+            "Motherboard",
+            HardwareType.Motherboard,
+            sub_hardware=[
+                _FakeHardware(
+                    "Controller",
+                    "Controller",
+                    sensors=[
+                        _FakeSensor("CPU Fan", SensorType.Fan, 1300),
+                        _FakeSensor("Pump", SensorType.Control, 37),
+                    ],
+                ),
+            ],
+        )
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.psutil, "cpu_percent", return_value=10),
+            mock.patch.object(overlay.psutil, "virtual_memory", return_value=_memory(percent=20, used_gb=2, total_gb=8)),
+        ):
+            hash_one_data = overlay.read_sensors(SimpleNamespace(Hardware=[motherboard_hash_one]))
+            first_data = overlay.read_sensors(SimpleNamespace(Hardware=[motherboard_first]))
+
+        self.assertEqual(hash_one_data["cpu_fan_pct"], 42)
+        self.assertEqual(first_data["cpu_fan_pct"], 37)
+
     def test_read_sensors_logs_and_skips_sensor_value_failure(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
         bad_gpu = _FakeHardware(
@@ -440,7 +632,7 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["cpu_load"], 35)
         self.assertTrue(any("Bad GPU" in message for message in logs.output))
 
-    def test_runtime_status_hides_ok_and_config_overrides_sensor_warning(self):
+    def test_runtime_status_hides_ok_and_config_priorities_override_sensor_warning(self):
         app = _status_app()
 
         app._set_sensor_status(overlay.SENSOR_STATUS_PARTIAL)
@@ -448,7 +640,12 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(app.status_label.options["text"], "Sensors: partial data")
         self.assertEqual(app.status_label.options["fg"], "#facc15")
 
-        app._set_config_status("failed")
+        app._set_config_status(overlay.STATUS_CONFIG_ADJUSTED)
+        self.assertTrue(app.status_label.packed)
+        self.assertEqual(app.status_label.options["text"], "Config adjusted")
+        self.assertEqual(app.status_label.options["fg"], "#facc15")
+
+        app._set_config_status(overlay.STATUS_CONFIG_SAVE_ERROR)
         self.assertTrue(app.status_label.packed)
         self.assertEqual(app.status_label.options["text"], "Config save failed")
         self.assertEqual(app.status_label.options["fg"], "#f87171")
@@ -477,6 +674,7 @@ class OverlayHelperTests(unittest.TestCase):
     def test_save_config_wrapper_sets_and_clears_config_status(self):
         app = _status_app()
         app.config = {"x": 1}
+        app._set_config_status(overlay.STATUS_CONFIG_ADJUSTED)
 
         with mock.patch.object(overlay, "save_config", return_value=(False, "failed")):
             ok, message = app._save_config()
@@ -485,12 +683,14 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(message, "failed")
         self.assertTrue(app.status_label.packed)
         self.assertEqual(app.status_label.options["text"], "Config save failed")
+        self.assertEqual(app._config_status, overlay.STATUS_CONFIG_SAVE_ERROR)
 
         with mock.patch.object(overlay, "save_config", return_value=(True, "Config saved")):
             ok, message = app._save_config()
 
         self.assertTrue(ok)
         self.assertEqual(message, "Config saved")
+        self.assertIsNone(app._config_status)
         self.assertFalse(app.status_label.packed)
 
     def test_open_log_file_opens_existing_file(self):
