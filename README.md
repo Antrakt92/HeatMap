@@ -46,29 +46,32 @@
    cd HeatMap
    ```
 
-2. **Установите зависимости:**
+2. **Создайте виртуальное окружение и установите зависимости:**
    ```bash
-   python -m pip install -r requirements.txt
+   python -m venv .venv
+   .venv\Scripts\python -m pip install -r requirements.txt
    ```
 
 3. **Скачайте и проверьте библиотеки для мониторинга:**
    ```bash
-   python setup.py
+   .venv\Scripts\python setup.py
    ```
    Это загрузит прямые зависимости `LibreHardwareMonitorLib.dll` и `HidSharp.dll`, затем проверит весь bundled runtime из `lib/` по `lib_manifest.json`.
 
    Чтобы только проверить уже существующий `lib/` без скачивания:
    ```bash
-   python setup.py --verify
+   .venv\Scripts\python setup.py --verify
    ```
 
 4. **Запустите:**
    ```bash
    run_as_admin.bat
    ```
+   Launcher выбирает интерпретатор в таком порядке: `.venv`, затем `venv`, затем первый `python.exe` из `PATH` с соседним `pythonw.exe`. Перед запросом прав администратора он запускает `setup.py --preflight` выбранным Python и не стартует overlay, если зависимости или DLL runtime не готовы.
+
    Или вручную от имени администратора:
    ```bash
-   python overlay.py
+   .venv\Scripts\python overlay.py
    ```
 
 ## Управление

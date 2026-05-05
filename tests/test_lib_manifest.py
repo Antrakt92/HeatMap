@@ -135,17 +135,77 @@ class LibManifestTests(unittest.TestCase):
             mock.patch.object(setup, "verify_lib_manifest", return_value=(True, [])),
             mock.patch.object(setup, "_print_manifest_result"),
             mock.patch.object(setup, "_unsupported_runtime_message") as runtime_check,
+            mock.patch.object(setup, "run_preflight") as preflight,
         ):
             self.assertEqual(setup.main(["--verify"]), 0)
         runtime_check.assert_not_called()
+        preflight.assert_not_called()
 
         with (
             mock.patch.object(setup, "verify_lib_manifest", return_value=(False, ["bad"])),
             mock.patch.object(setup, "_print_manifest_result"),
             mock.patch.object(setup, "_unsupported_runtime_message") as runtime_check,
+            mock.patch.object(setup, "run_preflight") as preflight,
         ):
             self.assertEqual(setup.main(["--verify"]), 1)
         runtime_check.assert_not_called()
+        preflight.assert_not_called()
+
+    def test_preflight_main_returns_success_when_checks_pass(self):
+        with (
+            mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
+            mock.patch.object(setup, "_check_preflight_dependencies", return_value=[]),
+            mock.patch.object(setup, "verify_lib_manifest", return_value=(True, [])) as verify,
+            mock.patch.object(setup, "download_and_extract") as download,
+            mock.patch("builtins.print") as printed,
+        ):
+            self.assertEqual(setup.main(["--preflight"]), 0)
+
+        verify.assert_called_once_with(allow_extra_dlls=True)
+        download.assert_not_called()
+        printed.assert_called_with("Preflight OK")
+
+    def test_preflight_main_rejects_unsupported_runtime_without_download(self):
+        with (
+            mock.patch.object(setup, "_unsupported_runtime_message", return_value="unsupported runtime"),
+            mock.patch.object(setup, "_check_preflight_dependencies", return_value=[]),
+            mock.patch.object(setup, "verify_lib_manifest", return_value=(True, [])),
+            mock.patch.object(setup, "download_and_extract") as download,
+            mock.patch("builtins.print") as printed,
+        ):
+            self.assertEqual(setup.main(["--preflight"]), 1)
+
+        download.assert_not_called()
+        output = "\n".join(call.args[0] for call in printed.call_args_list)
+        self.assertIn("ERROR: unsupported runtime", output)
+
+    def test_preflight_main_returns_failure_when_dependency_import_fails(self):
+        with (
+            mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
+            mock.patch.object(setup, "_check_preflight_dependencies", return_value=["missing pythonnet"]),
+            mock.patch.object(setup, "verify_lib_manifest", return_value=(True, [])),
+            mock.patch.object(setup, "download_and_extract") as download,
+            mock.patch("builtins.print") as printed,
+        ):
+            self.assertEqual(setup.main(["--preflight"]), 1)
+
+        download.assert_not_called()
+        output = "\n".join(call.args[0] for call in printed.call_args_list)
+        self.assertIn("ERROR: missing pythonnet", output)
+
+    def test_preflight_main_returns_failure_when_manifest_verify_fails(self):
+        with (
+            mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
+            mock.patch.object(setup, "_check_preflight_dependencies", return_value=[]),
+            mock.patch.object(setup, "verify_lib_manifest", return_value=(False, ["missing DLL: lib/a.dll"])),
+            mock.patch.object(setup, "download_and_extract") as download,
+            mock.patch("builtins.print") as printed,
+        ):
+            self.assertEqual(setup.main(["--preflight"]), 1)
+
+        download.assert_not_called()
+        output = "\n".join(call.args[0] for call in printed.call_args_list)
+        self.assertIn("ERROR: DLL runtime: missing DLL: lib/a.dll", output)
 
     def test_default_main_downloads_then_verifies(self):
         with (

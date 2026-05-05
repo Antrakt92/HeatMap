@@ -4,6 +4,7 @@ Run this once before using the overlay.
 """
 import argparse
 import hashlib
+import importlib
 import io
 import json
 import os
@@ -23,6 +24,10 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MANIFEST_DLL_RE = re.compile(r"^lib/[^/\\]+\.dll$")
 _SOURCE_TYPES = {"nuget", "bundled-unknown"}
 _SUPPORTED_MACHINES = {"amd64", "x86_64", "x64"}
+_PREFLIGHT_MODULES = (
+    ("psutil", "psutil"),
+    ("clr", "pythonnet"),
+)
 
 
 class SetupError(Exception):
@@ -196,6 +201,41 @@ def _print_manifest_result(ok, messages):
         print(f"  ERROR: {message}")
 
 
+def _check_preflight_dependencies(import_module=importlib.import_module):
+    messages = []
+    for module_name, package_name in _PREFLIGHT_MODULES:
+        try:
+            import_module(module_name)
+        except Exception as e:
+            messages.append(f"missing or broken dependency {package_name} ({module_name}): {e}")
+    return messages
+
+
+def run_preflight():
+    messages = []
+
+    unsupported = _unsupported_runtime_message()
+    if unsupported:
+        messages.append(unsupported)
+
+    messages.extend(_check_preflight_dependencies())
+
+    ok, manifest_messages = verify_lib_manifest(allow_extra_dlls=True)
+    if not ok:
+        messages.extend(f"DLL runtime: {message}" for message in manifest_messages)
+
+    return not messages, messages
+
+
+def _print_preflight_result(ok, messages):
+    if ok:
+        print("Preflight OK")
+        return
+    print("Preflight failed:")
+    for message in messages:
+        print(f"  ERROR: {message}")
+
+
 def _verify_hash(data, filename, expected_hashes):
     """Verify SHA256 hash of downloaded DLL data. Returns True if OK."""
     expected = expected_hashes.get(filename)
@@ -264,12 +304,19 @@ def download_and_extract():
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Download and verify HeatMap hardware monitor DLLs.")
-    parser.add_argument("--verify", action="store_true", help="Only verify lib_manifest.json against lib/*.dll.")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--verify", action="store_true", help="Only verify lib_manifest.json against lib/*.dll.")
+    group.add_argument("--preflight", action="store_true", help="Check runtime, Python deps, and DLLs without downloading.")
     args = parser.parse_args(argv)
 
     if args.verify:
         ok, messages = verify_lib_manifest()
         _print_manifest_result(ok, messages)
+        return 0 if ok else 1
+
+    if args.preflight:
+        ok, messages = run_preflight()
+        _print_preflight_result(ok, messages)
         return 0 if ok else 1
 
     unsupported = _unsupported_runtime_message()
