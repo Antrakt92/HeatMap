@@ -1,0 +1,243 @@
+{
+  "manifest_version": 1,
+  "files": [
+    {
+      "file": "lib/BlackSharp.Core.dll",
+      "sha256": "cafb93afcc8d8a367e21f619673d05c06887d8964867fed1371f02ded1cd3e23",
+      "size": 32768,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    },
+    {
+      "file": "lib/DiskInfoToolkit.dll",
+      "sha256": "53df47b4bbb4962c38acf2d6d0d94cff771513704fbbd9b3525789d6341bf03e",
+      "size": 903168,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    },
+    {
+      "file": "lib/HidSharp.dll",
+      "sha256": "d86690efde30ea9179f669320f39148853793b743a98b531afeaf30598e22f54",
+      "size": 262792,
+      "required": true,
+      "source": {
+        "type": "nuget",
+        "package": "HidSharp",
+        "version": "2.6.4",
+        "url": "https://www.nuget.org/api/v2/package/HidSharp/2.6.4",
+        "package_path": "lib/net35/HidSharp.dll"
+      },
+      "notes": "Direct setup.py dependency with pinned SHA256."
+    },
+    {
+      "file": "lib/LibreHardwareMonitorLib.dll",
+      "sha256": "21673a431323cd350f31f7598d3e1a161bf9d0a4c030b76ef475441fbd30ac33",
+      "size": 1138688,
+      "required": true,
+      "source": {
+        "type": "nuget",
+        "package": "LibreHardwareMonitorLib",
+        "version": "0.9.5",
+        "url": "https://www.nuget.org/api/v2/package/LibreHardwareMonitorLib/0.9.5",
+        "package_path": "runtimes/win-x64/lib/net472/LibreHardwareMonitorLib.dll"
+      },
+      "notes": "Direct setup.py dependency with pinned SHA256."
+    },
+    {
+      "file": "lib/Microsoft.Bcl.AsyncInterfaces.dll",
+      "sha256": "b0e3846b989ce190d3472567054187669b648b962dab20472f54a3bfda1fb207",
+      "size": 28432,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    },
+    {
+      "file": "lib/Microsoft.Bcl.HashCode.dll",
+      "sha256": "3a4e851ee5fc0f6182aa5a3d65dc56fcd6979b65334b5c3b92fbdc791457c0ab",
+      "size": 26920,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    },
+    {
+      "file": "lib/RAMSPDToolkit-NDD.dll",
+      "sha256": "b6882354c7c8ec186617e421507743dbfae09c5c1fc24cef76a1d0c0c26651de",
+      "size": 233472,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    },
+    {
+      "file": "lib/System.Buffers.dll",
+      "sha256": "2d78d770c9cb997199154ae8c018b9f1d1efbc86729f7264dde6dbad2a12cac3",
+      "size": 23816,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    },
+    {
+      "file": "lib/System.CodeDom.dll",
+      "sha256": "8908ae643cfcde1b7ae0d839847a60822432b7497aa4469898f13f4d118662b2",
+      "size": 34056,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    },
+    {
+      "file": "lib/System.Collections.Immutable.dll",
+      "sha256": "5baa117252ee684e26903603596854b649bc25eddcb0cdef3b100658fc3c334c",
+      "size": 253192,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    },
+    {
+      "file": "lib/System.Formats.Nrbf.dll",
+      "sha256": "9a2c033a2cdc2e2313676a4f1fcb3362d60490d4a877576037b2ad6829b27132",
+      "size": 71480,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    },
+    {
+      "file": "lib/System.IO.Pipelines.dll",
+      "sha256": "22acb89394f4a557ee5b462e6581e752748f62b783bf6bcb118d33ded2eba3cc",
+      "size": 85816,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    },
+    {
+      "file": "lib/System.Memory.dll",
+      "sha256": "d5e8e4866f9cfa66f7765660f84b210198893e55335487afe5ebda342c0e913d",
+      "size": 145200,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    },
+    {
+      "file": "lib/System.Numerics.Vectors.dll",
+      "sha256": "20c2fa81b8c70d651099d762954f285fd4f942e63b2d7217c145dab8d4b2f4c9",
+      "size": 110344,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    },
+    {
+      "file": "lib/System.Reflection.Metadata.dll",
+      "sha256": "a1a9aaabf7651b26177e99e982d9f7dbe57b9aece693f4f2770c28b27c2d26df",
+      "size": 515336,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    },
+    {
+      "file": "lib/System.Resources.Extensions.dll",
+      "sha256": "7a149160e596f039909f5a81dd3d100056443ea1c9d18c073e31ee98853b692a",
+      "size": 116016,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    },
+    {
+      "file": "lib/System.Runtime.CompilerServices.Unsafe.dll",
+      "sha256": "08cbd7278b66f1e68425a82d4b97181a4130d93e3dd91831407aba7212ccdacf",
+      "size": 19256,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    },
+    {
+      "file": "lib/System.Security.AccessControl.dll",
+      "sha256": "ff14c5f628b9a6798d173aefbba0a43d61e66f715108e2576ac0d3dfab9071d0",
+      "size": 35952,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    },
+    {
+      "file": "lib/System.Security.Principal.Windows.dll",
+      "sha256": "b4d8e15adc235d0e858e39b5133e5d00a4baa8c94f4f39e3b5e791b0f9c0c806",
+      "size": 18312,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    },
+    {
+      "file": "lib/System.Text.Encodings.Web.dll",
+      "sha256": "c82de7b478ff911eaeb4748a06003b8782e6f007bdc03d48073c24edda9a7a09",
+      "size": 87816,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    },
+    {
+      "file": "lib/System.Text.Json.dll",
+      "sha256": "cbec3d4f0ee7c8d488f402c676ec076a8e50859194d100b6eba85215586b4a68",
+      "size": 777480,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    },
+    {
+      "file": "lib/System.Threading.AccessControl.dll",
+      "sha256": "2c187d84fa488802907f602a512bde920bce32f05998c3bd6a7f2324e1610f18",
+      "size": 34576,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    },
+    {
+      "file": "lib/System.Threading.Tasks.Extensions.dll",
+      "sha256": "af4e13ef418fd89b432de20cd1dfb7fa10a7179c8dd049c9856316e50c5949ca",
+      "size": 27960,
+      "required": true,
+      "source": {
+        "type": "bundled-unknown"
+      },
+      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+    }
+  ]
+}

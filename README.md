@@ -49,11 +49,16 @@
    pip install -r requirements.txt
    ```
 
-3. **Скачайте библиотеки для мониторинга:**
+3. **Скачайте и проверьте библиотеки для мониторинга:**
    ```bash
    python setup.py
    ```
-   Это загрузит `LibreHardwareMonitorLib.dll` и `HidSharp.dll` в папку `lib/`.
+   Это загрузит прямые зависимости `LibreHardwareMonitorLib.dll` и `HidSharp.dll`, затем проверит весь bundled runtime из `lib/` по `lib_manifest.json`.
+
+   Чтобы только проверить уже существующий `lib/` без скачивания:
+   ```bash
+   python setup.py --verify
+   ```
 
 4. **Запустите:**
    ```bash
