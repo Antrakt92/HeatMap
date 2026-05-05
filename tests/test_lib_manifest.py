@@ -76,6 +76,25 @@ class LibManifestTests(unittest.TestCase):
         self.assertIn("size mismatch for lib/a.dll", joined)
         self.assertIn("hash mismatch for lib/a.dll", joined)
 
+    def test_verify_manifest_can_allow_extra_dlls_for_runtime_startup(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lib_dir = os.path.join(tmpdir, "lib")
+            os.mkdir(lib_dir)
+            with open(os.path.join(lib_dir, "a.dll"), "wb") as f:
+                f.write(b"abc")
+            with open(os.path.join(lib_dir, "extra.dll"), "wb") as f:
+                f.write(b"extra")
+            manifest_path = _write_manifest(tmpdir, [_entry("lib/a.dll")])
+
+            ok, messages = setup.verify_lib_manifest(
+                lib_dir=lib_dir,
+                manifest_path=manifest_path,
+                allow_extra_dlls=True,
+            )
+
+        self.assertTrue(ok, messages)
+        self.assertEqual(messages, [])
+
     def test_verify_manifest_rejects_duplicate_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             lib_dir = os.path.join(tmpdir, "lib")

@@ -171,14 +171,22 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(overlay.disk_temp_color(54), "#facc15")
         self.assertEqual(overlay.disk_temp_color(55), "#f87171")
 
-    def test_missing_required_dlls_reports_only_absent_direct_dlls(self):
-        open(os.path.join(self._tmpdir.name, "LibreHardwareMonitorLib.dll"), "wb").close()
+    def test_runtime_dll_errors_uses_manifest_verifier_and_allows_extra_dlls(self):
+        with mock.patch("setup.verify_lib_manifest", return_value=(False, ["hash mismatch"])) as verify:
+            self.assertEqual(
+                overlay._runtime_dll_errors(lib_dir="lib-dir", manifest_path="manifest.json"),
+                ["hash mismatch"],
+            )
 
-        self.assertEqual(overlay._missing_required_dlls(self._tmpdir.name), ["HidSharp.dll"])
+        verify.assert_called_once_with(
+            lib_dir="lib-dir",
+            manifest_path="manifest.json",
+            allow_extra_dlls=True,
+        )
 
-    def test_main_does_not_kill_previous_instance_when_required_dlls_are_missing(self):
+    def test_main_does_not_kill_previous_instance_when_runtime_dlls_are_invalid(self):
         with (
-            mock.patch.object(overlay, "_missing_required_dlls", return_value=["HidSharp.dll"]),
+            mock.patch.object(overlay, "_runtime_dll_errors", return_value=["missing DLL: lib/System.Memory.dll"]),
             mock.patch.object(overlay, "kill_previous_instances") as kill_previous,
             mock.patch.object(overlay, "_show_error_message") as show_error,
         ):
@@ -188,7 +196,8 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 1)
         kill_previous.assert_not_called()
         show_error.assert_called_once()
-        self.assertIn("HidSharp.dll", show_error.call_args.args[1])
+        self.assertIn("System.Memory.dll", show_error.call_args.args[1])
+        self.assertIn("python setup.py --verify", show_error.call_args.args[1])
 
     def test_is_same_script_invocation_matches_absolute_and_relative_paths(self):
         script_path = os.path.join(self._tmpdir.name, "overlay.py")
@@ -632,6 +641,69 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["cpu_load"], 35)
         self.assertTrue(any("Bad GPU" in message for message in logs.output))
 
+    def test_init_hardware_monitor_keeps_opened_computer_when_sanity_check_block_fails(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        clr_module = ModuleType("clr")
+        clr_module.AddReference = lambda _path: None
+        bad_gpu = _FakeHardware("Bad GPU", HardwareType.GpuNvidia, update_error=RuntimeError("driver timeout"))
+        cpu = _FakeHardware(
+            "CPU",
+            HardwareType.Cpu,
+            sensors=[_FakeSensor("CPU Package", SensorType.Temperature, 42)],
+        )
+        computer = _FakeInitComputer([bad_gpu, cpu])
+        modules["clr"] = clr_module
+        modules["LibreHardwareMonitor.Hardware"].Computer = lambda: computer
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.os.path, "exists", return_value=True),
+            self.assertLogs("HeatMap", level="WARNING") as logs,
+        ):
+            result = overlay.init_hardware_monitor()
+
+        self.assertIs(result, computer)
+        self.assertTrue(computer.opened)
+        self.assertTrue(any("Bad GPU" in message for message in logs.output))
+
+    def test_init_hardware_monitor_keeps_opened_computer_when_cpu_sanity_check_fails(self):
+        modules, HardwareType, _SensorType = _fake_lhm_modules()
+        clr_module = ModuleType("clr")
+        clr_module.AddReference = lambda _path: None
+        cpu = _FakeHardware("CPU", HardwareType.Cpu, update_error=RuntimeError("driver timeout"))
+        computer = _FakeInitComputer([cpu])
+        modules["clr"] = clr_module
+        modules["LibreHardwareMonitor.Hardware"].Computer = lambda: computer
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.os.path, "exists", return_value=True),
+            self.assertLogs("HeatMap", level="WARNING") as logs,
+        ):
+            result = overlay.init_hardware_monitor()
+
+        self.assertIs(result, computer)
+        self.assertTrue(computer.opened)
+        self.assertTrue(any("CPU" in message for message in logs.output))
+
+    def test_init_hardware_monitor_still_falls_back_when_open_fails(self):
+        modules, _HardwareType, _SensorType = _fake_lhm_modules()
+        clr_module = ModuleType("clr")
+        clr_module.AddReference = lambda _path: None
+        computer = _FakeInitComputer([], open_error=RuntimeError("open failed"))
+        modules["clr"] = clr_module
+        modules["LibreHardwareMonitor.Hardware"].Computer = lambda: computer
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.os.path, "exists", return_value=True),
+            self.assertLogs("HeatMap", level="WARNING") as logs,
+        ):
+            result = overlay.init_hardware_monitor()
+
+        self.assertIsNone(result)
+        self.assertTrue(any("Failed to init LibreHardwareMonitor" in message for message in logs.output))
+
     def test_runtime_status_hides_ok_and_config_priorities_override_sensor_warning(self):
         app = _status_app()
 
@@ -825,6 +897,23 @@ class _FailingHardwareComputer:
     @property
     def Hardware(self):
         raise self._error
+
+
+class _FakeInitComputer:
+    def __init__(self, hardware, open_error=None):
+        self.Hardware = hardware
+        self._open_error = open_error
+        self.opened = False
+        self.IsCpuEnabled = False
+        self.IsGpuEnabled = False
+        self.IsStorageEnabled = False
+        self.IsMemoryEnabled = False
+        self.IsMotherboardEnabled = False
+
+    def Open(self):
+        if self._open_error is not None:
+            raise self._open_error
+        self.opened = True
 
 
 def _completed(returncode=0, stdout=b"", stderr=b""):

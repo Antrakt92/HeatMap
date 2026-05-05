@@ -124,7 +124,7 @@ def _manifest_entries_by_file(manifest):
     return entries, messages
 
 
-def verify_lib_manifest(lib_dir=LIB_DIR, manifest_path=MANIFEST_PATH):
+def verify_lib_manifest(lib_dir=LIB_DIR, manifest_path=MANIFEST_PATH, allow_extra_dlls=False):
     try:
         manifest = load_lib_manifest(manifest_path)
     except Exception as e:
@@ -145,8 +145,9 @@ def verify_lib_manifest(lib_dir=LIB_DIR, manifest_path=MANIFEST_PATH):
     actual_keys = set(actual)
     for key in sorted(expected_keys - actual_keys):
         messages.append(f"missing DLL: {entries[key]['file']}")
-    for key in sorted(actual_keys - expected_keys):
-        messages.append(f"extra DLL not in manifest: {_relative_dll_path(actual[key], lib_dir)}")
+    if not allow_extra_dlls:
+        for key in sorted(actual_keys - expected_keys):
+            messages.append(f"extra DLL not in manifest: {_relative_dll_path(actual[key], lib_dir)}")
 
     for key in sorted(expected_keys & actual_keys):
         entry = entries[key]

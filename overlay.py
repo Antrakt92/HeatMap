@@ -28,11 +28,9 @@ import psutil
 # --- Paths ---
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LIB_DIR = os.path.join(APP_DIR, "lib")
+LIB_MANIFEST_PATH = os.path.join(APP_DIR, "lib_manifest.json")
 CONFIG_PATH = os.path.join(APP_DIR, "overlay_config.json")
 SCRIPT_PATH = os.path.join(APP_DIR, "overlay.py")
-REQUIRED_DLLS = ("LibreHardwareMonitorLib.dll", "HidSharp.dll")
-
-
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 _LOG_DATEFMT = "%H:%M:%S"
 
@@ -404,6 +402,40 @@ def disable_autostart():
 
 
 # --- Load LibreHardwareMonitor ---
+def _check_lhm_cpu_temperature(computer, HardwareType, SensorType):
+    """Best-effort warning for blocked LHM driver; never disables an opened computer."""
+    try:
+        hardware_items = list(computer.Hardware)
+    except Exception:
+        log.warning("Could not enumerate hardware during LHM sanity check", exc_info=True)
+        return
+
+    checked_cpu = False
+    has_cpu_temp = False
+    for hw in hardware_items:
+        try:
+            hw.Update()
+            if hw.HardwareType != HardwareType.Cpu:
+                continue
+            checked_cpu = True
+            for sensor in hw.Sensors:
+                if sensor.SensorType == SensorType.Temperature and sensor.Value is not None:
+                    if float(sensor.Value) > 0:
+                        has_cpu_temp = True
+                        break
+            break
+        except Exception:
+            log.warning("Skipping hardware block during LHM sanity check: %s", _hardware_label(hw), exc_info=True)
+
+    if checked_cpu and not has_cpu_temp:
+        log.warning(
+            "LHM kernel driver may be blocked (CPU temp unavailable). "
+            "Check Windows Vulnerable Driver Blocklist "
+            "(HKLM\\SYSTEM\\CurrentControlSet\\Control\\CI\\Config"
+            "\\VulnerableDriverBlocklistEnable)."
+        )
+
+
 def init_hardware_monitor():
     """Initialize LibreHardwareMonitor via pythonnet."""
     try:
@@ -422,24 +454,8 @@ def init_hardware_monitor():
         computer.IsMotherboardEnabled = True
         computer.Open()
 
-        # Sanity check: verify kernel driver loaded (CPU temp should be non-zero)
-        _has_cpu_temp = False
         from LibreHardwareMonitor.Hardware import HardwareType, SensorType
-        for hw in computer.Hardware:
-            hw.Update()
-            if hw.HardwareType == HardwareType.Cpu:
-                for s in hw.Sensors:
-                    if s.SensorType == SensorType.Temperature and s.Value is not None:
-                        if float(s.Value) > 0:
-                            _has_cpu_temp = True
-                break
-        if not _has_cpu_temp:
-            log.warning(
-                "LHM kernel driver may be blocked (CPU temp unavailable). "
-                "Check Windows Vulnerable Driver Blocklist "
-                "(HKLM\\SYSTEM\\CurrentControlSet\\Control\\CI\\Config"
-                "\\VulnerableDriverBlocklistEnable)."
-            )
+        _check_lhm_cpu_temperature(computer, HardwareType, SensorType)
 
         return computer
     except Exception:
@@ -799,11 +815,18 @@ def save_config(cfg):
         return False, message
 
 
-def _missing_required_dlls(lib_dir=LIB_DIR):
-    return [
-        dll_name for dll_name in REQUIRED_DLLS
-        if not os.path.exists(os.path.join(lib_dir, dll_name))
-    ]
+def _runtime_dll_errors(lib_dir=LIB_DIR, manifest_path=LIB_MANIFEST_PATH):
+    try:
+        from setup import verify_lib_manifest
+    except Exception as e:
+        return [f"failed to load DLL verifier: {e}"]
+
+    ok, messages = verify_lib_manifest(
+        lib_dir=lib_dir,
+        manifest_path=manifest_path,
+        allow_extra_dlls=True,
+    )
+    return [] if ok else messages
 
 
 # --- Main overlay class ---
@@ -1908,12 +1931,15 @@ def _is_admin():
 
 
 def main():
-    missing_dlls = _missing_required_dlls()
-    if missing_dlls:
-        missing = "\n".join(f"- {dll_name}" for dll_name in missing_dlls)
+    dll_errors = _runtime_dll_errors()
+    if dll_errors:
+        details = "\n".join(f"- {message}" for message in dll_errors[:8])
+        if len(dll_errors) > 8:
+            details += f"\n- ... and {len(dll_errors) - 8} more"
         _show_error_message(
             "HW Monitor",
-            f"Required DLLs not found:\n{missing}\n\nRun: python setup.py",
+            "Hardware monitor runtime is missing or corrupted:\n"
+            f"{details}\n\nRun: python setup.py --verify\nThen run: python setup.py",
         )
         sys.exit(1)
 
