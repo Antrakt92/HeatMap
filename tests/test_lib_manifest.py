@@ -155,6 +155,7 @@ class LibManifestTests(unittest.TestCase):
         with (
             mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
             mock.patch.object(setup, "_check_preflight_dependencies", return_value=[]),
+            mock.patch.object(setup, "_check_pawnio_driver", return_value=[]),
             mock.patch.object(setup, "verify_lib_manifest", return_value=(True, [])) as verify,
             mock.patch.object(setup, "download_and_extract") as download,
             mock.patch("builtins.print") as printed,
@@ -169,6 +170,7 @@ class LibManifestTests(unittest.TestCase):
         with (
             mock.patch.object(setup, "_unsupported_runtime_message", return_value="unsupported runtime"),
             mock.patch.object(setup, "_check_preflight_dependencies", return_value=[]),
+            mock.patch.object(setup, "_check_pawnio_driver", return_value=[]),
             mock.patch.object(setup, "verify_lib_manifest", return_value=(True, [])),
             mock.patch.object(setup, "download_and_extract") as download,
             mock.patch("builtins.print") as printed,
@@ -183,6 +185,7 @@ class LibManifestTests(unittest.TestCase):
         with (
             mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
             mock.patch.object(setup, "_check_preflight_dependencies", return_value=["missing pythonnet"]),
+            mock.patch.object(setup, "_check_pawnio_driver", return_value=[]),
             mock.patch.object(setup, "verify_lib_manifest", return_value=(True, [])),
             mock.patch.object(setup, "download_and_extract") as download,
             mock.patch("builtins.print") as printed,
@@ -193,10 +196,27 @@ class LibManifestTests(unittest.TestCase):
         output = "\n".join(call.args[0] for call in printed.call_args_list)
         self.assertIn("ERROR: missing pythonnet", output)
 
+    def test_preflight_main_warns_but_succeeds_when_pawnio_driver_missing(self):
+        with (
+            mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
+            mock.patch.object(setup, "_check_preflight_dependencies", return_value=[]),
+            mock.patch.object(setup, "_check_pawnio_driver", return_value=["PawnIO driver is not installed"]),
+            mock.patch.object(setup, "verify_lib_manifest", return_value=(True, [])),
+            mock.patch.object(setup, "download_and_extract") as download,
+            mock.patch("builtins.print") as printed,
+        ):
+            self.assertEqual(setup.main(["--preflight"]), 0)
+
+        download.assert_not_called()
+        output = "\n".join(call.args[0] for call in printed.call_args_list)
+        self.assertIn("Preflight OK", output)
+        self.assertIn("WARNING: PawnIO driver is not installed", output)
+
     def test_preflight_main_returns_failure_when_manifest_verify_fails(self):
         with (
             mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
             mock.patch.object(setup, "_check_preflight_dependencies", return_value=[]),
+            mock.patch.object(setup, "_check_pawnio_driver", return_value=[]),
             mock.patch.object(setup, "verify_lib_manifest", return_value=(False, ["missing DLL: lib/a.dll"])),
             mock.patch.object(setup, "download_and_extract") as download,
             mock.patch("builtins.print") as printed,
@@ -207,11 +227,26 @@ class LibManifestTests(unittest.TestCase):
         output = "\n".join(call.args[0] for call in printed.call_args_list)
         self.assertIn("ERROR: DLL runtime: missing DLL: lib/a.dll", output)
 
+    def test_pawnio_driver_check_points_to_bundled_installer(self):
+        existing = {setup.PAWNIO_SETUP_PATH}
+
+        with mock.patch.object(setup, "is_pawnio_driver_installed", return_value=False):
+            messages = setup._check_pawnio_driver(path_exists=existing.__contains__)
+
+        self.assertEqual(len(messages), 1)
+        self.assertIn("PawnIO_setup.exe", messages[0])
+        self.assertIn("restart HeatMap", messages[0])
+
+    def test_pawnio_driver_check_passes_when_installed(self):
+        with mock.patch.object(setup, "is_pawnio_driver_installed", return_value=True):
+            self.assertEqual(setup._check_pawnio_driver(), [])
+
     def test_default_main_downloads_then_verifies(self):
         with (
             mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
             mock.patch.object(setup, "download_and_extract") as download,
             mock.patch.object(setup, "verify_lib_manifest", return_value=(True, [])) as verify,
+            mock.patch.object(setup, "_check_pawnio_driver", return_value=[]),
             mock.patch.object(setup, "_print_manifest_result"),
             mock.patch("builtins.print"),
         ):
@@ -225,10 +260,27 @@ class LibManifestTests(unittest.TestCase):
             mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
             mock.patch.object(setup, "download_and_extract"),
             mock.patch.object(setup, "verify_lib_manifest", return_value=(False, ["missing"])),
+            mock.patch.object(setup, "_check_pawnio_driver", return_value=[]),
             mock.patch.object(setup, "_print_manifest_result"),
             mock.patch("builtins.print"),
         ):
             self.assertEqual(setup.main([]), 1)
+
+    def test_default_main_warns_but_succeeds_when_pawnio_driver_missing(self):
+        with (
+            mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
+            mock.patch.object(setup, "download_and_extract") as download,
+            mock.patch.object(setup, "verify_lib_manifest", return_value=(True, [])),
+            mock.patch.object(setup, "_check_pawnio_driver", return_value=["PawnIO driver is not installed"]),
+            mock.patch.object(setup, "_print_manifest_result"),
+            mock.patch("builtins.print") as printed,
+        ):
+            self.assertEqual(setup.main([]), 0)
+
+        download.assert_called_once()
+        output = "\n".join(call.args[0] for call in printed.call_args_list)
+        self.assertIn("Setup complete!", output)
+        self.assertIn("WARNING: PawnIO driver is not installed", output)
 
     def test_default_main_returns_failure_when_download_fails(self):
         with (

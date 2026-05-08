@@ -57,6 +57,9 @@
    .venv\Scripts\python setup.py
    ```
    Это загрузит прямые зависимости `LibreHardwareMonitorLib.dll` и `HidSharp.dll`, затем проверит весь bundled runtime из `lib/` по `lib_manifest.json`.
+   Для CPU temperature и motherboard fan sensors также нужен установленный
+   PawnIO driver. Если preflight сообщает, что PawnIO не установлен, запустите
+   `PawnIO_setup.exe` от имени администратора и перезапустите HeatMap.
 
    Чтобы только проверить уже существующий `lib/` без скачивания:
    ```bash

@@ -573,7 +573,7 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["cpu_fan"], 1300)
         self.assertEqual(data["cpu_fan_pct"], 55)
 
-    def test_read_sensors_cpu_fan_control_falls_back_to_hash_one_then_first(self):
+    def test_read_sensors_cpu_fan_control_falls_back_to_matching_number_only(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
         motherboard_hash_one = _FakeHardware(
             "Motherboard",
@@ -614,7 +614,54 @@ class OverlayHelperTests(unittest.TestCase):
             first_data = overlay.read_sensors(SimpleNamespace(Hardware=[motherboard_first]))
 
         self.assertEqual(hash_one_data["cpu_fan_pct"], 42)
-        self.assertEqual(first_data["cpu_fan_pct"], 37)
+        self.assertIsNone(first_data["cpu_fan_pct"])
+
+    def test_read_sensors_cpu_temperature_from_subhardware(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        cpu = _FakeHardware(
+            "CPU",
+            HardwareType.Cpu,
+            sensors=[_FakeSensor("CPU Total", SensorType.Load, 35)],
+            sub_hardware=[
+                _FakeHardware(
+                    "CPU DTS",
+                    "SensorController",
+                    sensors=[_FakeSensor("CPU Package", SensorType.Temperature, 52)],
+                ),
+            ],
+        )
+        computer = SimpleNamespace(Hardware=[cpu])
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.psutil, "virtual_memory", return_value=_memory(percent=44, used_gb=6, total_gb=12)),
+        ):
+            data = overlay.read_sensors(computer)
+
+        self.assertEqual(data["cpu_temp"], 52)
+        self.assertEqual(data["cpu_load"], 35)
+
+    def test_read_sensors_cpu_fan_falls_back_to_numbered_motherboard_fan(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        motherboard = _FakeHardware(
+            "Motherboard",
+            HardwareType.Motherboard,
+            sensors=[
+                _FakeSensor("Fan #1", SensorType.Fan, 1250),
+                _FakeSensor("Fan Control #1", SensorType.Control, 48),
+            ],
+        )
+        computer = SimpleNamespace(Hardware=[motherboard])
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.psutil, "cpu_percent", return_value=10),
+            mock.patch.object(overlay.psutil, "virtual_memory", return_value=_memory(percent=20, used_gb=2, total_gb=8)),
+        ):
+            data = overlay.read_sensors(computer)
+
+        self.assertEqual(data["cpu_fan"], 1250)
+        self.assertEqual(data["cpu_fan_pct"], 48)
 
     def test_read_sensors_logs_and_skips_sensor_value_failure(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
@@ -728,6 +775,19 @@ class OverlayHelperTests(unittest.TestCase):
 
         app._set_sensor_status(None)
         self.assertFalse(app.status_label.packed)
+
+    def test_runtime_status_keeps_driver_warning_until_fixed(self):
+        app = _status_app()
+        app._driver_status = overlay.SENSOR_STATUS_DRIVER_MISSING
+
+        app._refresh_runtime_status()
+        self.assertTrue(app.status_label.packed)
+        self.assertEqual(app.status_label.options["text"], "Driver: install PawnIO")
+        self.assertEqual(app.status_label.options["fg"], "#f87171")
+
+        app._set_sensor_status(None)
+        self.assertTrue(app.status_label.packed)
+        self.assertEqual(app.status_label.options["text"], "Driver: install PawnIO")
 
     def test_update_ui_applies_and_clears_sensor_status(self):
         app = _update_ui_app()
@@ -927,6 +987,7 @@ def _status_app():
     app.status_label = _FakeLabel()
     app._status_label_visible = False
     app._config_status = None
+    app._driver_status = None
     app._sensor_status = None
     return app
 

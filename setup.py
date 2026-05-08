@@ -15,10 +15,15 @@ import ssl
 import sys
 import zipfile
 import urllib.request
+try:
+    import winreg
+except ImportError:  # pragma: no cover - setup is Windows-only at runtime.
+    winreg = None
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LIB_DIR = os.path.join(APP_DIR, "lib")
 MANIFEST_PATH = os.path.join(APP_DIR, "lib_manifest.json")
+PAWNIO_SETUP_PATH = os.path.join(APP_DIR, "PawnIO_setup.exe")
 MANIFEST_VERSION = 1
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MANIFEST_DLL_RE = re.compile(r"^lib/[^/\\]+\.dll$")
@@ -211,6 +216,92 @@ def _check_preflight_dependencies(import_module=importlib.import_module):
     return messages
 
 
+def _reg_key_exists(root, path, registry=None):
+    registry = winreg if registry is None else registry
+    if registry is None:
+        return False
+    try:
+        with registry.OpenKey(root, path):
+            return True
+    except OSError:
+        return False
+
+
+def _reg_value(root, path, name, registry=None):
+    registry = winreg if registry is None else registry
+    if registry is None:
+        return None
+    try:
+        with registry.OpenKey(root, path) as key:
+            value, _value_type = registry.QueryValueEx(key, name)
+            return str(value)
+    except OSError:
+        return None
+
+
+def _service_registry_contains(text, registry=None):
+    registry = winreg if registry is None else registry
+    if registry is None:
+        return False
+    needle = text.lower()
+    try:
+        with registry.OpenKey(registry.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Services") as services:
+            index = 0
+            while True:
+                try:
+                    service_name = registry.EnumKey(services, index)
+                except OSError:
+                    break
+                index += 1
+                if needle in service_name.lower():
+                    return True
+                service_path = rf"SYSTEM\CurrentControlSet\Services\{service_name}"
+                display = _reg_value(registry.HKEY_LOCAL_MACHINE, service_path, "DisplayName", registry)
+                image = _reg_value(registry.HKEY_LOCAL_MACHINE, service_path, "ImagePath", registry)
+                if any(value and needle in value.lower() for value in (display, image)):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def is_pawnio_driver_installed(registry=None, env=None, path_exists=os.path.exists):
+    registry = winreg if registry is None else registry
+    env = os.environ if env is None else env
+    if registry is not None and _reg_key_exists(
+        registry.HKEY_LOCAL_MACHINE,
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO",
+        registry,
+    ):
+        return True
+    program_files = env.get("ProgramFiles")
+    if program_files and path_exists(os.path.join(program_files, "PawnIO", "PawnIOLib.dll")):
+        return True
+    return _service_registry_contains("pawnio", registry)
+
+
+def _check_pawnio_driver(path_exists=os.path.exists):
+    if is_pawnio_driver_installed(path_exists=path_exists):
+        return []
+    if path_exists(PAWNIO_SETUP_PATH):
+        return [
+            "PawnIO driver is not installed; run PawnIO_setup.exe as administrator, "
+            "then restart HeatMap."
+        ]
+    return [
+        "PawnIO driver is not installed and PawnIO_setup.exe is missing; restore the "
+        "repository files or install PawnIO, then restart HeatMap."
+    ]
+
+
+def _print_pawnio_warnings(messages):
+    if not messages:
+        return
+    print("PawnIO warning:")
+    for message in messages:
+        print(f"  WARNING: {message}")
+
+
 def run_preflight():
     messages = []
 
@@ -317,6 +408,8 @@ def main(argv=None):
     if args.preflight:
         ok, messages = run_preflight()
         _print_preflight_result(ok, messages)
+        if ok:
+            _print_pawnio_warnings(_check_pawnio_driver())
         return 0 if ok else 1
 
     unsupported = _unsupported_runtime_message()
@@ -339,8 +432,8 @@ def main(argv=None):
             "Restore the tracked lib/ directory from git or reclone the repository until full runtime restore is implemented."
         )
         return 1
-
     print("\nSetup complete! DLLs are in the 'lib' directory.")
+    _print_pawnio_warnings(_check_pawnio_driver())
     print("You can now run the overlay with: run_as_admin.bat")
     return 0
 

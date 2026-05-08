@@ -75,6 +75,7 @@ LOG_PATH = _configure_logging()
 SENSOR_STATUS_KEY = "_sensor_status"
 SENSOR_STATUS_PSUTIL_FALLBACK = "psutil_fallback"
 SENSOR_STATUS_PARTIAL = "partial"
+SENSOR_STATUS_DRIVER_MISSING = "driver_missing"
 STATUS_CONFIG_SAVE_ERROR = "config_save_error"
 STATUS_CONFIG_ADJUSTED = "config_adjusted"
 CONFIG_STATUSES = (STATUS_CONFIG_SAVE_ERROR, STATUS_CONFIG_ADJUSTED)
@@ -83,12 +84,14 @@ STATUS_TEXT = {
     STATUS_CONFIG_ADJUSTED: "Config adjusted",
     SENSOR_STATUS_PSUTIL_FALLBACK: "Sensors: psutil fallback",
     SENSOR_STATUS_PARTIAL: "Sensors: partial data",
+    SENSOR_STATUS_DRIVER_MISSING: "Driver: install PawnIO",
 }
 STATUS_COLOR = {
     STATUS_CONFIG_SAVE_ERROR: "#f87171",
     STATUS_CONFIG_ADJUSTED: "#facc15",
     SENSOR_STATUS_PSUTIL_FALLBACK: "#facc15",
     SENSOR_STATUS_PARTIAL: "#facc15",
+    SENSOR_STATUS_DRIVER_MISSING: "#f87171",
 }
 
 # --- Windows API constants ---
@@ -418,7 +421,7 @@ def _check_lhm_cpu_temperature(computer, HardwareType, SensorType):
             if hw.HardwareType != HardwareType.Cpu:
                 continue
             checked_cpu = True
-            for sensor in hw.Sensors:
+            for sensor in _iter_hardware_sensors(hw, include_subhardware=True):
                 if sensor.SensorType == SensorType.Temperature and sensor.Value is not None:
                     if float(sensor.Value) > 0:
                         has_cpu_temp = True
@@ -516,6 +519,58 @@ def _hardware_label(hw):
     return f"{name} ({hw_type})"
 
 
+def _iter_hardware_sensors(hw, include_subhardware=False):
+    for sensor in getattr(hw, "Sensors", ()):
+        yield sensor
+    if include_subhardware:
+        for sub in getattr(hw, "SubHardware", ()):
+            for sensor in getattr(sub, "Sensors", ()):
+                yield sensor
+
+
+def _fan_number(name):
+    match = re.search(r"#\s*(\d+)|fan\s*#?\s*(\d+)", name)
+    if not match:
+        return None
+    return match.group(1) or match.group(2)
+
+
+def _is_primary_cpu_fan_name(name):
+    return ("cpu" in name or "processor" in name) and "optional" not in name
+
+
+def _select_cpu_fan(fan_sensors):
+    if not fan_sensors:
+        return None
+    for name, val in fan_sensors:
+        if _is_primary_cpu_fan_name(name):
+            return name, val
+    for name, val in fan_sensors:
+        if _fan_number(name) == "1":
+            return name, val
+    for name, val in fan_sensors:
+        if "pump" not in name and "optional" not in name:
+            return name, val
+    return fan_sensors[0]
+
+
+def _select_cpu_fan_control(control_sensors, fan_name, has_cpu_fan):
+    if not control_sensors:
+        return None
+    for name, val in control_sensors:
+        if _is_primary_cpu_fan_name(name):
+            return val
+    fan_idx = _fan_number(fan_name or "")
+    if fan_idx:
+        for name, val in control_sensors:
+            if _fan_number(name) == fan_idx:
+                return val
+    for name, val in control_sensors:
+        if _fan_number(name) == "1":
+            return val
+    return None
+
+
 def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True):
     hw_type = hw.HardwareType
     # Skip intentionally ignored iGPU before touching its driver-backed sensors.
@@ -532,7 +587,7 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
 
     if hw_type == HardwareType.Cpu:
         core_clocks = []
-        for sensor in hw.Sensors:
+        for sensor in _iter_hardware_sensors(hw, include_subhardware=True):
             if sensor.SensorType == SensorType.Temperature:
                 name = sensor.Name.lower()
                 val = _safe_round(sensor.Value)
@@ -619,33 +674,31 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
         })
 
     elif hw_type == HardwareType.Motherboard:
-        for sub in hw.SubHardware:
-            control_sensors = []
-            for sensor in sub.Sensors:
-                name = sensor.Name.lower()
-                if sensor.SensorType == SensorType.Fan:
-                    val = _safe_round(sensor.Value)
-                    if val is not None:
-                        if "cpu" in name and "optional" not in name:
-                            data["cpu_fan"] = val
-                elif sensor.SensorType == SensorType.Control:
-                    val = _safe_round(sensor.Value)
-                    if val is not None:
-                        control_sensors.append((name, val))
-            # Match CPU fan percentage: prefer "cpu" in name, then "#1", then first control
-            if data["cpu_fan_pct"] is None:
-                for cname, cval in control_sensors:
-                    if "cpu" in cname:
-                        data["cpu_fan_pct"] = cval
-                        break
-                else:
-                    for cname, cval in control_sensors:
-                        if "#1" in cname:
-                            data["cpu_fan_pct"] = cval
-                            break
-                    else:
-                        if control_sensors and data["cpu_fan"] is not None:
-                            data["cpu_fan_pct"] = control_sensors[0][1]
+        fan_sensors = []
+        control_sensors = []
+        for sensor in _iter_hardware_sensors(hw, include_subhardware=True):
+            name = sensor.Name.lower()
+            if sensor.SensorType == SensorType.Fan:
+                val = _safe_round(sensor.Value)
+                if val is not None:
+                    fan_sensors.append((name, val))
+            elif sensor.SensorType == SensorType.Control:
+                val = _safe_round(sensor.Value)
+                if val is not None:
+                    control_sensors.append((name, val))
+        if data["cpu_fan"] is None:
+            selected_fan = _select_cpu_fan(fan_sensors)
+            if selected_fan is not None:
+                _name, data["cpu_fan"] = selected_fan
+        else:
+            selected_fan = None
+        if data["cpu_fan_pct"] is None:
+            fan_name = selected_fan[0] if selected_fan else None
+            data["cpu_fan_pct"] = _select_cpu_fan_control(
+                control_sensors,
+                fan_name,
+                data["cpu_fan"] is not None,
+            )
 
     elif hw_type == HardwareType.Memory:
         for sensor in hw.Sensors:
@@ -829,6 +882,15 @@ def _runtime_dll_errors(lib_dir=LIB_DIR, manifest_path=LIB_MANIFEST_PATH):
     return [] if ok else messages
 
 
+def is_pawnio_driver_installed():
+    try:
+        from setup import is_pawnio_driver_installed as check_pawnio
+        return check_pawnio()
+    except Exception:
+        log.warning("Failed to check PawnIO driver status", exc_info=True)
+        return True
+
+
 # --- Main overlay class ---
 class OverlayApp:
     def __init__(self):
@@ -838,6 +900,11 @@ class OverlayApp:
         self.computer = init_hardware_monitor()
         self.config, config_warning = load_config_result()
         self._config_status = STATUS_CONFIG_ADJUSTED if config_warning else None
+        self._driver_status = (
+            SENSOR_STATUS_DRIVER_MISSING
+            if self.computer is not None and not is_pawnio_driver_installed()
+            else None
+        )
         self._sensor_status = SENSOR_STATUS_PSUTIL_FALLBACK if self.computer is None else None
         # Validate saved position is within visible screen area
         virt_x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
@@ -1044,6 +1111,8 @@ class OverlayApp:
     def _current_runtime_status(self):
         if getattr(self, "_config_status", None):
             return self._config_status
+        if getattr(self, "_driver_status", None):
+            return self._driver_status
         return getattr(self, "_sensor_status", None)
 
     def _refresh_runtime_status(self):
