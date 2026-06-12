@@ -36,6 +36,7 @@ class OverlayHelperTests(unittest.TestCase):
                 "y": False,
                 "peek_enabled": False,
                 "alerts_enabled": True,
+                "details_enabled": False,
                 "gpu_fan_max_rpm": True,
                 "cpu_fan_max_rpm": False,
             }, f)
@@ -47,6 +48,7 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(cfg["y"], 50)
         self.assertFalse(cfg["peek_enabled"])
         self.assertTrue(cfg["alerts_enabled"])
+        self.assertFalse(cfg["details_enabled"])
         self.assertEqual(cfg["gpu_fan_max_rpm"], 2200)
         self.assertEqual(cfg["cpu_fan_max_rpm"], 1800)
 
@@ -56,6 +58,7 @@ class OverlayHelperTests(unittest.TestCase):
                 "x": True,
                 "y": 20.8,
                 "peek_enabled": "yes",
+                "details_enabled": "please",
                 "alerts_enabled": False,
                 "gpu_fan_max_rpm": -1,
                 "cpu_fan_max_rpm": 2500.2,
@@ -68,11 +71,12 @@ class OverlayHelperTests(unittest.TestCase):
             "x": 50,
             "y": 20,
             "peek_enabled": True,
+            "details_enabled": False,
             "alerts_enabled": False,
             "gpu_fan_max_rpm": 2200,
             "cpu_fan_max_rpm": 2500,
         })
-        self.assertEqual(message, "Adjusted invalid config fields: x, peek_enabled, gpu_fan_max_rpm")
+        self.assertEqual(message, "Adjusted invalid config fields: x, peek_enabled, details_enabled, gpu_fan_max_rpm")
 
     def test_save_config_writes_atomically_loadable_json(self):
         cfg = {
@@ -80,6 +84,7 @@ class OverlayHelperTests(unittest.TestCase):
             "y": 456,
             "peek_enabled": False,
             "alerts_enabled": True,
+            "details_enabled": True,
             "gpu_fan_max_rpm": 3333,
             "cpu_fan_max_rpm": 2222,
         }
@@ -97,6 +102,7 @@ class OverlayHelperTests(unittest.TestCase):
             "y": 456,
             "peek_enabled": False,
             "alerts_enabled": True,
+            "details_enabled": True,
             "gpu_fan_max_rpm": 3333,
             "cpu_fan_max_rpm": 2222,
         }
@@ -116,6 +122,7 @@ class OverlayHelperTests(unittest.TestCase):
             "y": 50,
             "peek_enabled": True,
             "alerts_enabled": True,
+            "details_enabled": False,
             "gpu_fan_max_rpm": 2200,
             "cpu_fan_max_rpm": 1800,
         })
@@ -130,6 +137,30 @@ class OverlayHelperTests(unittest.TestCase):
 
         self.assertEqual(cfg["x"], 50)
         self.assertIn("Failed to load config", message)
+
+    def test_load_config_result_missing_new_fields_uses_defaults_without_warning(self):
+        with open(overlay.CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump({
+                "x": 123,
+                "y": 456,
+                "peek_enabled": False,
+                "alerts_enabled": True,
+                "gpu_fan_max_rpm": 3333,
+                "cpu_fan_max_rpm": 2222,
+            }, f)
+
+        cfg, message = overlay.load_config_result()
+
+        self.assertEqual(cfg, {
+            "x": 123,
+            "y": 456,
+            "peek_enabled": False,
+            "alerts_enabled": True,
+            "details_enabled": False,
+            "gpu_fan_max_rpm": 3333,
+            "cpu_fan_max_rpm": 2222,
+        })
+        self.assertIsNone(message)
 
     def test_load_config_result_non_dict_returns_warning(self):
         with open(overlay.CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -332,13 +363,16 @@ class OverlayHelperTests(unittest.TestCase):
     def test_enable_autostart_deletes_legacy_registry_after_successful_create(self):
         result = _completed(returncode=0)
         with (
-            mock.patch.object(overlay, "_run_schtasks", return_value=(result, None)),
+            mock.patch.object(overlay, "_run_schtasks", return_value=(result, None)) as run_schtasks,
             mock.patch.object(overlay, "_delete_legacy_autostart_value", return_value=(True, "removed")) as delete_legacy,
         ):
             ok, message = overlay.enable_autostart()
 
         self.assertTrue(ok)
         self.assertEqual(message, "Autostart enabled")
+        args = run_schtasks.call_args.args[0]
+        self.assertIn("/DELAY", args)
+        self.assertEqual(args[args.index("/DELAY") + 1], "0000:30")
         delete_legacy.assert_called_once()
 
     def test_toggle_autostart_failed_enable_shows_error_and_marks_menu(self):
@@ -466,6 +500,28 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["cpu_load"], 11)
         self.assertEqual(data["ram_pct"], 22)
 
+    def test_read_sensors_storage_reads_life_level_when_available(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        storage = _FakeHardware(
+            "Samsung SSD 980 PRO",
+            HardwareType.Storage,
+            sensors=[
+                _FakeSensor("Temperature", SensorType.Temperature, 41),
+                _FakeSensor("Used Space", SensorType.Load, 68),
+                _FakeSensor("Life", SensorType.Level, 77),
+            ],
+        )
+        computer = SimpleNamespace(Hardware=[storage])
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.psutil, "cpu_percent", return_value=11),
+            mock.patch.object(overlay.psutil, "virtual_memory", return_value=_memory(percent=22, used_gb=5, total_gb=10)),
+        ):
+            data = overlay.read_sensors(computer)
+
+        self.assertEqual(data["disks"], [{"name": "980 PRO", "temp": 41, "used_pct": 68, "life_pct": 77}])
+
     def test_read_sensors_gpu_vram_fan_and_clock_parsing(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
         gpu = _FakeHardware(
@@ -496,7 +552,46 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["gpu_fan"], 1420)
         self.assertEqual(data["gpu_fan_pct"], 57)
         self.assertEqual(data["gpu_vram_pct"], 50)
+        self.assertEqual(data["gpu_vram_used_gb"], 6.0)
+        self.assertEqual(data["gpu_vram_total_gb"], 12.0)
         self.assertNotIn(overlay.SENSOR_STATUS_KEY, data)
+
+    def test_read_sensors_marks_empty_gpu_hardware_for_reinit(self):
+        modules, HardwareType, _SensorType = _fake_lhm_modules()
+        gpu = _FakeHardware("AMD Radeon RX 7900 XT", HardwareType.GpuAmd)
+        computer = SimpleNamespace(Hardware=[gpu])
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.psutil, "cpu_percent", return_value=10),
+            mock.patch.object(overlay.psutil, "virtual_memory", return_value=_memory(percent=20, used_gb=2, total_gb=8)),
+        ):
+            data = overlay.read_sensors(computer)
+
+        self.assertEqual(data[overlay.SENSOR_STATUS_KEY], overlay.SENSOR_STATUS_PARTIAL)
+        self.assertTrue(data[overlay.SENSOR_REINIT_KEY])
+
+    def test_read_sensors_ignores_zero_cpu_clocks(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        cpu = _FakeHardware(
+            "CPU",
+            HardwareType.Cpu,
+            sensors=[
+                _FakeSensor("CPU Total", SensorType.Load, 35),
+                _FakeSensor("Cores (Average)", SensorType.Clock, 0.0),
+                _FakeSensor("Core #1", SensorType.Clock, None),
+            ],
+        )
+        computer = SimpleNamespace(Hardware=[cpu])
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.psutil, "virtual_memory", return_value=_memory(percent=44, used_gb=6, total_gb=12)),
+        ):
+            data = overlay.read_sensors(computer)
+
+        self.assertIsNone(data["cpu_clock"])
+        self.assertEqual(data["cpu_load"], 35)
 
     def test_read_sensors_skips_intel_igpu_before_update_when_discrete_gpu_exists(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
@@ -572,6 +667,38 @@ class OverlayHelperTests(unittest.TestCase):
 
         self.assertEqual(data["cpu_fan"], 1300)
         self.assertEqual(data["cpu_fan_pct"], 55)
+
+    def test_read_sensors_collects_motherboard_temperatures(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        motherboard = _FakeHardware(
+            "Motherboard",
+            HardwareType.Motherboard,
+            sub_hardware=[
+                _FakeHardware(
+                    "Controller",
+                    "Controller",
+                    sensors=[
+                        _FakeSensor("VRM MOS", SensorType.Temperature, 34),
+                        _FakeSensor("Chipset", SensorType.Temperature, 30),
+                        _FakeSensor("System #1", SensorType.Temperature, 27),
+                    ],
+                ),
+            ],
+        )
+        computer = SimpleNamespace(Hardware=[motherboard])
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.psutil, "cpu_percent", return_value=10),
+            mock.patch.object(overlay.psutil, "virtual_memory", return_value=_memory(percent=20, used_gb=2, total_gb=8)),
+        ):
+            data = overlay.read_sensors(computer)
+
+        self.assertEqual(data["motherboard_temps"], [
+            {"name": "VRM MOS", "temp": 34},
+            {"name": "Chipset", "temp": 30},
+            {"name": "System #1", "temp": 27},
+        ])
 
     def test_read_sensors_cpu_fan_control_falls_back_to_matching_number_only(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
@@ -789,6 +916,117 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertTrue(app.status_label.packed)
         self.assertEqual(app.status_label.options["text"], "Driver: install PawnIO")
 
+    def test_runtime_status_shows_sensor_warming_up(self):
+        app = _status_app()
+
+        app._set_sensor_status(overlay.SENSOR_STATUS_WARMING_UP)
+
+        self.assertTrue(app.status_label.packed)
+        self.assertEqual(app.status_label.options["text"], "Sensors: warming up")
+        self.assertEqual(app.status_label.options["fg"], "#facc15")
+
+    def test_detail_row_values_format_expanded_sensor_data(self):
+        data = _sample_data()
+        data.update({
+            "cpu_fan": 1800,
+            "gpu_fan": 0,
+            "gpu_vram_used_gb": 0.6,
+            "gpu_vram_total_gb": 20.0,
+            "motherboard_temps": [
+                {"name": "System #1", "temp": 27},
+                {"name": "CPU", "temp": 65},
+                {"name": "PCIe x16", "temp": 31},
+                {"name": "VRM MOS", "temp": 34},
+                {"name": "Chipset", "temp": 30},
+            ],
+            "disks": [
+                {"name": "980", "temp": 34, "used_pct": 67, "life_pct": 77},
+                {"name": "860", "temp": 23, "used_pct": 43, "life_pct": 97},
+            ],
+        })
+
+        values = overlay._detail_row_values(data)
+
+        self.assertEqual(values["detail_cpu_fan_rpm"], "1800 RPM")
+        self.assertEqual(values["detail_gpu_fan_rpm"], "OFF")
+        self.assertEqual(values["detail_vram_gb"], "0.6/20.0G")
+        self.assertEqual(values["detail_board_temps"], "VRM 34°C  CHIP 30°C  SYS 27°C")
+        self.assertEqual(values["detail_disk_life"], "980 77%  860 97%")
+
+    def test_update_peak_values_tracks_maximums(self):
+        peaks = overlay._empty_peak_data()
+        first = _sample_data()
+        first.update({
+            "cpu_temp": 58,
+            "gpu_temp": 60,
+            "ram_pct": 42,
+            "disks": [
+                {"name": "980", "temp": 38, "used_pct": 68},
+                {"name": "860", "temp": 24, "used_pct": 43},
+            ],
+        })
+        second = _sample_data()
+        second.update({
+            "cpu_temp": 62,
+            "gpu_temp": 55,
+            "ram_pct": 40,
+            "disks": [
+                {"name": "980", "temp": 36, "used_pct": 67},
+                {"name": "860", "temp": 25, "used_pct": 44},
+            ],
+        })
+
+        overlay._update_peak_values(peaks, first)
+        overlay._update_peak_values(peaks, second)
+
+        self.assertEqual(peaks, {
+            "cpu_temp": 62,
+            "gpu_temp": 60,
+            "ram_pct": 42,
+            "disk_temp": 38,
+            "disk_used_pct": 68,
+        })
+
+    def test_detail_row_values_includes_peak_values(self):
+        data = _sample_data()
+        peaks = {
+            "cpu_temp": 66,
+            "gpu_temp": 60,
+            "ram_pct": 42,
+            "disk_temp": 38,
+            "disk_used_pct": 68,
+        }
+
+        values = overlay._detail_row_values(data, peaks)
+
+        self.assertEqual(values["detail_peak_temps"], "CPU 66°C  GPU 60°C  DISK 38°C")
+        self.assertEqual(values["detail_peak_usage"], "RAM 42%  DISK 68%")
+
+    def test_build_sensor_diagnostics_includes_status_data_and_sensor_inventory(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        cpu = _FakeHardware(
+            "CPU",
+            HardwareType.Cpu,
+            sensors=[_FakeSensor("CPU Package", SensorType.Temperature, 58)],
+        )
+        computer = SimpleNamespace(Hardware=[cpu])
+        data = _sample_data()
+        data["cpu_temp"] = 58
+
+        with mock.patch.dict(sys.modules, modules):
+            text = overlay.build_sensor_diagnostics(
+                computer,
+                data,
+                is_admin=True,
+                pawnio_installed=True,
+            )
+
+        self.assertIn("Admin: yes", text)
+        self.assertIn("PawnIO: installed", text)
+        self.assertIn("cpu_temp=58", text)
+        self.assertIn("Hardware: CPU (Cpu)", text)
+        self.assertIn("Temperature CPU Package = 58", text)
+
     def test_update_ui_applies_and_clears_sensor_status(self):
         app = _update_ui_app()
         app.sensor_data = _sample_data(status=overlay.SENSOR_STATUS_PSUTIL_FALLBACK)
@@ -802,6 +1040,118 @@ class OverlayHelperTests(unittest.TestCase):
         app.update_ui()
 
         self.assertFalse(app.status_label.packed)
+
+    def test_toggle_details_persists_config_and_updates_menu(self):
+        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.running = True
+        app.config = {"details_enabled": False}
+        app.details_enabled = False
+        app.details_frame = _FakeLabel()
+        app.disk_frame = _FakeFrame([])
+        app.menu_labels = []
+        app._set_menu_label = lambda key, label: app.menu_labels.append((key, label))
+
+        with mock.patch.object(overlay, "save_config", return_value=(True, "Config saved")):
+            app.toggle_details()
+            app.toggle_details()
+
+        self.assertEqual(app.config["details_enabled"], False)
+        self.assertFalse(app.details_enabled)
+        self.assertEqual(app.menu_labels, [("details", "Details: ON"), ("details", "Details: OFF")])
+        self.assertFalse(app.details_frame.packed)
+
+    def test_reset_peaks_clears_peak_state_and_rows(self):
+        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.peaks = {
+            "cpu_temp": 66,
+            "gpu_temp": 60,
+            "ram_pct": 42,
+            "disk_temp": 38,
+            "disk_used_pct": 68,
+        }
+        app.rows = {
+            "detail_peak_temps": _FakeLabel(),
+            "detail_peak_usage": _FakeLabel(),
+        }
+
+        app.reset_peaks()
+
+        self.assertEqual(app.peaks, overlay._empty_peak_data())
+        self.assertEqual(app.rows["detail_peak_temps"].options["text"], "--")
+        self.assertEqual(app.rows["detail_peak_usage"].options["text"], "--")
+
+    def test_copy_diagnostics_uses_fresh_monitor_and_clipboard(self):
+        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.root = _FakeRoot()
+        computer = _CloseableComputer()
+
+        with (
+            mock.patch.object(overlay, "init_hardware_monitor", return_value=computer) as init_monitor,
+            mock.patch.object(overlay, "read_sensors", return_value={"cpu_temp": 58}) as read_sensors,
+            mock.patch.object(overlay, "build_sensor_diagnostics", return_value="diagnostic dump") as build,
+        ):
+            app.copy_diagnostics()
+
+        init_monitor.assert_called_once_with()
+        read_sensors.assert_called_once_with(computer)
+        build.assert_called_once_with(computer, {"cpu_temp": 58})
+        self.assertTrue(computer.closed)
+        self.assertEqual(app.root.clipboard_value, "diagnostic dump")
+
+    def test_sensor_loop_reinitializes_after_repeated_sensor_reinit_hints(self):
+        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        old_computer = _CloseableComputer()
+        new_computer = _CloseableComputer()
+        app.computer = old_computer
+        app.running = True
+        app.lock = threading.Lock()
+        app._stop_event = _LoopStopEvent(iterations=3)
+        app._sensor_start_time = 0
+
+        data = _sample_data(status=overlay.SENSOR_STATUS_PARTIAL)
+        data[overlay.SENSOR_REINIT_KEY] = True
+
+        with (
+            mock.patch.object(overlay, "read_sensors", return_value=data) as read_sensors,
+            mock.patch.object(overlay, "init_hardware_monitor", return_value=new_computer) as init_monitor,
+            mock.patch.object(overlay.time, "monotonic", return_value=overlay.SENSOR_WARMUP_SECONDS + 1),
+            self.assertLogs("HeatMap", level="WARNING") as logs,
+        ):
+            app.sensor_loop()
+
+        self.assertEqual(read_sensors.call_count, 3)
+        self.assertTrue(old_computer.closed)
+        self.assertIs(app.computer, new_computer)
+        init_monitor.assert_called_once_with()
+        self.assertTrue(any("incomplete sensor samples" in message for message in logs.output))
+
+    def test_sensor_loop_reinitializes_immediately_during_warmup(self):
+        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        old_computer = _CloseableComputer()
+        new_computer = _CloseableComputer()
+        app.computer = old_computer
+        app.running = True
+        app.lock = threading.Lock()
+        app._stop_event = _LoopStopEvent(iterations=1)
+        app._sensor_start_time = 100
+
+        data = _sample_data(status=overlay.SENSOR_STATUS_PARTIAL)
+        data[overlay.SENSOR_REINIT_KEY] = True
+
+        with (
+            mock.patch.object(overlay, "read_sensors", return_value=data) as read_sensors,
+            mock.patch.object(overlay, "init_hardware_monitor", return_value=new_computer) as init_monitor,
+            mock.patch.object(overlay.time, "monotonic", return_value=100 + overlay.SENSOR_WARMUP_SECONDS - 1),
+            self.assertLogs("HeatMap", level="WARNING") as logs,
+        ):
+            app.sensor_loop()
+
+        self.assertEqual(read_sensors.call_count, 1)
+        self.assertTrue(old_computer.closed)
+        self.assertIs(app.computer, new_computer)
+        init_monitor.assert_called_once_with()
+        self.assertEqual(app.sensor_data[overlay.SENSOR_STATUS_KEY], overlay.SENSOR_STATUS_WARMING_UP)
+        self.assertTrue(any("incomplete sensor samples" in message for message in logs.output))
 
     def test_save_config_wrapper_sets_and_clears_config_status(self):
         app = _status_app()
@@ -959,6 +1309,27 @@ class _FailingHardwareComputer:
         raise self._error
 
 
+class _CloseableComputer:
+    def __init__(self):
+        self.closed = False
+
+    def Close(self):
+        self.closed = True
+
+
+class _LoopStopEvent:
+    def __init__(self, iterations):
+        self.iterations = 0
+        self.max_iterations = iterations
+
+    def is_set(self):
+        return self.iterations >= self.max_iterations
+
+    def wait(self, _timeout):
+        self.iterations += 1
+        return self.is_set()
+
+
 class _FakeInitComputer:
     def __init__(self, hardware, open_error=None):
         self.Hardware = hardware
@@ -1014,6 +1385,7 @@ def _update_ui_app():
     app._GPU_FAN_MAX_RPM = 2200
     app._CPU_FAN_MAX_RPM = 1800
     app._config_save_pending = False
+    app.peaks = overlay._empty_peak_data()
     app.config = {}
     app.alerts_enabled = False
     app._check_alerts = lambda _data: None
@@ -1060,6 +1432,7 @@ def _fake_lhm_modules():
         Fan="Fan",
         Control="Control",
         SmallData="SmallData",
+        Level="Level",
     )
     root_module = ModuleType("LibreHardwareMonitor")
     hardware_module = ModuleType("LibreHardwareMonitor.Hardware")

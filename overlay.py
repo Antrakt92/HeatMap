@@ -73,9 +73,12 @@ def _configure_logging():
 LOG_PATH = _configure_logging()
 
 SENSOR_STATUS_KEY = "_sensor_status"
+SENSOR_REINIT_KEY = "_sensor_reinit"
 SENSOR_STATUS_PSUTIL_FALLBACK = "psutil_fallback"
 SENSOR_STATUS_PARTIAL = "partial"
+SENSOR_STATUS_WARMING_UP = "warming_up"
 SENSOR_STATUS_DRIVER_MISSING = "driver_missing"
+SENSOR_WARMUP_SECONDS = 60
 STATUS_CONFIG_SAVE_ERROR = "config_save_error"
 STATUS_CONFIG_ADJUSTED = "config_adjusted"
 CONFIG_STATUSES = (STATUS_CONFIG_SAVE_ERROR, STATUS_CONFIG_ADJUSTED)
@@ -84,6 +87,7 @@ STATUS_TEXT = {
     STATUS_CONFIG_ADJUSTED: "Config adjusted",
     SENSOR_STATUS_PSUTIL_FALLBACK: "Sensors: psutil fallback",
     SENSOR_STATUS_PARTIAL: "Sensors: partial data",
+    SENSOR_STATUS_WARMING_UP: "Sensors: warming up",
     SENSOR_STATUS_DRIVER_MISSING: "Driver: install PawnIO",
 }
 STATUS_COLOR = {
@@ -91,6 +95,7 @@ STATUS_COLOR = {
     STATUS_CONFIG_ADJUSTED: "#facc15",
     SENSOR_STATUS_PSUTIL_FALLBACK: "#facc15",
     SENSOR_STATUS_PARTIAL: "#facc15",
+    SENSOR_STATUS_WARMING_UP: "#facc15",
     SENSOR_STATUS_DRIVER_MISSING: "#f87171",
 }
 
@@ -203,6 +208,7 @@ def _show_error_message(title, message):
 # --- Autostart management (Task Scheduler — no UAC prompt at login) ---
 _CREATE_NO_WINDOW = 0x08000000
 AUTOSTART_TASK = "HWMonitorOverlay"
+AUTOSTART_DELAY = "0000:30"  # Task Scheduler /DELAY format is mmmm:ss.
 # Legacy registry key — cleaned up when switching to Task Scheduler
 _LEGACY_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _TASK_XML_DECL_RE = re.compile(r"^\s*<\?xml[^>]*\?>", re.IGNORECASE)
@@ -369,6 +375,7 @@ def enable_autostart():
         "/TN", AUTOSTART_TASK,
         "/TR", _format_autostart_task_run(pythonw, script_path),
         "/SC", "ONLOGON",
+        "/DELAY", AUTOSTART_DELAY,
         "/RL", "HIGHEST",
         "/F",
     ])
@@ -489,10 +496,23 @@ def _empty_sensor_data():
         "gpu_fan": None,
         "gpu_fan_pct": None,
         "gpu_vram_pct": None,
+        "gpu_vram_used_gb": None,
+        "gpu_vram_total_gb": None,
         "ram_pct": None,
         "ram_used_gb": None,
         "ram_total_gb": None,
+        "motherboard_temps": [],
         "disks": [],
+    }
+
+
+def _empty_peak_data():
+    return {
+        "cpu_temp": None,
+        "gpu_temp": None,
+        "ram_pct": None,
+        "disk_temp": None,
+        "disk_used_pct": None,
     }
 
 
@@ -604,7 +624,7 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
             elif sensor.SensorType == SensorType.Clock:
                 if "core" in sensor.Name.lower():
                     val = _safe_round(sensor.Value)
-                    if val is not None:
+                    if val is not None and val > 0:
                         core_clocks.append(val)
         if core_clocks:
             data["cpu_clock"] = round(max(core_clocks))
@@ -612,7 +632,11 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
     elif hw_type in (HardwareType.GpuAmd, HardwareType.GpuNvidia, HardwareType.GpuIntel):
         gpu_mem_used = None
         gpu_mem_total = None
-        for sensor in hw.Sensors:
+        sensors = list(hw.Sensors)
+        if not sensors:
+            data[SENSOR_STATUS_KEY] = SENSOR_STATUS_PARTIAL
+            data[SENSOR_REINIT_KEY] = True
+        for sensor in sensors:
             if sensor.SensorType == SensorType.Temperature:
                 if "core" in sensor.Name.lower() or "gpu" in sensor.Name.lower():
                     val = _safe_round(sensor.Value)
@@ -649,10 +673,13 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
                         gpu_mem_total = float(sensor.Value)
         if gpu_mem_used is not None and gpu_mem_total and gpu_mem_total > 0:
             data["gpu_vram_pct"] = round(gpu_mem_used / gpu_mem_total * 100)
+            data["gpu_vram_used_gb"] = round(gpu_mem_used / 1024, 1)
+            data["gpu_vram_total_gb"] = round(gpu_mem_total / 1024, 1)
 
     elif hw_type == HardwareType.Storage:
         disk_temp = None
         disk_used = None
+        disk_life = None
         for sensor in hw.Sensors:
             if sensor.SensorType == SensorType.Temperature:
                 if disk_temp is None:
@@ -662,16 +689,27 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
                     val = _safe_round(sensor.Value)
                     if val is not None:
                         disk_used = val
+            elif sensor.SensorType == SensorType.Level:
+                name = sensor.Name.lower()
+                val = _safe_round(sensor.Value)
+                if val is not None:
+                    if name == "life" or "remaining life" in name:
+                        disk_life = val
+                    elif "percentage used" in name and disk_life is None:
+                        disk_life = max(0, min(100, 100 - val))
         # Always show storage devices — even without sensors
         name = re.sub(
             r"^(Samsung|WDC|Western Digital|Kingston|Crucial|Seagate|Toshiba|SK Hynix|Intel|Micron|SanDisk|ADATA|Corsair)\s*(SSD\s*)?",
             "", str(hw.Name), flags=re.IGNORECASE,
         ).strip() or str(hw.Name)
-        data["disks"].append({
+        disk_data = {
             "name": name,
             "temp": disk_temp,
             "used_pct": disk_used,
-        })
+        }
+        if disk_life is not None:
+            disk_data["life_pct"] = disk_life
+        data["disks"].append(disk_data)
 
     elif hw_type == HardwareType.Motherboard:
         fan_sensors = []
@@ -686,6 +724,13 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
                 val = _safe_round(sensor.Value)
                 if val is not None:
                     control_sensors.append((name, val))
+            elif sensor.SensorType == SensorType.Temperature:
+                val = _safe_round(sensor.Value)
+                if val is not None:
+                    data["motherboard_temps"].append({
+                        "name": str(sensor.Name),
+                        "temp": val,
+                    })
         if data["cpu_fan"] is None:
             selected_fan = _select_cpu_fan(fan_sensors)
             if selected_fan is not None:
@@ -790,27 +835,211 @@ def disk_usage_color(pct):
     return "#f87171"
 
 
+def _format_rpm(value):
+    if value is None:
+        return "--"
+    if value == 0:
+        return "OFF"
+    return f"{value} RPM"
+
+
+def _format_vram_gb(used_gb, total_gb):
+    if used_gb is None or total_gb is None:
+        return "--"
+    return f"{used_gb:.1f}/{total_gb:.1f}G"
+
+
+def _short_board_temp_name(name):
+    lowered = str(name).lower()
+    if "vrm" in lowered:
+        return "VRM"
+    if "chipset" in lowered:
+        return "CHIP"
+    if "system" in lowered:
+        return "SYS"
+    if "cpu" in lowered:
+        return "CPU"
+    cleaned = re.sub(r"[^a-z0-9]+", "", lowered)
+    return (cleaned[:4] or "TEMP").upper()
+
+
+def _format_board_temps(temps):
+    parts = []
+    def priority(index_item):
+        index, item = index_item
+        lowered = str(item.get("name", "")).lower()
+        if "vrm" in lowered:
+            rank = 0
+        elif "chipset" in lowered:
+            rank = 1
+        elif "system" in lowered:
+            rank = 2
+        elif "cpu" in lowered:
+            rank = 3
+        elif "pcie" in lowered:
+            rank = 4
+        else:
+            rank = 5
+        return rank, index
+
+    for _index, item in sorted(enumerate(temps), key=priority)[:3]:
+        temp = item.get("temp")
+        if temp is None:
+            continue
+        parts.append(f"{_short_board_temp_name(item.get('name', ''))} {temp}°C")
+    return "  ".join(parts) if parts else "--"
+
+
+def _format_disk_life(disks):
+    parts = []
+    for disk in disks:
+        life = disk.get("life_pct")
+        if life is None:
+            continue
+        parts.append(f"{disk.get('name', 'Disk')} {life}%")
+    return "  ".join(parts) if parts else "--"
+
+
+def _update_peak_values(peaks, data):
+    for key in ("cpu_temp", "gpu_temp", "ram_pct"):
+        value = data.get(key)
+        if value is not None and (peaks.get(key) is None or value > peaks[key]):
+            peaks[key] = value
+
+    for disk in data.get("disks", []):
+        temp = disk.get("temp")
+        if temp is not None and (peaks.get("disk_temp") is None or temp > peaks["disk_temp"]):
+            peaks["disk_temp"] = temp
+        used = disk.get("used_pct")
+        if used is not None and (peaks.get("disk_used_pct") is None or used > peaks["disk_used_pct"]):
+            peaks["disk_used_pct"] = used
+    return peaks
+
+
+def _format_peak_temps(peaks):
+    parts = []
+    if peaks.get("cpu_temp") is not None:
+        parts.append(f"CPU {peaks['cpu_temp']}°C")
+    if peaks.get("gpu_temp") is not None:
+        parts.append(f"GPU {peaks['gpu_temp']}°C")
+    if peaks.get("disk_temp") is not None:
+        parts.append(f"DISK {peaks['disk_temp']}°C")
+    return "  ".join(parts) if parts else "--"
+
+
+def _format_peak_usage(peaks):
+    parts = []
+    if peaks.get("ram_pct") is not None:
+        parts.append(f"RAM {peaks['ram_pct']}%")
+    if peaks.get("disk_used_pct") is not None:
+        parts.append(f"DISK {peaks['disk_used_pct']}%")
+    return "  ".join(parts) if parts else "--"
+
+
+def _detail_row_values(data, peaks=None):
+    peaks = _empty_peak_data() if peaks is None else peaks
+    return {
+        "detail_cpu_fan_rpm": _format_rpm(data.get("cpu_fan")),
+        "detail_gpu_fan_rpm": _format_rpm(data.get("gpu_fan")),
+        "detail_vram_gb": _format_vram_gb(
+            data.get("gpu_vram_used_gb"),
+            data.get("gpu_vram_total_gb"),
+        ),
+        "detail_board_temps": _format_board_temps(data.get("motherboard_temps", [])),
+        "detail_disk_life": _format_disk_life(data.get("disks", [])),
+        "detail_peak_temps": _format_peak_temps(peaks),
+        "detail_peak_usage": _format_peak_usage(peaks),
+    }
+
+
+def _format_diag_value(value):
+    if value is None:
+        return "None"
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        return f"{value:.2f}"
+    return str(value)
+
+
+def build_sensor_diagnostics(computer, sensor_data=None, is_admin=None, pawnio_installed=None):
+    is_admin = _is_admin() if is_admin is None else is_admin
+    pawnio_installed = is_pawnio_driver_installed() if pawnio_installed is None else pawnio_installed
+    lines = [
+        "HeatMap diagnostics",
+        f"Admin: {'yes' if is_admin else 'no'}",
+        f"PawnIO: {'installed' if pawnio_installed else 'missing'}",
+        f"LHM computer: {'yes' if computer is not None else 'no'}",
+    ]
+
+    if sensor_data:
+        lines.append("Sensor data:")
+        for key in (
+            "cpu_temp", "cpu_load", "cpu_clock", "cpu_fan", "cpu_fan_pct",
+            "gpu_temp", "gpu_load", "gpu_clock", "gpu_fan", "gpu_fan_pct",
+            "gpu_vram_pct", "gpu_vram_used_gb", "gpu_vram_total_gb",
+            "ram_pct", SENSOR_STATUS_KEY, SENSOR_REINIT_KEY,
+        ):
+            if key in sensor_data:
+                lines.append(f"  {key}={_format_diag_value(sensor_data.get(key))}")
+
+    if computer is None:
+        return "\n".join(lines)
+
+    try:
+        hardware_items = list(computer.Hardware)
+    except Exception as e:
+        lines.append(f"Hardware enumeration failed: {e}")
+        return "\n".join(lines)
+
+    lines.append("Hardware inventory:")
+    for hw in hardware_items:
+        lines.append(f"Hardware: {_hardware_label(hw)}")
+        sensors = list(_iter_hardware_sensors(hw, include_subhardware=True))
+        if not sensors:
+            lines.append("  no sensors")
+            continue
+        for sensor in sensors:
+            try:
+                value = sensor.Value
+            except Exception as e:
+                value = f"ERROR {e}"
+            lines.append(
+                f"  {sensor.SensorType} {sensor.Name} = {_format_diag_value(value)}"
+            )
+    return "\n".join(lines)
+
+
 # --- Config ---
 def _default_config():
     return {"x": 50, "y": 50, "peek_enabled": True, "alerts_enabled": True,
+            "details_enabled": False,
             "gpu_fan_max_rpm": 2200, "cpu_fan_max_rpm": 1800}
 
 
 def _normalize_config(cfg, defaults):
     invalid_keys = []
-    normalized = dict(cfg)
+    provided_keys = set(cfg)
+    normalized = dict(defaults)
+    normalized.update(cfg)
     for key in ("x", "y"):
+        if key not in provided_keys:
+            continue
         value = normalized.get(key)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             normalized[key] = defaults[key]
             invalid_keys.append(key)
         else:
             normalized[key] = int(value)
-    for key in ("peek_enabled", "alerts_enabled"):
+    for key in ("peek_enabled", "alerts_enabled", "details_enabled"):
+        if key not in provided_keys:
+            continue
         if not isinstance(normalized.get(key), bool):
             normalized[key] = defaults[key]
             invalid_keys.append(key)
     for key in ("gpu_fan_max_rpm", "cpu_fan_max_rpm"):
+        if key not in provided_keys:
+            continue
         value = normalized.get(key)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
             normalized[key] = defaults[key]
@@ -905,7 +1134,12 @@ class OverlayApp:
             if self.computer is not None and not is_pawnio_driver_installed()
             else None
         )
-        self._sensor_status = SENSOR_STATUS_PSUTIL_FALLBACK if self.computer is None else None
+        self._sensor_start_time = time.monotonic()
+        self._sensor_status = (
+            SENSOR_STATUS_PSUTIL_FALLBACK
+            if self.computer is None
+            else SENSOR_STATUS_WARMING_UP
+        )
         # Validate saved position is within visible screen area
         virt_x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
         virt_y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
@@ -923,6 +1157,7 @@ class OverlayApp:
 
         # --- Alert system ---
         self.alerts_enabled = self.config.get("alerts_enabled", True)
+        self.details_enabled = self.config.get("details_enabled", False)
         self._last_alert_time = 0
         self._ALERT_COOLDOWN = 60  # seconds between repeated alerts
         self._CRITICAL = {
@@ -936,6 +1171,7 @@ class OverlayApp:
         self._GPU_FAN_MAX_RPM = self.config.get("gpu_fan_max_rpm", 2200)
         self._CPU_FAN_MAX_RPM = self.config.get("cpu_fan_max_rpm", 1800)
         self._config_save_pending = False
+        self.peaks = _empty_peak_data()
 
         # --- tkinter setup ---
         self.root = tk.Tk()
@@ -1044,11 +1280,23 @@ class OverlayApp:
         self.rows["ram_gb"].pack(side="right", padx=(0, 4))
         tk.Frame(self.content, bg="#2a2a4e", height=1).pack(fill="x", pady=2)
 
+        # Optional expanded detail rows.
+        self.details_frame = tk.Frame(self.content, bg="#1a1a2e")
+        self.details_frame.pack(fill="x")
+        self._make_row("detail_cpu_fan_rpm", "C.RPM", parent=self.details_frame, label_fg=CPU_CLR)
+        self._make_row("detail_gpu_fan_rpm", "G.RPM", parent=self.details_frame, label_fg=GPU_CLR)
+        self._make_row("detail_vram_gb", "V.GB", parent=self.details_frame, label_fg=GPU_CLR)
+        self._make_row("detail_board_temps", "BOARD", parent=self.details_frame, label_fg="#a7f3d0")
+        self._make_row("detail_disk_life", "D.LIFE", parent=self.details_frame, label_fg=self.DISK_CLR)
+        self._make_row("detail_peak_temps", "PEAK.T", parent=self.details_frame, label_fg="#facc15")
+        self._make_row("detail_peak_usage", "PEAK.%", parent=self.details_frame, label_fg="#facc15")
+
         # Disk rows created dynamically
         self.disk_frame = tk.Frame(self.content, bg="#1a1a2e")
         self.disk_frame.pack(fill="x")
         self.disk_labels = []
         self._last_disk_names = []
+        self._apply_details_visibility()
 
         # Bottom padding
         tk.Frame(self.content, bg="#1a1a2e", height=2).pack()
@@ -1076,9 +1324,14 @@ class OverlayApp:
         self._add_menu_item("peek",
             "Peek from edge: ON" if self.peek_enabled else "Peek from edge: OFF",
             self.toggle_peek)
+        self._add_menu_item("details",
+            "Details: ON" if self.details_enabled else "Details: OFF",
+            self.toggle_details)
         self.menu.add_separator()
         self.menu.add_command(label="Open log file", command=self.open_log_file)
         self.menu.add_command(label="Copy log path", command=self.copy_log_path)
+        self.menu.add_command(label="Copy diagnostics", command=self.copy_diagnostics)
+        self.menu.add_command(label="Reset peaks", command=self.reset_peaks)
         self.menu.add_separator()
         self.menu.add_command(label="Close", command=self.quit)
         self.root.bind("<Button-3>", self.show_menu)
@@ -1133,7 +1386,11 @@ class OverlayApp:
             self._status_label_visible = True
 
     def _set_sensor_status(self, status):
-        if status not in (SENSOR_STATUS_PSUTIL_FALLBACK, SENSOR_STATUS_PARTIAL):
+        if status not in (
+            SENSOR_STATUS_PSUTIL_FALLBACK,
+            SENSOR_STATUS_PARTIAL,
+            SENSOR_STATUS_WARMING_UP,
+        ):
             status = None
         self._sensor_status = status
         self._refresh_runtime_status()
@@ -1171,6 +1428,33 @@ class OverlayApp:
         except Exception as e:
             log.warning("Failed to copy log path: %s", e, exc_info=True)
             _show_error_message("HeatMap Log", f"Failed to copy log path:\n{e}\n\nLog path:\n{LOG_PATH}")
+
+    def copy_diagnostics(self):
+        computer = None
+        try:
+            computer = init_hardware_monitor()
+            data = read_sensors(computer)
+            text = build_sensor_diagnostics(computer, data)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+        except Exception as e:
+            log.warning("Failed to copy diagnostics: %s", e, exc_info=True)
+            _show_error_message("HeatMap Diagnostics", f"Failed to copy diagnostics:\n{e}")
+        finally:
+            if computer is not None:
+                try:
+                    computer.Close()
+                except Exception:
+                    log.debug("Failed to close diagnostics hardware monitor", exc_info=True)
+
+    def _apply_details_visibility(self):
+        if self.details_enabled:
+            pack_options = {"fill": "x"}
+            if hasattr(self, "disk_frame"):
+                pack_options["before"] = self.disk_frame
+            self.details_frame.pack(**pack_options)
+        else:
+            self.details_frame.pack_forget()
 
     def _get_hwnd(self):
         """Get the native Windows HWND for the tkinter root window."""
@@ -1600,6 +1884,21 @@ class OverlayApp:
             "Alerts: ON" if self.alerts_enabled else "Alerts: OFF"
         )
 
+    def toggle_details(self):
+        self.details_enabled = not self.details_enabled
+        self.config["details_enabled"] = self.details_enabled
+        self._save_config()
+        self._apply_details_visibility()
+        self._set_menu_label("details",
+            "Details: ON" if self.details_enabled else "Details: OFF"
+        )
+
+    def reset_peaks(self):
+        self.peaks = _empty_peak_data()
+        for key in ("detail_peak_temps", "detail_peak_usage"):
+            if key in self.rows:
+                self.rows[key].config(text="--", fg="#888888")
+
     def _flush_config(self):
         """Flush pending config changes to disk (debounced)."""
         self._config_save_pending = False
@@ -1678,6 +1977,7 @@ class OverlayApp:
 
     def sensor_loop(self):
         consecutive_errors = 0
+        consecutive_reinit_hints = 0
         _storage_counter = 14  # start at INTERVAL-1 so first cycle updates storage
         _STORAGE_INTERVAL = 15  # update storage every 15 cycles (~30s)
         while not self._stop_event.is_set():
@@ -1692,11 +1992,36 @@ class OverlayApp:
                     computer = self.computer
                 # Read sensors outside lock to avoid blocking UI thread
                 data = read_sensors(computer, update_storage=update_storage)
+                warmup = (
+                    computer is not None
+                    and time.monotonic() - getattr(self, "_sensor_start_time", 0) < SENSOR_WARMUP_SECONDS
+                )
+                if warmup and data.get(SENSOR_REINIT_KEY):
+                    data[SENSOR_STATUS_KEY] = SENSOR_STATUS_WARMING_UP
                 with self.lock:
                     self.sensor_data = data
                 consecutive_errors = 0
+                if computer is not None and data.get(SENSOR_REINIT_KEY):
+                    consecutive_reinit_hints += 1
+                    reinit_threshold = 1 if warmup else 3
+                    if consecutive_reinit_hints >= reinit_threshold:
+                        log.warning(
+                            "Reinitializing hardware monitor after %d incomplete sensor samples",
+                            consecutive_reinit_hints,
+                        )
+                        with self.lock:
+                            try:
+                                self.computer.Close()
+                            except Exception:
+                                log.debug("Failed to close hardware monitor", exc_info=True)
+                            self.computer = init_hardware_monitor()
+                            computer = self.computer
+                        consecutive_reinit_hints = 0
+                else:
+                    consecutive_reinit_hints = 0
             except Exception as e:
                 consecutive_errors += 1
+                consecutive_reinit_hints = 0
                 log.error("Sensor read error: %s", e, exc_info=True)
                 with self.lock:
                     self.sensor_data = {"error": str(e)}
@@ -1880,6 +2205,14 @@ class OverlayApp:
             else:
                 self.rows[key + "_usage"].config(text="", fg="#888888")
 
+        _update_peak_values(self.peaks, data)
+        for key, text in _detail_row_values(data, self.peaks).items():
+            if key in self.rows:
+                self.rows[key].config(
+                    text=text,
+                    fg="#4ade80" if text != "--" else "#888888",
+                )
+
         # Check critical thresholds and alert
         self._check_alerts(data)
 
@@ -1919,6 +2252,7 @@ class OverlayApp:
             self.config["y"] = self.root.winfo_rooty()
         self.config["peek_enabled"] = self.peek_enabled
         self.config["alerts_enabled"] = self.alerts_enabled
+        self.config["details_enabled"] = self.details_enabled
         self.config["gpu_fan_max_rpm"] = self._GPU_FAN_MAX_RPM
         self.config["cpu_fan_max_rpm"] = self._CPU_FAN_MAX_RPM
         self._save_config(update_status=False)
