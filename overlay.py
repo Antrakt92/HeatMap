@@ -1049,6 +1049,25 @@ def _normalize_config(cfg, defaults):
     return normalized, invalid_keys
 
 
+def _clamp_overlay_position(x, y, window_width, window_height, virt_x, virt_y, virt_w, virt_h):
+    x = int(x)
+    y = int(y)
+    virt_x = int(virt_x)
+    virt_y = int(virt_y)
+    virt_w = int(virt_w)
+    virt_h = int(virt_h)
+    if virt_w <= 0 or virt_h <= 0:
+        return x, y
+
+    window_width = max(1, int(window_width))
+    window_height = max(1, int(window_height))
+    visible_width = min(window_width, virt_w)
+    visible_height = min(window_height, virt_h)
+    max_x = virt_x + virt_w - visible_width
+    max_y = virt_y + virt_h - visible_height
+    return min(max(x, virt_x), max_x), min(max(y, virt_y), max_y)
+
+
 def load_config_result():
     defaults = _default_config()
     if not os.path.exists(CONFIG_PATH):
@@ -1140,14 +1159,6 @@ class OverlayApp:
             if self.computer is None
             else SENSOR_STATUS_WARMING_UP
         )
-        # Validate saved position is within visible screen area
-        virt_x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
-        virt_y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
-        virt_w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
-        virt_h = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
-        cx, cy = self.config.get("x", 50), self.config.get("y", 50)
-        if cx < virt_x or cx >= virt_x + virt_w or cy < virt_y or cy >= virt_y + virt_h:
-            self.config["x"], self.config["y"] = virt_x + 50, virt_y + 50
         self.running = True
         self._stop_event = threading.Event()
         self.sensor_data = {}
@@ -1306,6 +1317,7 @@ class OverlayApp:
         )
         self._status_label_visible = False
         self._refresh_runtime_status()
+        self._clamp_saved_position_to_visible_screen(persist=True)
 
         # --- Right-click menu ---
         self.topmost = False
@@ -1360,6 +1372,35 @@ class OverlayApp:
     def _set_menu_label(self, key, label):
         """Update a menu item's label by its key."""
         self.menu.entryconfig(self._menu_idx[key], label=label)
+
+    def _clamp_saved_position_to_visible_screen(self, persist=False):
+        if not hasattr(self, "root"):
+            return False
+        if getattr(self, "peek_visible", False) or getattr(self, "_peek_animating", False):
+            return False
+        self.root.update_idletasks()
+        virt_x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+        virt_y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+        virt_w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+        virt_h = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+        x, y = _clamp_overlay_position(
+            self.config.get("x", 50),
+            self.config.get("y", 50),
+            self.root.winfo_width(),
+            self.root.winfo_height(),
+            virt_x,
+            virt_y,
+            virt_w,
+            virt_h,
+        )
+        if (x, y) == (self.config.get("x", 50), self.config.get("y", 50)):
+            return False
+        self.config["x"] = x
+        self.config["y"] = y
+        self.root.geometry(f"+{x}+{y}")
+        if persist:
+            self._save_config(update_status=False)
+        return True
 
     def _current_runtime_status(self):
         if getattr(self, "_config_status", None):
@@ -1585,6 +1626,7 @@ class OverlayApp:
             self._last_screen_w = screen_w
             self._last_screen_h = screen_h
             self._update_trigger_geometry()
+            self._clamp_saved_position_to_visible_screen(persist=True)
         self.root.after(5000, self._poll_screen_change)
 
     def _poll_trigger_visibility(self):
@@ -1889,6 +1931,7 @@ class OverlayApp:
         self.config["details_enabled"] = self.details_enabled
         self._save_config()
         self._apply_details_visibility()
+        self._clamp_saved_position_to_visible_screen(persist=True)
         self._set_menu_label("details",
             "Details: ON" if self.details_enabled else "Details: OFF"
         )
@@ -2175,7 +2218,8 @@ class OverlayApp:
         disk_names = [d["name"] for d in disks]
 
         # Rebuild disk rows if disk list changed
-        if disk_names != self._last_disk_names:
+        disk_rows_changed = disk_names != self._last_disk_names
+        if disk_rows_changed:
             self._last_disk_names = disk_names
             # Destroy all children of disk_frame at once (avoids double-destroy)
             for child in list(self.disk_frame.winfo_children()):
@@ -2189,6 +2233,7 @@ class OverlayApp:
                 key = f"disk_{idx}"
                 self._make_disk_row(key, disk["name"], parent=self.disk_frame)
                 self.disk_labels.append(key)
+            self._clamp_saved_position_to_visible_screen(persist=True)
 
         for i, key in enumerate(self.disk_labels):
             if i >= len(disks):

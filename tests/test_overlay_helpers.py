@@ -172,6 +172,46 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(cfg["x"], 50)
         self.assertEqual(message, "Invalid config format")
 
+    def test_clamp_overlay_position_keeps_fully_visible_position(self):
+        self.assertEqual(
+            overlay._clamp_overlay_position(
+                100, 80,
+                window_width=220, window_height=260,
+                virt_x=0, virt_y=0, virt_w=1920, virt_h=1080,
+            ),
+            (100, 80),
+        )
+
+    def test_clamp_overlay_position_clamps_right_and_bottom_edges(self):
+        self.assertEqual(
+            overlay._clamp_overlay_position(
+                1850, 1000,
+                window_width=220, window_height=160,
+                virt_x=0, virt_y=0, virt_w=1920, virt_h=1080,
+            ),
+            (1700, 920),
+        )
+
+    def test_clamp_overlay_position_handles_negative_virtual_screen(self):
+        self.assertEqual(
+            overlay._clamp_overlay_position(
+                -2500, -100,
+                window_width=200, window_height=120,
+                virt_x=-1920, virt_y=0, virt_w=3840, virt_h=1080,
+            ),
+            (-1920, 0),
+        )
+
+    def test_clamp_overlay_position_handles_window_larger_than_screen(self):
+        self.assertEqual(
+            overlay._clamp_overlay_position(
+                300, 200,
+                window_width=2400, window_height=1200,
+                virt_x=0, virt_y=0, virt_w=1920, virt_h=1080,
+            ),
+            (0, 0),
+        )
+
     def test_load_config_result_read_failure_returns_warning(self):
         open(overlay.CONFIG_PATH, "w", encoding="utf-8").close()
 
@@ -1060,6 +1100,28 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(app.menu_labels, [("details", "Details: ON"), ("details", "Details: OFF")])
         self.assertFalse(app.details_frame.packed)
 
+    def test_clamp_saved_position_updates_config_geometry_and_persists_silently(self):
+        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.config = {"x": 1850, "y": 1000}
+        app.root = _FakeRoot(width=220, height=160)
+        save_calls = []
+        app._save_config = lambda update_status=True: save_calls.append(update_status)
+
+        metrics = {
+            overlay.SM_XVIRTUALSCREEN: 0,
+            overlay.SM_YVIRTUALSCREEN: 0,
+            overlay.SM_CXVIRTUALSCREEN: 1920,
+            overlay.SM_CYVIRTUALSCREEN: 1080,
+        }
+        with mock.patch.object(overlay.user32, "GetSystemMetrics", side_effect=lambda key: metrics[key]):
+            changed = app._clamp_saved_position_to_visible_screen(persist=True)
+
+        self.assertTrue(changed)
+        self.assertEqual(app.config["x"], 1700)
+        self.assertEqual(app.config["y"], 920)
+        self.assertEqual(app.root.geometry_calls, ["+1700+920"])
+        self.assertEqual(save_calls, [False])
+
     def test_reset_peaks_clears_peak_state_and_rows(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
         app.peaks = {
@@ -1258,12 +1320,27 @@ class _FakeFrame:
 
 
 class _FakeRoot:
-    def __init__(self):
+    def __init__(self, width=200, height=120):
         self.after_calls = []
         self.clipboard_value = None
+        self.width = width
+        self.height = height
+        self.geometry_calls = []
 
     def after(self, delay, callback):
         self.after_calls.append((delay, callback))
+
+    def geometry(self, spec):
+        self.geometry_calls.append(spec)
+
+    def update_idletasks(self):
+        pass
+
+    def winfo_width(self):
+        return self.width
+
+    def winfo_height(self):
+        return self.height
 
     def clipboard_clear(self):
         self.clipboard_value = ""
