@@ -1875,7 +1875,6 @@ class OverlayApp:
     def toggle_peek(self):
         self.peek_enabled = not self.peek_enabled
         self.config["peek_enabled"] = self.peek_enabled
-        self._save_config()
         self._trigger_hidden_for_desktop = False
         if self.peek_enabled and not self.topmost:
             self._trigger.deiconify()
@@ -1894,6 +1893,7 @@ class OverlayApp:
                     self.config["y"] = y
                     self._saved_pos = None
                 self._schedule_embed(50)
+        self._save_config()
         self._set_menu_label("peek",
             "Peek from edge: ON" if self.peek_enabled else "Peek from edge: OFF"
         )

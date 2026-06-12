@@ -1153,6 +1153,64 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(app.root.geometry_calls, ["+1700+920"])
         self.assertEqual(save_calls, [False])
 
+    def test_toggle_peek_off_restores_saved_position_and_persists_it(self):
+        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.config = {"peek_enabled": True, "x": 50, "y": 60}
+        app.peek_enabled = True
+        app.peek_visible = True
+        app._peek_animating = False
+        app._saved_pos = (320, 240)
+        app.topmost = False
+        app.root = _FakeRoot()
+        app._trigger = _FakeRoot()
+        app._trigger_hidden_for_desktop = True
+        app.menu_labels = []
+        schedule_calls = []
+        save_snapshots = []
+        app._set_menu_label = lambda key, label: app.menu_labels.append((key, label))
+        app._schedule_embed = lambda delay: schedule_calls.append(delay)
+        app._save_config = lambda: save_snapshots.append(dict(app.config))
+
+        app.toggle_peek()
+
+        self.assertFalse(app.peek_enabled)
+        self.assertFalse(app.peek_visible)
+        self.assertFalse(app._peek_animating)
+        self.assertIsNone(app._saved_pos)
+        self.assertEqual(app.config, {"peek_enabled": False, "x": 320, "y": 240})
+        self.assertEqual(app.root.geometry_calls, ["+320+240"])
+        self.assertEqual(app.root.attribute_calls, [("-alpha", 0), ("-topmost", False)])
+        self.assertEqual(app._trigger.withdraw_count, 1)
+        self.assertEqual(schedule_calls, [50])
+        self.assertEqual(app.menu_labels, [("peek", "Peek from edge: OFF")])
+        self.assertEqual(save_snapshots[-1], {"peek_enabled": False, "x": 320, "y": 240})
+
+    def test_toggle_peek_on_deiconifies_trigger_when_not_topmost(self):
+        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.config = {"peek_enabled": False, "x": 50, "y": 60}
+        app.peek_enabled = False
+        app.peek_visible = False
+        app._peek_animating = False
+        app._saved_pos = None
+        app.topmost = False
+        app.root = _FakeRoot()
+        app._trigger = _FakeRoot()
+        app._trigger_hidden_for_desktop = True
+        app.menu_labels = []
+        save_snapshots = []
+        app._set_menu_label = lambda key, label: app.menu_labels.append((key, label))
+        app._save_config = lambda: save_snapshots.append(dict(app.config))
+
+        app.toggle_peek()
+
+        self.assertTrue(app.peek_enabled)
+        self.assertEqual(app.config["peek_enabled"], True)
+        self.assertFalse(app._trigger_hidden_for_desktop)
+        self.assertEqual(app._trigger.deiconify_count, 1)
+        self.assertEqual(app._trigger.withdraw_count, 0)
+        self.assertEqual(app.menu_labels, [("peek", "Peek from edge: ON")])
+        self.assertEqual(save_snapshots, [{"peek_enabled": True, "x": 50, "y": 60}])
+
     def test_reset_peaks_clears_peak_state_and_rows(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
         app.peaks = {
@@ -1357,12 +1415,24 @@ class _FakeRoot:
         self.width = width
         self.height = height
         self.geometry_calls = []
+        self.attribute_calls = []
+        self.withdraw_count = 0
+        self.deiconify_count = 0
 
     def after(self, delay, callback):
         self.after_calls.append((delay, callback))
 
     def geometry(self, spec):
         self.geometry_calls.append(spec)
+
+    def wm_attributes(self, name, value):
+        self.attribute_calls.append((name, value))
+
+    def withdraw(self):
+        self.withdraw_count += 1
+
+    def deiconify(self):
+        self.deiconify_count += 1
 
     def update_idletasks(self):
         pass
