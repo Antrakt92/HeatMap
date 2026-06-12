@@ -596,6 +596,37 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["gpu_vram_total_gb"], 12.0)
         self.assertNotIn(overlay.SENSOR_STATUS_KEY, data)
 
+    def test_read_sensors_accepts_common_gpu_memory_and_ram_name_variants(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        gpu = _FakeHardware(
+            "AMD GPU",
+            HardwareType.GpuAmd,
+            sensors=[
+                _FakeSensor("GPU D3D", SensorType.Load, 73),
+                _FakeSensor("Memory Used", SensorType.SmallData, 8192),
+                _FakeSensor("Memory Total", SensorType.SmallData, 16384),
+            ],
+        )
+        memory = _FakeHardware(
+            "Memory",
+            HardwareType.Memory,
+            sensors=[_FakeSensor("Memory Load", SensorType.Load, 77)],
+        )
+        computer = SimpleNamespace(Hardware=[gpu, memory])
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.psutil, "cpu_percent", return_value=10),
+            mock.patch.object(overlay.psutil, "virtual_memory", return_value=_memory(percent=22, used_gb=2, total_gb=8)),
+        ):
+            data = overlay.read_sensors(computer)
+
+        self.assertEqual(data["gpu_load"], 73)
+        self.assertEqual(data["gpu_vram_pct"], 50)
+        self.assertEqual(data["gpu_vram_used_gb"], 8.0)
+        self.assertEqual(data["gpu_vram_total_gb"], 16.0)
+        self.assertEqual(data["ram_pct"], 77)
+
     def test_read_sensors_marks_empty_gpu_hardware_for_reinit(self):
         modules, HardwareType, _SensorType = _fake_lhm_modules()
         gpu = _FakeHardware("AMD Radeon RX 7900 XT", HardwareType.GpuAmd)

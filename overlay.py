@@ -591,6 +591,36 @@ def _select_cpu_fan_control(control_sensors, fan_name, has_cpu_fan):
     return None
 
 
+def _normalized_sensor_name(name):
+    return re.sub(r"\s+", " ", str(name).replace("_", " ").lower()).strip()
+
+
+def _is_gpu_load_sensor(name):
+    name = _normalized_sensor_name(name)
+    if "memory" in name or "bus" in name or "video" in name:
+        return False
+    return (
+        name in ("gpu core", "gpu load", "gpu d3d", "d3d", "d3d 3d")
+        or ("d3d" in name and ("gpu" in name or "3d" in name))
+        or (name.startswith("gpu ") and ("core" in name or "load" in name or "3d" in name))
+    )
+
+
+def _is_gpu_memory_used_sensor(name):
+    name = _normalized_sensor_name(name)
+    return "memory" in name and "used" in name and "shared" not in name
+
+
+def _is_gpu_memory_total_sensor(name):
+    name = _normalized_sensor_name(name)
+    return "memory" in name and "total" in name and "shared" not in name
+
+
+def _is_ram_load_sensor(name):
+    name = _normalized_sensor_name(name)
+    return name in ("memory", "memory load", "physical memory", "physical memory load")
+
+
 def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True):
     hw_type = hw.HardwareType
     # Skip intentionally ignored iGPU before touching its driver-backed sensors.
@@ -643,8 +673,7 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
                     if val is not None:
                         data["gpu_temp"] = val
             elif sensor.SensorType == SensorType.Load:
-                name = sensor.Name.lower()
-                if name == "gpu core":
+                if _is_gpu_load_sensor(sensor.Name):
                     val = _safe_round(sensor.Value)
                     if val is not None:
                         data["gpu_load"] = val
@@ -662,12 +691,11 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
                     if val is not None:
                         data["gpu_clock"] = val
             elif sensor.SensorType == SensorType.SmallData:
-                name = sensor.Name.lower()
-                if name == "gpu memory used":
+                if _is_gpu_memory_used_sensor(sensor.Name):
                     val = _safe_round(sensor.Value)
                     if val is not None:
                         gpu_mem_used = float(sensor.Value)
-                elif name == "gpu memory total":
+                elif _is_gpu_memory_total_sensor(sensor.Name):
                     val = _safe_round(sensor.Value)
                     if val is not None:
                         gpu_mem_total = float(sensor.Value)
@@ -748,7 +776,7 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
     elif hw_type == HardwareType.Memory:
         for sensor in hw.Sensors:
             if sensor.SensorType == SensorType.Load:
-                if sensor.Name.lower() == "memory":
+                if _is_ram_load_sensor(sensor.Name):
                     val = _safe_round(sensor.Value)
                     if val is not None:
                         data["ram_pct"] = val
