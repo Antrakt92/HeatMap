@@ -52,11 +52,17 @@
    .venv\Scripts\python -m pip install -r requirements.txt
    ```
 
-3. **Скачайте и проверьте библиотеки для мониторинга:**
+3. **Проверьте библиотеки для мониторинга:**
    ```bash
    .venv\Scripts\python setup.py
    ```
-   Это загрузит прямые зависимости `LibreHardwareMonitorLib.dll` и `HidSharp.dll`, затем проверит весь bundled runtime из `lib/` по `lib_manifest.json`.
+   Репозиторий намеренно хранит полный Windows runtime в `lib/`. `setup.py`
+   умеет восстановить только прямые NuGet DLL `LibreHardwareMonitorLib.dll` и
+   `HidSharp.dll`, затем проверяет весь tracked runtime из `lib/` по
+   `lib_manifest.json`. Не удаляйте `lib/` перед установкой: пока полный
+   restore graph не реализован, отсутствующие bundled DLL нужно восстановить из
+   git/reclone, а не ожидать, что `setup.py` скачает их заново.
+
    Для CPU temperature и motherboard fan sensors также нужен установленный
    PawnIO driver. Если preflight сообщает, что PawnIO не установлен, запустите
    `PawnIO_setup.exe` от имени администратора и перезапустите HeatMap.
