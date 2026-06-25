@@ -547,6 +547,9 @@ class OverlayHelperTests(unittest.TestCase):
             HardwareType.Storage,
             sensors=[
                 _FakeSensor("Temperature", SensorType.Temperature, 41),
+                _FakeSensor("Temperature 2", SensorType.Temperature, 62),
+                _FakeSensor("Temperature warning", SensorType.Temperature, 81),
+                _FakeSensor("Temperature critical", SensorType.Temperature, 84),
                 _FakeSensor("Used Space", SensorType.Load, 68),
                 _FakeSensor("Life", SensorType.Level, 77),
             ],
@@ -560,7 +563,7 @@ class OverlayHelperTests(unittest.TestCase):
         ):
             data = overlay.read_sensors(computer)
 
-        self.assertEqual(data["disks"], [{"name": "980 PRO", "temp": 41, "used_pct": 68, "life_pct": 77}])
+        self.assertEqual(data["disks"], [{"name": "980 PRO", "temp": 62, "used_pct": 68, "life_pct": 77}])
 
     def test_read_sensors_gpu_vram_fan_and_clock_parsing(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
@@ -595,6 +598,32 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["gpu_vram_used_gb"], 6.0)
         self.assertEqual(data["gpu_vram_total_gb"], 12.0)
         self.assertNotIn(overlay.SENSOR_STATUS_KEY, data)
+
+    def test_read_sensors_gpu_temperature_breakdown_uses_hottest_sensor(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        gpu = _FakeHardware(
+            "AMD Radeon RX 7900 XT",
+            HardwareType.GpuAmd,
+            sensors=[
+                _FakeSensor("Core", SensorType.Temperature, 54),
+                _FakeSensor("Memory Junction", SensorType.Temperature, 68),
+                _FakeSensor("Hot Spot", SensorType.Temperature, 64),
+            ],
+        )
+        computer = SimpleNamespace(Hardware=[gpu])
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.psutil, "cpu_percent", return_value=10),
+            mock.patch.object(overlay.psutil, "virtual_memory", return_value=_memory(percent=20, used_gb=2, total_gb=8)),
+        ):
+            data = overlay.read_sensors(computer)
+
+        self.assertEqual(data["gpu_core_temp"], 54)
+        self.assertEqual(data["gpu_memory_temp"], 68)
+        self.assertEqual(data["gpu_hotspot_temp"], 64)
+        self.assertEqual(data["gpu_temp"], 68)
+        self.assertEqual(data["gpu_temp_label"], "MEM")
 
     def test_read_sensors_accepts_common_gpu_memory_and_ram_name_variants(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
@@ -1024,12 +1053,25 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(values["detail_board_temps"], "VRM 34°C  CHIP 30°C  SYS 27°C")
         self.assertEqual(values["detail_disk_life"], "980 77%  860 97%")
 
+    def test_detail_row_values_includes_gpu_temperature_breakdown(self):
+        data = _sample_data()
+        data.update({
+            "gpu_core_temp": 54,
+            "gpu_hotspot_temp": 64,
+            "gpu_memory_temp": 68,
+        })
+
+        values = overlay._detail_row_values(data)
+
+        self.assertEqual(values["detail_gpu_temps"], "CORE 54°C  HOT 64°C  MEM 68°C")
+
     def test_update_peak_values_tracks_maximums(self):
         peaks = overlay._empty_peak_data()
         first = _sample_data()
         first.update({
             "cpu_temp": 58,
             "gpu_temp": 60,
+            "gpu_temp_label": "CORE",
             "ram_pct": 42,
             "disks": [
                 {"name": "980", "temp": 38, "used_pct": 68},
@@ -1040,6 +1082,7 @@ class OverlayHelperTests(unittest.TestCase):
         second.update({
             "cpu_temp": 62,
             "gpu_temp": 55,
+            "gpu_temp_label": "HOT",
             "ram_pct": 40,
             "disks": [
                 {"name": "980", "temp": 36, "used_pct": 67},
@@ -1053,6 +1096,7 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(peaks, {
             "cpu_temp": 62,
             "gpu_temp": 60,
+            "gpu_temp_label": "CORE",
             "ram_pct": 42,
             "disk_temp": 38,
             "disk_used_pct": 68,
@@ -1063,6 +1107,7 @@ class OverlayHelperTests(unittest.TestCase):
         peaks = {
             "cpu_temp": 66,
             "gpu_temp": 60,
+            "gpu_temp_label": "HOT",
             "ram_pct": 42,
             "disk_temp": 38,
             "disk_used_pct": 68,
@@ -1070,7 +1115,7 @@ class OverlayHelperTests(unittest.TestCase):
 
         values = overlay._detail_row_values(data, peaks)
 
-        self.assertEqual(values["detail_peak_temps"], "CPU 66°C  GPU 60°C  DISK 38°C")
+        self.assertEqual(values["detail_peak_temps"], "CPU 66°C  GPU HOT 60°C  DISK 38°C")
         self.assertEqual(values["detail_peak_usage"], "RAM 42%  DISK 68%")
 
     def test_build_sensor_diagnostics_includes_status_data_and_sensor_inventory(self):

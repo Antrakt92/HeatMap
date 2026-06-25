@@ -489,6 +489,10 @@ def _empty_sensor_data():
         "cpu_load": None,
         "cpu_clock": None,
         "gpu_temp": None,
+        "gpu_temp_label": None,
+        "gpu_core_temp": None,
+        "gpu_hotspot_temp": None,
+        "gpu_memory_temp": None,
         "gpu_load": None,
         "gpu_clock": None,
         "cpu_fan": None,
@@ -510,6 +514,7 @@ def _empty_peak_data():
     return {
         "cpu_temp": None,
         "gpu_temp": None,
+        "gpu_temp_label": None,
         "ram_pct": None,
         "disk_temp": None,
         "disk_used_pct": None,
@@ -606,6 +611,34 @@ def _is_gpu_load_sensor(name):
     )
 
 
+def _gpu_temperature_key(name):
+    name = _normalized_sensor_name(name)
+    if not name:
+        return None
+    if "memory" in name or "vram" in name:
+        return "gpu_memory_temp"
+    if "hotspot" in name or "hot spot" in name or "junction" in name:
+        return "gpu_hotspot_temp"
+    if "core" in name or "gpu" in name or "temperature" in name:
+        return "gpu_core_temp"
+    return None
+
+
+def _select_gpu_display_temperature(data):
+    candidates = [
+        ("CORE", data.get("gpu_core_temp")),
+        ("HOT", data.get("gpu_hotspot_temp")),
+        ("MEM", data.get("gpu_memory_temp")),
+    ]
+    priority = {"CORE": 0, "MEM": 1, "HOT": 2}
+    available = [(label, value) for label, value in candidates if value is not None]
+    if not available:
+        return
+    label, value = max(available, key=lambda item: (item[1], priority[item[0]]))
+    data["gpu_temp"] = value
+    data["gpu_temp_label"] = label
+
+
 def _is_gpu_memory_used_sensor(name):
     name = _normalized_sensor_name(name)
     return "memory" in name and "used" in name and "shared" not in name
@@ -619,6 +652,11 @@ def _is_gpu_memory_total_sensor(name):
 def _is_ram_load_sensor(name):
     name = _normalized_sensor_name(name)
     return name in ("memory", "memory load", "physical memory", "physical memory load")
+
+
+def _is_storage_temperature_reading(name):
+    name = _normalized_sensor_name(name)
+    return not any(marker in name for marker in ("warning", "critical", "threshold", "limit"))
 
 
 def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True):
@@ -668,10 +706,11 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
             data[SENSOR_REINIT_KEY] = True
         for sensor in sensors:
             if sensor.SensorType == SensorType.Temperature:
-                if "core" in sensor.Name.lower() or "gpu" in sensor.Name.lower():
+                temp_key = _gpu_temperature_key(sensor.Name)
+                if temp_key:
                     val = _safe_round(sensor.Value)
                     if val is not None:
-                        data["gpu_temp"] = val
+                        data[temp_key] = val
             elif sensor.SensorType == SensorType.Load:
                 if _is_gpu_load_sensor(sensor.Name):
                     val = _safe_round(sensor.Value)
@@ -699,6 +738,7 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
                     val = _safe_round(sensor.Value)
                     if val is not None:
                         gpu_mem_total = float(sensor.Value)
+        _select_gpu_display_temperature(data)
         if gpu_mem_used is not None and gpu_mem_total and gpu_mem_total > 0:
             data["gpu_vram_pct"] = round(gpu_mem_used / gpu_mem_total * 100)
             data["gpu_vram_used_gb"] = round(gpu_mem_used / 1024, 1)
@@ -710,8 +750,11 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
         disk_life = None
         for sensor in hw.Sensors:
             if sensor.SensorType == SensorType.Temperature:
-                if disk_temp is None:
-                    disk_temp = _safe_round(sensor.Value)
+                if not _is_storage_temperature_reading(sensor.Name):
+                    continue
+                val = _safe_round(sensor.Value)
+                if val is not None and (disk_temp is None or val > disk_temp):
+                    disk_temp = val
             elif sensor.SensorType == SensorType.Load:
                 if "used space" in sensor.Name.lower():
                     val = _safe_round(sensor.Value)
@@ -928,11 +971,29 @@ def _format_disk_life(disks):
     return "  ".join(parts) if parts else "--"
 
 
+def _format_gpu_temps(data):
+    parts = []
+    for label, key in (
+        ("CORE", "gpu_core_temp"),
+        ("HOT", "gpu_hotspot_temp"),
+        ("MEM", "gpu_memory_temp"),
+    ):
+        temp = data.get(key)
+        if temp is not None:
+            parts.append(f"{label} {temp}°C")
+    return "  ".join(parts) if parts else "--"
+
+
 def _update_peak_values(peaks, data):
-    for key in ("cpu_temp", "gpu_temp", "ram_pct"):
+    for key in ("cpu_temp", "ram_pct"):
         value = data.get(key)
         if value is not None and (peaks.get(key) is None or value > peaks[key]):
             peaks[key] = value
+
+    gpu_temp = data.get("gpu_temp")
+    if gpu_temp is not None and (peaks.get("gpu_temp") is None or gpu_temp > peaks["gpu_temp"]):
+        peaks["gpu_temp"] = gpu_temp
+        peaks["gpu_temp_label"] = data.get("gpu_temp_label")
 
     for disk in data.get("disks", []):
         temp = disk.get("temp")
@@ -949,7 +1010,9 @@ def _format_peak_temps(peaks):
     if peaks.get("cpu_temp") is not None:
         parts.append(f"CPU {peaks['cpu_temp']}°C")
     if peaks.get("gpu_temp") is not None:
-        parts.append(f"GPU {peaks['gpu_temp']}°C")
+        gpu_label = peaks.get("gpu_temp_label")
+        label_part = f" {gpu_label}" if gpu_label else ""
+        parts.append(f"GPU{label_part} {peaks['gpu_temp']}°C")
     if peaks.get("disk_temp") is not None:
         parts.append(f"DISK {peaks['disk_temp']}°C")
     return "  ".join(parts) if parts else "--"
@@ -973,6 +1036,7 @@ def _detail_row_values(data, peaks=None):
             data.get("gpu_vram_used_gb"),
             data.get("gpu_vram_total_gb"),
         ),
+        "detail_gpu_temps": _format_gpu_temps(data),
         "detail_board_temps": _format_board_temps(data.get("motherboard_temps", [])),
         "detail_disk_life": _format_disk_life(data.get("disks", [])),
         "detail_peak_temps": _format_peak_temps(peaks),
@@ -1004,7 +1068,8 @@ def build_sensor_diagnostics(computer, sensor_data=None, is_admin=None, pawnio_i
         lines.append("Sensor data:")
         for key in (
             "cpu_temp", "cpu_load", "cpu_clock", "cpu_fan", "cpu_fan_pct",
-            "gpu_temp", "gpu_load", "gpu_clock", "gpu_fan", "gpu_fan_pct",
+            "gpu_temp", "gpu_temp_label", "gpu_core_temp", "gpu_hotspot_temp", "gpu_memory_temp",
+            "gpu_load", "gpu_clock", "gpu_fan", "gpu_fan_pct",
             "gpu_vram_pct", "gpu_vram_used_gb", "gpu_vram_total_gb",
             "ram_pct", SENSOR_STATUS_KEY, SENSOR_REINIT_KEY,
         ):
@@ -1325,6 +1390,7 @@ class OverlayApp:
         self._make_row("detail_cpu_fan_rpm", "C.RPM", parent=self.details_frame, label_fg=CPU_CLR)
         self._make_row("detail_gpu_fan_rpm", "G.RPM", parent=self.details_frame, label_fg=GPU_CLR)
         self._make_row("detail_vram_gb", "V.GB", parent=self.details_frame, label_fg=GPU_CLR)
+        self._make_row("detail_gpu_temps", "G.TEMP", parent=self.details_frame, label_fg=GPU_CLR)
         self._make_row("detail_board_temps", "BOARD", parent=self.details_frame, label_fg="#a7f3d0")
         self._make_row("detail_disk_life", "D.LIFE", parent=self.details_frame, label_fg=self.DISK_CLR)
         self._make_row("detail_peak_temps", "PEAK.T", parent=self.details_frame, label_fg="#facc15")
