@@ -1,0 +1,27 @@
+name: Windows integration
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scheduler-and-launcher:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - name: Install locked Python dependencies
+        run: python -m pip install -r requirements.txt -c constraints-known-good.txt
+      - name: Register, export, classify, and delete disposable task
+        shell: pwsh
+        run: ./tools/test_task_scheduler_integration.ps1
+      - name: Exercise launcher without UAC
+        shell: pwsh
+        run: ./tools/test_launcher_integration.ps1

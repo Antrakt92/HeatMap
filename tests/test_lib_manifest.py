@@ -32,21 +32,18 @@ class LibManifestTests(unittest.TestCase):
             self.assertEqual(entry["size"], len(data), entry["file"])
             self.assertEqual(entry["sha256"], hashlib.sha256(data).hexdigest(), entry["file"])
 
-    def test_direct_nuget_entries_match_setup_packages(self):
+    def test_runtime_lock_matches_manifest_sources(self):
         manifest = setup.load_lib_manifest()
-        by_name = {os.path.basename(entry["file"]): entry for entry in manifest["files"]}
+        _runtime_lock, locked = setup.load_runtime_lock()
+        manifest_entries, messages = setup._manifest_entries_by_file(manifest)
 
-        for package_name, package in setup.PACKAGES.items():
-            for package_path in package["dlls"]:
-                dll_name = os.path.basename(package_path)
-                entry = by_name[dll_name]
-                source = entry["source"]
-                self.assertEqual(source["type"], "nuget")
-                self.assertEqual(source["package"], package_name)
-                self.assertEqual(source["version"], package["version"])
-                self.assertEqual(source["url"], package["url"])
-                self.assertEqual(source["package_path"], package_path)
-                self.assertEqual(entry["sha256"], package["sha256"][dll_name])
+        self.assertEqual(messages, [])
+        self.assertEqual(set(locked), set(manifest_entries))
+        setup._validate_runtime_lock_against_manifest(locked)
+        self.assertTrue(all(
+            entry["source"]["type"] == "runtime-lock"
+            for entry in manifest["files"]
+        ))
 
     def test_verify_manifest_succeeds_for_current_repo_lib(self):
         ok, messages = setup.verify_lib_manifest()
@@ -155,9 +152,10 @@ class LibManifestTests(unittest.TestCase):
         with (
             mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
             mock.patch.object(setup, "_check_preflight_dependencies", return_value=[]),
+            mock.patch.object(setup, "_check_lhm_bridge", return_value=[]),
             mock.patch.object(setup, "_check_pawnio_driver", return_value=[]),
             mock.patch.object(setup, "verify_lib_manifest", return_value=(True, [])) as verify,
-            mock.patch.object(setup, "download_and_extract") as download,
+            mock.patch.object(setup, "restore_runtime") as download,
             mock.patch("builtins.print") as printed,
         ):
             self.assertEqual(setup.main(["--preflight"]), 0)
@@ -172,7 +170,7 @@ class LibManifestTests(unittest.TestCase):
             mock.patch.object(setup, "_check_preflight_dependencies", return_value=[]),
             mock.patch.object(setup, "_check_pawnio_driver", return_value=[]),
             mock.patch.object(setup, "verify_lib_manifest", return_value=(True, [])),
-            mock.patch.object(setup, "download_and_extract") as download,
+            mock.patch.object(setup, "restore_runtime") as download,
             mock.patch("builtins.print") as printed,
         ):
             self.assertEqual(setup.main(["--preflight"]), 1)
@@ -187,7 +185,7 @@ class LibManifestTests(unittest.TestCase):
             mock.patch.object(setup, "_check_preflight_dependencies", return_value=["missing pythonnet"]),
             mock.patch.object(setup, "_check_pawnio_driver", return_value=[]),
             mock.patch.object(setup, "verify_lib_manifest", return_value=(True, [])),
-            mock.patch.object(setup, "download_and_extract") as download,
+            mock.patch.object(setup, "restore_runtime") as download,
             mock.patch("builtins.print") as printed,
         ):
             self.assertEqual(setup.main(["--preflight"]), 1)
@@ -196,13 +194,42 @@ class LibManifestTests(unittest.TestCase):
         output = "\n".join(call.args[0] for call in printed.call_args_list)
         self.assertIn("ERROR: missing pythonnet", output)
 
+    def test_preflight_dependency_check_rejects_stale_locked_version(self):
+        expected_versions = setup._read_known_good_versions()
+
+        def distribution_version(package_name):
+            if package_name == "pythonnet":
+                return "3.0.5"
+            return expected_versions[package_name]
+
+        messages = setup._check_preflight_dependencies(
+            import_module=lambda _module_name: object(),
+            distribution_version=distribution_version,
+        )
+
+        self.assertEqual(
+            messages,
+            ["unsupported dependency version pythonnet: expected 3.1.0, got 3.0.5"],
+        )
+
+    def test_preflight_dependency_check_accepts_all_locked_versions(self):
+        expected_versions = setup._read_known_good_versions()
+
+        messages = setup._check_preflight_dependencies(
+            import_module=lambda _module_name: object(),
+            distribution_version=expected_versions.__getitem__,
+        )
+
+        self.assertEqual(messages, [])
+
     def test_preflight_main_warns_but_succeeds_when_pawnio_driver_missing(self):
         with (
             mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
             mock.patch.object(setup, "_check_preflight_dependencies", return_value=[]),
+            mock.patch.object(setup, "_check_lhm_bridge", return_value=[]),
             mock.patch.object(setup, "_check_pawnio_driver", return_value=["PawnIO driver is not installed"]),
             mock.patch.object(setup, "verify_lib_manifest", return_value=(True, [])),
-            mock.patch.object(setup, "download_and_extract") as download,
+            mock.patch.object(setup, "restore_runtime") as download,
             mock.patch("builtins.print") as printed,
         ):
             self.assertEqual(setup.main(["--preflight"]), 0)
@@ -218,7 +245,7 @@ class LibManifestTests(unittest.TestCase):
             mock.patch.object(setup, "_check_preflight_dependencies", return_value=[]),
             mock.patch.object(setup, "_check_pawnio_driver", return_value=[]),
             mock.patch.object(setup, "verify_lib_manifest", return_value=(False, ["missing DLL: lib/a.dll"])),
-            mock.patch.object(setup, "download_and_extract") as download,
+            mock.patch.object(setup, "restore_runtime") as download,
             mock.patch("builtins.print") as printed,
         ):
             self.assertEqual(setup.main(["--preflight"]), 1)
@@ -227,24 +254,47 @@ class LibManifestTests(unittest.TestCase):
         output = "\n".join(call.args[0] for call in printed.call_args_list)
         self.assertIn("ERROR: DLL runtime: missing DLL: lib/a.dll", output)
 
-    def test_pawnio_driver_check_points_to_bundled_installer(self):
-        existing = {setup.PAWNIO_SETUP_PATH}
+    def test_run_preflight_rejects_broken_lhm_bridge_after_manifest_passes(self):
+        with (
+            mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
+            mock.patch.object(setup, "_check_preflight_dependencies", return_value=[]),
+            mock.patch.object(setup, "verify_lib_manifest", return_value=(True, [])),
+            mock.patch.object(setup, "_check_lhm_bridge", return_value=["CLR bridge failed"]) as bridge,
+        ):
+            ok, messages = setup.run_preflight()
 
-        with mock.patch.object(setup, "is_pawnio_driver_installed", return_value=False):
-            messages = setup._check_pawnio_driver(path_exists=existing.__contains__)
+        self.assertFalse(ok)
+        self.assertEqual(messages, ["CLR bridge failed"])
+        bridge.assert_called_once_with()
+
+    def test_pawnio_driver_check_points_to_verified_download_command(self):
+        with (
+            mock.patch.object(setup, "is_pawnio_driver_installed", return_value=False),
+            mock.patch.object(setup, "is_windows_restart_pending", return_value=False),
+        ):
+            messages = setup._check_pawnio_driver()
 
         self.assertEqual(len(messages), 1)
-        self.assertIn("PawnIO_setup.exe", messages[0])
-        self.assertIn("restart HeatMap", messages[0])
+        self.assertIn("python setup.py --download-pawnio", messages[0])
+        self.assertIn("restart Windows", messages[0])
 
     def test_pawnio_driver_check_passes_when_installed(self):
         with mock.patch.object(setup, "is_pawnio_driver_installed", return_value=True):
             self.assertEqual(setup._check_pawnio_driver(), [])
 
+    def test_pawnio_driver_check_requires_restart_before_install_when_pending(self):
+        with (
+            mock.patch.object(setup, "is_pawnio_driver_installed", return_value=False),
+            mock.patch.object(setup, "is_windows_restart_pending", return_value=True),
+        ):
+            messages = setup._check_pawnio_driver()
+
+        self.assertIn("restart Windows before installing PawnIO", messages[0])
+
     def test_default_main_downloads_then_verifies(self):
         with (
             mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
-            mock.patch.object(setup, "download_and_extract") as download,
+            mock.patch.object(setup, "restore_runtime") as download,
             mock.patch.object(setup, "verify_lib_manifest", return_value=(True, [])) as verify,
             mock.patch.object(setup, "_check_pawnio_driver", return_value=[]),
             mock.patch.object(setup, "_print_manifest_result"),
@@ -258,7 +308,7 @@ class LibManifestTests(unittest.TestCase):
     def test_default_main_returns_failure_when_manifest_verification_fails(self):
         with (
             mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
-            mock.patch.object(setup, "download_and_extract"),
+            mock.patch.object(setup, "restore_runtime"),
             mock.patch.object(setup, "verify_lib_manifest", return_value=(False, ["missing"])),
             mock.patch.object(setup, "_check_pawnio_driver", return_value=[]),
             mock.patch.object(setup, "_print_manifest_result"),
@@ -269,7 +319,7 @@ class LibManifestTests(unittest.TestCase):
     def test_default_main_warns_but_succeeds_when_pawnio_driver_missing(self):
         with (
             mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
-            mock.patch.object(setup, "download_and_extract") as download,
+            mock.patch.object(setup, "restore_runtime") as download,
             mock.patch.object(setup, "verify_lib_manifest", return_value=(True, [])),
             mock.patch.object(setup, "_check_pawnio_driver", return_value=["PawnIO driver is not installed"]),
             mock.patch.object(setup, "_print_manifest_result"),
@@ -285,7 +335,7 @@ class LibManifestTests(unittest.TestCase):
     def test_default_main_returns_failure_when_download_fails(self):
         with (
             mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
-            mock.patch.object(setup, "download_and_extract", side_effect=setup.SetupError("network down")),
+            mock.patch.object(setup, "restore_runtime", side_effect=setup.SetupError("network down")),
             mock.patch.object(setup, "verify_lib_manifest") as verify,
             mock.patch("builtins.print") as printed,
         ):
@@ -328,7 +378,7 @@ class LibManifestTests(unittest.TestCase):
     def test_default_main_rejects_unsupported_runtime_before_download(self):
         with (
             mock.patch.object(setup, "_unsupported_runtime_message", return_value="unsupported runtime"),
-            mock.patch.object(setup, "download_and_extract") as download,
+            mock.patch.object(setup, "restore_runtime") as download,
             mock.patch.object(setup, "verify_lib_manifest") as verify,
             mock.patch("builtins.print") as printed,
         ):
@@ -338,76 +388,182 @@ class LibManifestTests(unittest.TestCase):
         verify.assert_not_called()
         self.assertEqual(printed.call_args.args[0], "Setup failed: unsupported runtime")
 
-    def test_download_and_extract_raises_on_download_failure(self):
-        with self._patched_download_setup():
+    def test_restore_runtime_raises_on_download_failure_without_touching_current_lib(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = _write_runtime_fixture(tmpdir)
+            os.mkdir(fixture["lib_dir"])
+            current_path = os.path.join(fixture["lib_dir"], "current.dll")
+            with open(current_path, "wb") as f:
+                f.write(b"current")
+
+            with self.assertRaisesRegex(setup.SetupError, "network down"):
+                setup.restore_runtime(
+                    **fixture,
+                    urlopen=mock.Mock(side_effect=OSError("network down")),
+                )
+
+            with open(current_path, "rb") as f:
+                self.assertEqual(f.read(), b"current")
+
+    def test_restore_runtime_stops_before_download_when_overlay_holds_dlls(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = _write_runtime_fixture(tmpdir)
+            urlopen = mock.Mock()
             with (
-                mock.patch.object(setup.urllib.request, "urlopen", side_effect=OSError("network down")),
-                mock.patch("builtins.print"),
+                mock.patch.object(setup, "LIB_DIR", fixture["lib_dir"]),
+                mock.patch.object(setup, "_is_overlay_running", return_value=True),
+                mock.patch.object(setup, "_recover_runtime_transaction") as recover,
             ):
-                with self.assertRaisesRegex(setup.SetupError, "network down"):
-                    setup.download_and_extract()
+                with self.assertRaisesRegex(setup.SetupError, "close the overlay"):
+                    setup.restore_runtime(**fixture, urlopen=urlopen)
 
-    def test_download_and_extract_raises_on_bad_zip(self):
-        with self._patched_download_setup(response_data=b"not a zip"):
-            with mock.patch("builtins.print"):
-                with self.assertRaisesRegex(setup.SetupError, "not a valid zip file"):
-                    setup.download_and_extract()
+            urlopen.assert_not_called()
+            recover.assert_not_called()
 
-    def test_download_and_extract_raises_on_missing_exact_package_path(self):
-        zip_data = _zip_bytes({"other/Test.dll": b"good"})
+    def test_restore_runtime_rejects_bad_zip_after_package_hash_passes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = _write_runtime_fixture(tmpdir, package_data=b"not a zip")
+            with self.assertRaisesRegex(setup.SetupError, "not a valid zip"):
+                setup.restore_runtime(**fixture, urlopen=lambda *_a, **_k: _FakeResponse(b"not a zip"))
 
-        with self._patched_download_setup(response_data=zip_data):
-            with mock.patch("builtins.print"):
-                with self.assertRaisesRegex(setup.SetupError, "could not find exact DLL path"):
-                    setup.download_and_extract()
+    def test_restore_runtime_rejects_missing_exact_package_path(self):
+        package_data = _zip_bytes({"other/Test.dll": TEST_DLL_DATA})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = _write_runtime_fixture(tmpdir, package_data=package_data)
+            with self.assertRaisesRegex(setup.SetupError, "could not find exact DLL path"):
+                setup.restore_runtime(
+                    **fixture,
+                    urlopen=lambda *_a, **_k: _FakeResponse(package_data),
+                )
 
-    def test_download_and_extract_raises_on_hash_mismatch(self):
-        zip_data = _zip_bytes({TEST_PACKAGE_DLL_PATH: b"bad"})
+    def test_restore_runtime_rejects_nupkg_hash_mismatch(self):
+        expected_package = _zip_bytes({TEST_PACKAGE_DLL_PATH: TEST_DLL_DATA})
+        downloaded_package = _zip_bytes({TEST_PACKAGE_DLL_PATH: b"evil"})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = _write_runtime_fixture(tmpdir, package_data=expected_package)
+            with self.assertRaisesRegex(setup.SetupError, "NuGet hash mismatch"):
+                setup.restore_runtime(
+                    **fixture,
+                    urlopen=lambda *_a, **_k: _FakeResponse(downloaded_package),
+                )
 
-        with self._patched_download_setup(response_data=zip_data):
-            with mock.patch("builtins.print"):
-                with self.assertRaisesRegex(setup.SetupError, "hash verification failed"):
-                    setup.download_and_extract()
+    def test_restore_runtime_rejects_extracted_dll_mismatch(self):
+        package_data = _zip_bytes({TEST_PACKAGE_DLL_PATH: b"evil"})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = _write_runtime_fixture(tmpdir, package_data=package_data)
+            with self.assertRaisesRegex(setup.SetupError, "does not match manifest"):
+                setup.restore_runtime(
+                    **fixture,
+                    urlopen=lambda *_a, **_k: _FakeResponse(package_data),
+                )
 
-    def test_download_and_extract_raises_on_write_failure(self):
-        zip_data = _zip_bytes({TEST_PACKAGE_DLL_PATH: TEST_DLL_DATA})
+    def test_restore_runtime_publishes_complete_verified_staging_directory(self):
+        package_data = _zip_bytes({TEST_PACKAGE_DLL_PATH: TEST_DLL_DATA})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = _write_runtime_fixture(tmpdir, package_data=package_data)
+            setup.restore_runtime(
+                **fixture,
+                urlopen=lambda *_a, **_k: _FakeResponse(package_data),
+            )
 
-        with self._patched_download_setup(response_data=zip_data):
-            with (
-                mock.patch("builtins.open", side_effect=OSError("denied")),
-                mock.patch("builtins.print"),
-            ):
-                with self.assertRaisesRegex(setup.SetupError, "denied"):
-                    setup.download_and_extract()
-
-    def test_download_and_extract_writes_verified_dll(self):
-        zip_data = _zip_bytes({TEST_PACKAGE_DLL_PATH: TEST_DLL_DATA})
-
-        with self._patched_download_setup(response_data=zip_data) as lib_dir:
-            with mock.patch("builtins.print"):
-                setup.download_and_extract()
-
-            with open(os.path.join(lib_dir, TEST_DLL_NAME), "rb") as f:
+            with open(os.path.join(fixture["lib_dir"], TEST_DLL_NAME), "rb") as f:
                 self.assertEqual(f.read(), TEST_DLL_DATA)
 
-    def _patched_download_setup(self, response_data=None):
-        tmpdir = tempfile.TemporaryDirectory()
-        package = {
-            "url": "https://example.invalid/test.nupkg",
-            "dlls": [TEST_PACKAGE_DLL_PATH],
-            "sha256": {TEST_DLL_NAME: hashlib.sha256(TEST_DLL_DATA).hexdigest()},
-        }
-        patches = [
-            mock.patch.object(setup, "LIB_DIR", tmpdir.name),
-            mock.patch.object(setup, "PACKAGES", {"TestPackage": package}),
-        ]
-        if response_data is not None:
-            patches.append(mock.patch.object(
-                setup.urllib.request,
-                "urlopen",
-                return_value=_FakeResponse(response_data),
-            ))
-        return _PatchContext(tmpdir, patches)
+    def test_publish_runtime_restores_previous_directory_when_swap_fails(self):
+        real_replace = os.replace
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lib_dir = os.path.join(tmpdir, "lib")
+            staging_dir = os.path.join(tmpdir, "staging")
+            os.mkdir(lib_dir)
+            os.mkdir(staging_dir)
+            with open(os.path.join(lib_dir, "old.dll"), "wb") as f:
+                f.write(b"old")
+            with open(os.path.join(staging_dir, "new.dll"), "wb") as f:
+                f.write(b"new")
+            def replace_with_failure(source, destination):
+                if source == staging_dir and destination == lib_dir:
+                    raise OSError("publish denied")
+                return real_replace(source, destination)
+
+            with mock.patch.object(setup.os, "replace", side_effect=replace_with_failure):
+                with self.assertRaisesRegex(setup.SetupError, "previous runtime restored"):
+                    setup._publish_runtime(staging_dir, lib_dir=lib_dir)
+
+            with open(os.path.join(lib_dir, "old.dll"), "rb") as f:
+                self.assertEqual(f.read(), b"old")
+
+    def test_recover_runtime_restores_valid_backup_after_interrupted_swap(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = _write_runtime_fixture(tmpdir)
+            backup_dir = f"{fixture['lib_dir']}.runtime-backup"
+            os.mkdir(backup_dir)
+            with open(os.path.join(backup_dir, TEST_DLL_NAME), "wb") as f:
+                f.write(TEST_DLL_DATA)
+            journal = f"{fixture['lib_dir']}.runtime-restore.json"
+            with open(journal, "w", encoding="utf-8") as f:
+                json.dump({"schema_version": 1, "phase": "backup-created"}, f)
+
+            setup._recover_runtime_transaction(
+                lib_dir=fixture["lib_dir"],
+                manifest_path=fixture["manifest_path"],
+            )
+
+            self.assertTrue(os.path.isfile(os.path.join(fixture["lib_dir"], TEST_DLL_NAME)))
+            self.assertFalse(os.path.exists(backup_dir))
+            self.assertFalse(os.path.exists(journal))
+
+    def test_recover_runtime_prefers_valid_published_runtime_and_cleans_backup(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = _write_runtime_fixture(tmpdir)
+            for directory in (fixture["lib_dir"], f"{fixture['lib_dir']}.runtime-backup"):
+                os.mkdir(directory)
+                with open(os.path.join(directory, TEST_DLL_NAME), "wb") as f:
+                    f.write(TEST_DLL_DATA)
+            journal = f"{fixture['lib_dir']}.runtime-restore.json"
+            with open(journal, "w", encoding="utf-8") as f:
+                json.dump({"schema_version": 1, "phase": "published"}, f)
+
+            setup._recover_runtime_transaction(
+                lib_dir=fixture["lib_dir"],
+                manifest_path=fixture["manifest_path"],
+            )
+
+            self.assertTrue(os.path.isdir(fixture["lib_dir"]))
+            self.assertFalse(os.path.exists(f"{fixture['lib_dir']}.runtime-backup"))
+
+    def test_recover_runtime_clears_prepared_journal_before_any_swap(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = _write_runtime_fixture(tmpdir)
+            os.mkdir(fixture["lib_dir"])
+            invalid_path = os.path.join(fixture["lib_dir"], TEST_DLL_NAME)
+            with open(invalid_path, "wb") as f:
+                f.write(b"invalid current runtime")
+            journal = f"{fixture['lib_dir']}.runtime-restore.json"
+            with open(journal, "w", encoding="utf-8") as f:
+                json.dump({"schema_version": 1, "phase": "prepared"}, f)
+
+            setup._recover_runtime_transaction(
+                lib_dir=fixture["lib_dir"],
+                manifest_path=fixture["manifest_path"],
+            )
+
+            self.assertTrue(os.path.isfile(invalid_path))
+            self.assertFalse(os.path.exists(journal))
+            self.assertFalse(os.path.exists(f"{fixture['lib_dir']}.runtime-backup"))
+
+    def test_restore_runtime_does_not_publish_when_staged_clr_smoke_fails(self):
+        package_data = _zip_bytes({TEST_PACKAGE_DLL_PATH: TEST_DLL_DATA})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = _write_runtime_fixture(tmpdir, package_data=package_data)
+            fixture["bridge_checker"] = lambda _lib_dir: ["broken CLR graph"]
+            with mock.patch.object(setup, "_publish_runtime") as publish:
+                with self.assertRaisesRegex(setup.SetupError, "broken CLR graph"):
+                    setup.restore_runtime(
+                        **fixture,
+                        urlopen=lambda *_a, **_k: _FakeResponse(package_data),
+                    )
+
+            publish.assert_not_called()
 
 
 def _entry(file_path, size=3, sha256=None, source=None):
@@ -416,7 +572,13 @@ def _entry(file_path, size=3, sha256=None, source=None):
         "sha256": sha256 or hashlib.sha256(b"abc").hexdigest(),
         "size": size,
         "required": True,
-        "source": source or {"type": "bundled-unknown"},
+        "source": source or {
+            "type": "runtime-lock",
+            "lock_file": "runtime-lock.json",
+            "package": "Test.Package",
+            "version": "1.0.0",
+            "package_path": f"lib/net472/{os.path.basename(file_path)}",
+        },
         "notes": "test entry",
     }
 
@@ -441,6 +603,48 @@ def _zip_bytes(files):
     return buf.getvalue()
 
 
+def _write_runtime_fixture(directory, package_data=None):
+    package_data = package_data or _zip_bytes({TEST_PACKAGE_DLL_PATH: TEST_DLL_DATA})
+    manifest_path = os.path.join(directory, "lib_manifest.json")
+    runtime_lock_path = os.path.join(directory, "runtime-lock.json")
+    lib_dir = os.path.join(directory, "lib")
+    manifest_entry = _entry(
+        f"lib/{TEST_DLL_NAME}",
+        size=len(TEST_DLL_DATA),
+        sha256=hashlib.sha256(TEST_DLL_DATA).hexdigest(),
+        source={
+            "type": "runtime-lock",
+            "lock_file": os.path.basename(runtime_lock_path),
+            "package": "Test.Package",
+            "version": "1.2.3",
+            "package_path": TEST_PACKAGE_DLL_PATH,
+        },
+    )
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump({"manifest_version": setup.MANIFEST_VERSION, "files": [manifest_entry]}, f)
+    lock_entry = {
+        "file": f"lib/{TEST_DLL_NAME}",
+        "package": "Test.Package",
+        "version": "1.2.3",
+        "package_path": TEST_PACKAGE_DLL_PATH,
+        "nupkg_sha256": hashlib.sha256(package_data).hexdigest(),
+        "license": "MIT",
+    }
+    with open(runtime_lock_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "schema_version": 1,
+            "target_framework": "net472",
+            "source_commit": "0" * 40,
+            "files": [lock_entry],
+        }, f)
+    return {
+        "runtime_lock_path": runtime_lock_path,
+        "manifest_path": manifest_path,
+        "lib_dir": lib_dir,
+        "bridge_checker": lambda _lib_dir: [],
+    }
+
+
 class _FakeResponse:
     def __init__(self, data):
         self._data = data
@@ -453,23 +657,6 @@ class _FakeResponse:
 
     def read(self):
         return self._data
-
-
-class _PatchContext:
-    def __init__(self, tmpdir, patches):
-        self._tmpdir = tmpdir
-        self._patches = patches
-
-    def __enter__(self):
-        self._tmpdir.__enter__()
-        for patch in self._patches:
-            patch.__enter__()
-        return self._tmpdir.name
-
-    def __exit__(self, exc_type, exc, tb):
-        for patch in reversed(self._patches):
-            patch.__exit__(exc_type, exc, tb)
-        return self._tmpdir.__exit__(exc_type, exc, tb)
 
 
 if __name__ == "__main__":

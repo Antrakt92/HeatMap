@@ -1,10 +1,13 @@
+import ctypes
 import json
+import logging
 import math
 import os
 import sys
 import tempfile
 import threading
 import unittest
+import xml.etree.ElementTree as ET
 from types import ModuleType, SimpleNamespace
 from unittest import mock
 
@@ -20,6 +23,13 @@ class OverlayHelperTests(unittest.TestCase):
     def tearDown(self):
         overlay.CONFIG_PATH = self._old_config_path
         self._tmpdir.cleanup()
+
+    def test_log_formatter_distinguishes_rotated_log_dates(self):
+        record = logging.LogRecord("HeatMap", logging.WARNING, __file__, 1, "message", (), None)
+
+        rendered = logging.Formatter(overlay._LOG_FORMAT, datefmt=overlay._LOG_DATEFMT).format(record)
+
+        self.assertRegex(rendered, r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[WARNING\] message$")
 
     def test_safe_round_rejects_invalid_values(self):
         self.assertIsNone(overlay._safe_round(None))
@@ -51,6 +61,36 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertFalse(cfg["details_enabled"])
         self.assertEqual(cfg["gpu_fan_max_rpm"], 2200)
         self.assertEqual(cfg["cpu_fan_max_rpm"], 1800)
+
+    def test_load_config_rejects_non_finite_numeric_fields(self):
+        defaults = overlay._default_config()
+        with open(overlay.CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump({
+                "x": math.nan,
+                "y": math.inf,
+                "gpu_fan_max_rpm": -math.inf,
+                "cpu_fan_max_rpm": 2100,
+            }, f)
+
+        with self.assertLogs("HeatMap", level="WARNING"):
+            cfg, warning = overlay.load_config_result()
+
+        self.assertIsNotNone(warning)
+        self.assertEqual(cfg["x"], defaults["x"])
+        self.assertEqual(cfg["y"], defaults["y"])
+        self.assertEqual(cfg["gpu_fan_max_rpm"], defaults["gpu_fan_max_rpm"])
+        self.assertEqual(cfg["cpu_fan_max_rpm"], 2100)
+
+    def test_load_config_clamps_huge_integer_coordinates_without_float_conversion(self):
+        huge = 10 ** 1000
+        with open(overlay.CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump({"x": huge, "y": -huge}, f)
+
+        cfg, warning = overlay.load_config_result()
+
+        self.assertIsNone(warning)
+        self.assertEqual(cfg["x"], huge)
+        self.assertEqual(cfg["y"], -huge)
 
     def test_load_config_result_warns_for_invalid_individual_fields(self):
         with open(overlay.CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -212,6 +252,28 @@ class OverlayHelperTests(unittest.TestCase):
             (0, 0),
         )
 
+    def test_monitor_aware_clamp_moves_window_out_of_staggered_gap(self):
+        monitor_areas = (
+            ((0, 0, 100, 100), (0, 0, 100, 90)),
+            ((100, 50, 200, 150), (100, 50, 200, 140)),
+        )
+
+        self.assertEqual(
+            overlay._clamp_overlay_to_monitor_areas(150, 10, 20, 20, monitor_areas),
+            (150, 50),
+        )
+
+    def test_exposed_right_edge_ignores_internal_monitor_seam(self):
+        left = ((0, 0, 100, 100), (0, 0, 100, 100))
+        right = ((100, 0, 200, 100), (100, 0, 200, 100))
+        monitor_areas = (left, right)
+
+        self.assertIsNone(overlay._exposed_right_edge_monitor(99, 50, monitor_areas))
+        self.assertEqual(
+            overlay._exposed_right_edge_monitor(199, 50, monitor_areas),
+            right,
+        )
+
     def test_load_config_result_read_failure_returns_warning(self):
         open(overlay.CONFIG_PATH, "w", encoding="utf-8").close()
 
@@ -255,30 +317,45 @@ class OverlayHelperTests(unittest.TestCase):
             allow_extra_dlls=True,
         )
 
-    def test_main_does_not_kill_previous_instance_when_runtime_dlls_are_invalid(self):
+    def test_main_does_not_acquire_instance_when_runtime_dlls_are_invalid(self):
         with (
             mock.patch.object(overlay, "_runtime_dll_errors", return_value=["missing DLL: lib/System.Memory.dll"]),
-            mock.patch.object(overlay, "kill_previous_instances") as kill_previous,
+            mock.patch.object(overlay, "acquire_single_instance") as acquire,
             mock.patch.object(overlay, "_show_error_message") as show_error,
         ):
             with self.assertRaises(SystemExit) as raised:
                 overlay.main()
 
         self.assertEqual(raised.exception.code, 1)
-        kill_previous.assert_not_called()
+        acquire.assert_not_called()
         show_error.assert_called_once()
         self.assertIn("System.Memory.dll", show_error.call_args.args[1])
         self.assertIn("python setup.py --verify", show_error.call_args.args[1])
 
-    def test_is_same_script_invocation_matches_absolute_and_relative_paths(self):
-        script_path = os.path.join(self._tmpdir.name, "overlay.py")
+    def test_single_instance_mutex_rejects_existing_instance_without_killing_it(self):
+        with (
+            mock.patch.object(overlay, "_instance_mutex_handle", None),
+            mock.patch.object(overlay.kernel32, "CreateMutexW", return_value=123),
+            mock.patch.object(overlay.kernel32, "GetLastError", return_value=overlay._ERROR_ALREADY_EXISTS),
+            mock.patch.object(overlay.kernel32, "CloseHandle") as close,
+        ):
+            self.assertFalse(overlay.acquire_single_instance())
 
-        self.assertTrue(overlay.is_same_script_invocation(script_path, script_path))
-        self.assertTrue(overlay.is_same_script_invocation(script_path, f'"{script_path}"'))
-        self.assertTrue(overlay.is_same_script_invocation(script_path, "overlay.py", self._tmpdir.name))
-        self.assertFalse(overlay.is_same_script_invocation(script_path, "overlay.py"))
-        self.assertFalse(overlay.is_same_script_invocation(script_path, "overlay.py", os.path.dirname(self._tmpdir.name)))
-        self.assertFalse(overlay.is_same_script_invocation(script_path, "other.py", self._tmpdir.name))
+        close.assert_called_once_with(123)
+
+    def test_single_instance_mutex_is_released_cleanly(self):
+        with (
+            mock.patch.object(overlay, "_instance_mutex_handle", None),
+            mock.patch.object(overlay.kernel32, "CreateMutexW", return_value=456),
+            mock.patch.object(overlay.kernel32, "GetLastError", return_value=0),
+            mock.patch.object(overlay.kernel32, "ReleaseMutex") as release,
+            mock.patch.object(overlay.kernel32, "CloseHandle") as close,
+        ):
+            self.assertTrue(overlay.acquire_single_instance())
+            overlay.release_single_instance()
+
+        release.assert_called_once_with(456)
+        close.assert_called_once_with(456)
 
     def test_sensor_error_update_shows_error_state_and_clears_disk_rows(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
@@ -322,76 +399,179 @@ class OverlayHelperTests(unittest.TestCase):
             os.path.join(self._tmpdir.name, "HeatMap.log"),
         )
 
-    def test_format_autostart_task_run_quotes_paths(self):
-        self.assertEqual(
-            overlay._format_autostart_task_run(r"C:\Python313\pythonw.exe", r"C:\Heat Map\overlay.py"),
-            r'"C:\Python313\pythonw.exe" "C:\Heat Map\overlay.py"',
-        )
+    def test_import_does_not_attach_production_file_handler(self):
+        self.assertFalse(any(
+            getattr(handler, "_heatmap_log_path", None)
+            for handler in overlay.log.handlers
+        ))
 
     def test_parse_autostart_task_xml_accepts_real_schtasks_shape(self):
         xml = _task_xml(r'"C:\Python313\pythonw.exe"', r'"C:\Users\Dima\Documents\GitHub\HeatMap\overlay.py"')
 
-        command, arguments = overlay._parse_autostart_task_xml(xml)
+        definition = overlay._parse_autostart_task_xml(xml)
 
-        self.assertEqual(command, r'"C:\Python313\pythonw.exe"')
-        self.assertEqual(arguments, r'"C:\Users\Dima\Documents\GitHub\HeatMap\overlay.py"')
+        self.assertEqual(definition.command, r'"C:\Python313\pythonw.exe"')
+        self.assertEqual(definition.arguments, r'"C:\Users\Dima\Documents\GitHub\HeatMap\overlay.py"')
+        self.assertEqual(definition.run_level, "")
 
     def test_parse_autostart_task_xml_tolerates_wrong_utf16_declaration(self):
         xml = _task_xml(r'"C:\Python313\pythonw.exe"', r'"C:\HeatMap\overlay.py"')
         xml_bytes = xml.encode("cp1252")
 
-        command, arguments = overlay._parse_autostart_task_xml(xml_bytes)
+        definition = overlay._parse_autostart_task_xml(xml_bytes)
 
-        self.assertEqual(command, r'"C:\Python313\pythonw.exe"')
-        self.assertEqual(arguments, r'"C:\HeatMap\overlay.py"')
+        self.assertEqual(definition.command, r'"C:\Python313\pythonw.exe"')
+        self.assertEqual(definition.arguments, r'"C:\HeatMap\overlay.py"')
 
     def test_parse_autostart_task_xml_accepts_real_utf16_bytes(self):
         xml = _task_xml(r'"C:\Python313\pythonw.exe"', r'"C:\HeatMap\overlay.py"')
 
-        command, arguments = overlay._parse_autostart_task_xml(xml.encode("utf-16"))
+        definition = overlay._parse_autostart_task_xml(xml.encode("utf-16"))
 
-        self.assertEqual(command, r'"C:\Python313\pythonw.exe"')
-        self.assertEqual(arguments, r'"C:\HeatMap\overlay.py"')
+        self.assertEqual(definition.command, r'"C:\Python313\pythonw.exe"')
+        self.assertEqual(definition.arguments, r'"C:\HeatMap\overlay.py"')
 
-    def test_autostart_enabled_rejects_stale_task_paths(self):
-        xml = _task_xml(r'"C:\Python313\pythonw.exe"', r'"C:\Old\overlay.py"')
-        result = _completed(returncode=0, stdout=xml.encode("cp1252"))
+    def test_build_autostart_task_xml_round_trips_safe_contract(self):
+        user_id = r"DESKTOP\Dima"
+        xml = overlay._build_autostart_task_xml(
+            user_id,
+            app_dir=r"C:\Heat Map & Tools",
+            system_root=r"C:\Windows",
+        )
+
+        definition = overlay._parse_autostart_task_xml(xml)
+
+        self.assertEqual(
+            overlay._classify_autostart_task(
+                definition,
+                user_id,
+                app_dir=r"C:\Heat Map & Tools",
+                system_root=r"C:\Windows",
+            ),
+            overlay.AUTOSTART_SAFE_CURRENT,
+        )
+        self.assertEqual(definition.run_level, "LeastPrivilege")
+        self.assertEqual(definition.execution_time_limit, "PT0S")
+        self.assertEqual(definition.disallow_start_on_batteries, "false")
+        self.assertEqual(definition.stop_on_batteries, "false")
+        self.assertEqual(definition.start_when_available, "true")
+        self.assertIn(r"Heat Map & Tools\run_as_admin.bat", definition.arguments)
+
+    def test_classify_autostart_rejects_extra_trigger_and_action(self):
+        user_id = r"DESKTOP\Dima"
+        root = ET.fromstring(overlay._build_autostart_task_xml(user_id))
+        namespace = "{http://schemas.microsoft.com/windows/2004/02/mit/task}"
+        triggers = root.find(f"{namespace}Triggers")
+        ET.SubElement(triggers, f"{namespace}TimeTrigger")
+        actions = root.find(f"{namespace}Actions")
+        extra_exec = ET.SubElement(actions, f"{namespace}Exec")
+        ET.SubElement(extra_exec, f"{namespace}Command").text = "notepad.exe"
+
+        definition = overlay._parse_autostart_task_xml(ET.tostring(root))
+
+        self.assertEqual(
+            overlay._classify_autostart_task(definition, user_id),
+            overlay.AUTOSTART_STALE_HEATMAP,
+        )
+
+    def test_classify_autostart_rejects_each_mutated_lifecycle_contract(self):
+        user_id = r"DESKTOP\Dima"
+        safe = overlay._parse_autostart_task_xml(overlay._build_autostart_task_xml(user_id))
+        mutations = {
+            "run_only_if_network_available": "true",
+            "allow_start_on_demand": "false",
+            "allow_hard_terminate": "false",
+            "hidden": "true",
+            "wake_to_run": "true",
+            "idle_stop_on_end": "true",
+            "idle_restart": "true",
+            "trigger_user_id": r"DESKTOP\OtherUser",
+        }
+        for field, value in mutations.items():
+            with self.subTest(field=field):
+                changed = overlay.AutostartTaskDefinition(
+                    **{**safe.__dict__, field: value}
+                )
+                self.assertEqual(
+                    overlay._classify_autostart_task(changed, user_id),
+                    overlay.AUTOSTART_STALE_HEATMAP,
+                )
+
+    def test_query_autostart_does_not_treat_generic_exit_one_as_absent(self):
+        result = _completed(returncode=1, stderr=b"Access is denied")
+        with mock.patch.object(overlay, "_run_task_powershell", return_value=(result, None)):
+            definition, error = overlay._query_autostart_task_definition()
+
+        self.assertIsNone(definition)
+        self.assertIn("Access is denied", error)
+
+    def test_register_autostart_passes_xml_in_memory(self):
+        result = _completed(returncode=0)
+        with mock.patch.object(
+            overlay, "_run_task_powershell", return_value=(result, None)
+        ) as run:
+            ok, _message = overlay._register_autostart_xml(
+                overlay._build_autostart_task_xml(r"DESKTOP\Dima")
+            )
+
+        self.assertTrue(ok)
+        payload = run.call_args.kwargs["input_text"]
+        decoded = __import__("base64").b64decode(payload).decode("utf-8")
+        self.assertIn("<Task", decoded)
+        self.assertNotIn("HeatMap_task_", run.call_args.args[0])
+
+    def test_autostart_identity_rejects_over_the_shoulder_elevation(self):
         with (
-            mock.patch.object(overlay, "_run_schtasks", return_value=(result, None)),
-            mock.patch.object(overlay, "get_pythonw_path", return_value=r"C:\Python313\pythonw.exe"),
-            mock.patch.object(overlay, "SCRIPT_PATH", r"C:\HeatMap\overlay.py"),
+            mock.patch.object(overlay, "_current_user_id", return_value="S-1-5-21-1"),
+            mock.patch.object(overlay, "_current_user_account", return_value=r"ADMIN\Admin"),
+            mock.patch.object(overlay, "_interactive_user_account", return_value=r"DESKTOP\Dima"),
         ):
-            self.assertFalse(overlay.is_autostart_enabled())
+            user_id, identities, error = overlay._resolve_autostart_identity()
 
-    def test_autostart_enabled_rejects_stale_python_path(self):
-        xml = _task_xml(r'"C:\OldPython\pythonw.exe"', r'"C:\HeatMap\overlay.py"')
-        result = _completed(returncode=0, stdout=xml.encode("cp1252"))
-        with (
-            mock.patch.object(overlay, "_run_schtasks", return_value=(result, None)),
-            mock.patch.object(overlay, "get_pythonw_path", return_value=r"C:\Python313\pythonw.exe"),
-            mock.patch.object(overlay, "SCRIPT_PATH", r"C:\HeatMap\overlay.py"),
-        ):
-            self.assertFalse(overlay.is_autostart_enabled())
+        self.assertIsNone(user_id)
+        self.assertEqual(identities, ())
+        self.assertIn("different administrator credentials", error)
 
-    def test_autostart_enabled_accepts_matching_task_paths(self):
-        xml = _task_xml(r'"C:\Python313\pythonw.exe"', r'"C:\HeatMap\overlay.py"')
-        result = _completed(returncode=0, stdout=xml.encode("cp1252"))
+    def test_classify_autostart_rejects_highest_privilege_legacy_task(self):
+        legacy = overlay.AutostartTaskDefinition(
+            run_level="HighestAvailable",
+            command=r'"C:\Python313\pythonw.exe"',
+            arguments=r'"C:\HeatMap\overlay.py"',
+        )
+
+        self.assertEqual(
+            overlay._classify_autostart_task(legacy, r"DESKTOP\Dima"),
+            overlay.AUTOSTART_LEGACY_UNSAFE,
+        )
+
+    def test_autostart_enabled_accepts_only_safe_current_definition(self):
+        user_id = r"DESKTOP\Dima"
+        safe = overlay._parse_autostart_task_xml(
+            overlay._build_autostart_task_xml(user_id)
+        )
         with (
-            mock.patch.object(overlay, "_run_schtasks", return_value=(result, None)),
-            mock.patch.object(overlay, "get_pythonw_path", return_value=r"C:\Python313\pythonw.exe"),
-            mock.patch.object(overlay, "SCRIPT_PATH", r"C:\HeatMap\overlay.py"),
+            mock.patch.object(overlay, "_query_autostart_task_definition", return_value=(safe, None)),
+            mock.patch.object(overlay, "_current_user_id", return_value=user_id),
         ):
             self.assertTrue(overlay.is_autostart_enabled())
 
     def test_autostart_enabled_returns_false_for_malformed_xml(self):
         result = _completed(returncode=0, stdout=b"<Task><Actions>")
-        with mock.patch.object(overlay, "_run_schtasks", return_value=(result, None)):
+        with (
+            mock.patch.object(overlay, "_run_task_powershell", return_value=(result, None)),
+            mock.patch.object(
+                overlay,
+                "_resolve_autostart_identity",
+                return_value=(r"S-1-5-21-1", (r"S-1-5-21-1",), None),
+            ),
+        ):
             self.assertFalse(overlay.is_autostart_enabled())
 
     def test_enable_autostart_keeps_legacy_registry_on_create_failure(self):
-        result = _completed(returncode=1, stderr=b"create failed")
         with (
-            mock.patch.object(overlay, "_run_schtasks", return_value=(result, None)),
+            mock.patch.object(overlay, "_current_user_id", return_value=r"DESKTOP\Dima"),
+            mock.patch.object(overlay, "_query_autostart_task_definition", return_value=(None, None)),
+            mock.patch.object(overlay, "_register_autostart_xml", return_value=(False, "create failed")),
             mock.patch.object(overlay, "_delete_legacy_autostart_value") as delete_legacy,
         ):
             ok, message = overlay.enable_autostart()
@@ -401,19 +581,104 @@ class OverlayHelperTests(unittest.TestCase):
         delete_legacy.assert_not_called()
 
     def test_enable_autostart_deletes_legacy_registry_after_successful_create(self):
-        result = _completed(returncode=0)
+        user_id = r"DESKTOP\Dima"
+        safe = overlay._parse_autostart_task_xml(overlay._build_autostart_task_xml(user_id))
         with (
-            mock.patch.object(overlay, "_run_schtasks", return_value=(result, None)) as run_schtasks,
+            mock.patch.object(overlay, "_current_user_id", return_value=user_id),
+            mock.patch.object(
+                overlay,
+                "_query_autostart_task_definition",
+                side_effect=[(None, None), (safe, None)],
+            ),
+            mock.patch.object(overlay, "_register_autostart_xml", return_value=(True, "created")),
             mock.patch.object(overlay, "_delete_legacy_autostart_value", return_value=(True, "removed")) as delete_legacy,
         ):
             ok, message = overlay.enable_autostart()
 
         self.assertTrue(ok)
-        self.assertEqual(message, "Autostart enabled")
-        args = run_schtasks.call_args.args[0]
-        self.assertIn("/DELAY", args)
-        self.assertEqual(args[args.index("/DELAY") + 1], "0000:30")
+        self.assertIn("UAC", message)
         delete_legacy.assert_called_once()
+
+    def test_classify_autostart_rejects_unsafe_lifecycle_setting(self):
+        user_id = r"DESKTOP\Dima"
+        safe = overlay._parse_autostart_task_xml(overlay._build_autostart_task_xml(user_id))
+        unsafe = overlay.AutostartTaskDefinition(
+            **{
+                **safe.__dict__,
+                "disallow_start_on_batteries": "true",
+            }
+        )
+
+        self.assertEqual(
+            overlay._classify_autostart_task(unsafe, user_id),
+            overlay.AUTOSTART_STALE_HEATMAP,
+        )
+
+    def test_enable_autostart_replaces_legacy_task_fail_closed(self):
+        user_id = r"DESKTOP\Dima"
+        legacy = overlay.AutostartTaskDefinition(
+            run_level="HighestAvailable",
+            command=r'"C:\Python313\pythonw.exe"',
+            arguments=r'"C:\HeatMap\overlay.py"',
+        )
+        safe = overlay._parse_autostart_task_xml(overlay._build_autostart_task_xml(user_id))
+        disabled_legacy = overlay.AutostartTaskDefinition(
+            **{**legacy.__dict__, "enabled": "false"}
+        )
+        calls = []
+
+        with (
+            mock.patch.object(overlay, "_current_user_id", return_value=user_id),
+            mock.patch.object(
+                overlay,
+                "_query_autostart_task_definition",
+                side_effect=[
+                    (legacy, None),
+                    (legacy, None),
+                    (disabled_legacy, None),
+                    (None, None),
+                    (safe, None),
+                ],
+            ),
+            mock.patch.object(
+                overlay,
+                "_disable_autostart_task",
+                side_effect=lambda: (calls.append("disable") or (True, "disabled")),
+            ),
+            mock.patch.object(
+                overlay,
+                "_delete_autostart_task",
+                side_effect=lambda: (calls.append("delete") or (True, "deleted")),
+            ),
+            mock.patch.object(
+                overlay,
+                "_register_autostart_xml",
+                side_effect=lambda _xml: (calls.append("create") or (True, "created")),
+            ),
+            mock.patch.object(overlay, "_delete_legacy_autostart_value", return_value=(True, "removed")),
+        ):
+            ok, _message = overlay.enable_autostart()
+
+        self.assertTrue(ok)
+        self.assertEqual(calls, ["disable", "delete", "create"])
+
+    def test_enable_autostart_leaves_unknown_name_collision_untouched(self):
+        collision = overlay.AutostartTaskDefinition(
+            source="AnotherApp",
+            command=r"C:\Windows\System32\notepad.exe",
+        )
+        with (
+            mock.patch.object(overlay, "_current_user_id", return_value=r"DESKTOP\Dima"),
+            mock.patch.object(overlay, "_query_autostart_task_definition", return_value=(collision, None)),
+            mock.patch.object(overlay, "_delete_autostart_task") as delete,
+            mock.patch.object(overlay, "_register_autostart_xml") as register,
+        ):
+            ok, message = overlay.enable_autostart()
+
+        self.assertFalse(ok)
+        self.assertIn("not owned", message)
+        delete.assert_not_called()
+        register.assert_not_called()
 
     def test_toggle_autostart_failed_enable_shows_error_and_marks_menu(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
@@ -440,7 +705,7 @@ class OverlayHelperTests(unittest.TestCase):
         ):
             app.toggle_autostart()
 
-        self.assertEqual(app.menu_labels, [("autostart", "Autostart: ON")])
+        self.assertEqual(app.menu_labels, [("autostart", "Autostart: ON (UAC)")])
 
     def test_read_sensors_without_computer_returns_psutil_fallback(self):
         with (
@@ -499,6 +764,7 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["ram_total_gb"], 32.0)
         self.assertEqual(data["disks"], [])
         self.assertEqual(data[overlay.SENSOR_STATUS_KEY], overlay.SENSOR_STATUS_PSUTIL_FALLBACK)
+        self.assertTrue(data[overlay.SENSOR_REINIT_KEY])
         self.assertTrue(any("Failed to enumerate" in message for message in logs.output))
 
     def test_read_sensors_lhm_import_failure_marks_psutil_fallback(self):
@@ -515,6 +781,7 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["cpu_load"], 15)
         self.assertEqual(data["ram_pct"], 25)
         self.assertEqual(data[overlay.SENSOR_STATUS_KEY], overlay.SENSOR_STATUS_PSUTIL_FALLBACK)
+        self.assertTrue(data[overlay.SENSOR_REINIT_KEY])
 
     def test_read_sensors_storage_skip_update_reads_cached_values(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
@@ -656,6 +923,89 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["gpu_vram_total_gb"], 16.0)
         self.assertEqual(data["ram_pct"], 77)
 
+    def test_read_sensors_prefers_aggregate_gpu_load_regardless_of_sensor_order(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+
+        def read_with(sensors):
+            gpu = _FakeHardware("NVIDIA GPU", HardwareType.GpuNvidia, sensors=sensors)
+            with (
+                mock.patch.dict(sys.modules, modules),
+                mock.patch.object(overlay.psutil, "cpu_percent", return_value=10),
+                mock.patch.object(
+                    overlay.psutil,
+                    "virtual_memory",
+                    return_value=_memory(percent=20, used_gb=2, total_gb=8),
+                ),
+            ):
+                return overlay.read_sensors(SimpleNamespace(Hardware=[gpu]))
+
+        aggregate = _FakeSensor("GPU Core", SensorType.Load, 80)
+        fallback = _FakeSensor("D3D 3D", SensorType.Load, 20)
+
+        self.assertEqual(read_with([aggregate, fallback])["gpu_load"], 80)
+        self.assertEqual(read_with([fallback, aggregate])["gpu_load"], 80)
+
+    def test_read_sensors_prefers_physical_ram_regardless_of_hardware_order(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        physical = _FakeHardware(
+            "Total Memory",
+            HardwareType.Memory,
+            sensors=[_FakeSensor("Memory", SensorType.Load, 70)],
+        )
+        virtual = _FakeHardware(
+            "Virtual Memory",
+            HardwareType.Memory,
+            sensors=[_FakeSensor("Memory", SensorType.Load, 45)],
+        )
+
+        def read_with(hardware):
+            with (
+                mock.patch.dict(sys.modules, modules),
+                mock.patch.object(overlay.psutil, "cpu_percent", return_value=10),
+                mock.patch.object(
+                    overlay.psutil,
+                    "virtual_memory",
+                    return_value=_memory(percent=22, used_gb=2, total_gb=8),
+                ),
+            ):
+                return overlay.read_sensors(SimpleNamespace(Hardware=hardware))
+
+        self.assertEqual(read_with([physical, virtual])["ram_pct"], 70)
+        self.assertEqual(read_with([virtual, physical])["ram_pct"], 70)
+
+    def test_read_sensors_rejects_temperature_sentinels(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        gpu = _FakeHardware(
+            "NVIDIA GPU",
+            HardwareType.GpuNvidia,
+            sensors=[_FakeSensor("GPU Core", SensorType.Temperature, 0)],
+        )
+        storage = _FakeHardware(
+            "SSD",
+            HardwareType.Storage,
+            sensors=[_FakeSensor("Temperature", SensorType.Temperature, -1)],
+        )
+        motherboard = _FakeHardware(
+            "Motherboard",
+            HardwareType.Motherboard,
+            sensors=[_FakeSensor("System", SensorType.Temperature, 255)],
+        )
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(overlay.psutil, "cpu_percent", return_value=10),
+            mock.patch.object(
+                overlay.psutil,
+                "virtual_memory",
+                return_value=_memory(percent=20, used_gb=2, total_gb=8),
+            ),
+        ):
+            data = overlay.read_sensors(SimpleNamespace(Hardware=[gpu, storage, motherboard]))
+
+        self.assertIsNone(data["gpu_temp"])
+        self.assertEqual(data["disks"], [{"name": "SSD", "temp": None, "used_pct": None}])
+        self.assertEqual(data["motherboard_temps"], [])
+
     def test_read_sensors_marks_empty_gpu_hardware_for_reinit(self):
         modules, HardwareType, _SensorType = _fake_lhm_modules()
         gpu = _FakeHardware("AMD Radeon RX 7900 XT", HardwareType.GpuAmd)
@@ -714,7 +1064,7 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(intel_gpu.update_calls, 0)
         self.assertNotIn(overlay.SENSOR_STATUS_KEY, data)
 
-    def test_read_sensors_reads_intel_gpu_when_discrete_gpu_has_no_temperature(self):
+    def test_read_sensors_uses_one_gpu_bundle_when_discrete_gpu_has_no_temperature(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
         discrete_gpu = _FakeHardware(
             "NVIDIA GPU",
@@ -735,9 +1085,46 @@ class OverlayHelperTests(unittest.TestCase):
         ):
             data = overlay.read_sensors(computer)
 
-        self.assertEqual(data["gpu_load"], 80)
+        self.assertIsNone(data["gpu_load"])
         self.assertEqual(data["gpu_temp"], 45)
         self.assertEqual(intel_gpu.update_calls, 1)
+
+    def test_read_sensors_selects_multi_gpu_metrics_as_permutation_invariant_bundle(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        gpu_a = _FakeHardware(
+            "GPU A",
+            HardwareType.GpuNvidia,
+            sensors=[
+                _FakeSensor("GPU Core", SensorType.Temperature, 90),
+                _FakeSensor("GPU Core", SensorType.Load, 10),
+            ],
+        )
+        gpu_b = _FakeHardware(
+            "GPU B",
+            HardwareType.GpuAmd,
+            sensors=[
+                _FakeSensor("GPU Core", SensorType.Temperature, 50),
+                _FakeSensor("GPU Core", SensorType.Load, 80),
+            ],
+        )
+
+        def read(order):
+            with (
+                mock.patch.dict(sys.modules, modules),
+                mock.patch.object(overlay.psutil, "cpu_percent", return_value=10),
+                mock.patch.object(
+                    overlay.psutil,
+                    "virtual_memory",
+                    return_value=_memory(percent=20, used_gb=2, total_gb=8),
+                ),
+            ):
+                return overlay.read_sensors(SimpleNamespace(Hardware=order))
+
+        first = read([gpu_a, gpu_b])
+        second = read([gpu_b, gpu_a])
+
+        self.assertEqual((first["gpu_temp"], first["gpu_load"]), (90, 10))
+        self.assertEqual((second["gpu_temp"], second["gpu_load"]), (90, 10))
 
     def test_read_sensors_cpu_fan_control_priority(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
@@ -1016,6 +1403,21 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertTrue(app.status_label.packed)
         self.assertEqual(app.status_label.options["text"], "Driver: install PawnIO")
 
+        app._set_config_status(overlay.STATUS_CONFIG_ADJUSTED)
+        self.assertEqual(app.status_label.options["text"], "Driver: install PawnIO")
+
+        app._set_config_status(overlay.STATUS_CONFIG_SAVE_ERROR)
+        self.assertEqual(app.status_label.options["text"], "Config save failed")
+
+    def test_runtime_status_reports_cpu_unavailable_after_driver_check(self):
+        app = _status_app()
+
+        app._set_sensor_status(overlay.SENSOR_STATUS_CPU_UNAVAILABLE)
+
+        self.assertTrue(app.status_label.packed)
+        self.assertEqual(app.status_label.options["text"], "CPU sensor unavailable")
+        self.assertEqual(app.status_label.options["fg"], "#f87171")
+
     def test_runtime_status_shows_sensor_warming_up(self):
         app = _status_app()
 
@@ -1183,13 +1585,8 @@ class OverlayHelperTests(unittest.TestCase):
         save_calls = []
         app._save_config = lambda update_status=True: save_calls.append(update_status)
 
-        metrics = {
-            overlay.SM_XVIRTUALSCREEN: 0,
-            overlay.SM_YVIRTUALSCREEN: 0,
-            overlay.SM_CXVIRTUALSCREEN: 1920,
-            overlay.SM_CYVIRTUALSCREEN: 1080,
-        }
-        with mock.patch.object(overlay.user32, "GetSystemMetrics", side_effect=lambda key: metrics[key]):
+        monitor_areas = (((0, 0, 1920, 1080), (0, 0, 1920, 1080)),)
+        with mock.patch.object(overlay, "_get_monitor_areas", return_value=monitor_areas):
             changed = app._clamp_saved_position_to_visible_screen(persist=True)
 
         self.assertTrue(changed)
@@ -1198,6 +1595,219 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(app.root.geometry_calls, ["+1700+920"])
         self.assertEqual(save_calls, [False])
 
+    def test_set_parent_verified_checks_native_postcondition(self):
+        with (
+            mock.patch.object(overlay.user32, "IsWindow", return_value=True),
+            mock.patch.object(overlay.user32, "GetWindowLongW", return_value=overlay.WS_POPUP),
+            mock.patch.object(overlay.user32, "SetWindowLongW") as set_style,
+            mock.patch.object(overlay.user32, "SetParent") as set_parent,
+            mock.patch.object(overlay.user32, "GetParent", return_value=0),
+        ):
+            self.assertFalse(overlay._set_parent_verified(100, 200))
+
+        set_parent.assert_called_once_with(100, 200)
+        self.assertEqual(
+            set_style.call_args_list,
+            [
+                mock.call(100, overlay.GWL_STYLE, overlay.WS_CHILD),
+                mock.call(100, overlay.GWL_STYLE, ctypes.c_long(overlay.WS_POPUP).value),
+            ],
+        )
+
+    def test_set_parent_verified_accepts_native_null_as_detached_parent(self):
+        with (
+            mock.patch.object(overlay.user32, "IsWindow", return_value=True),
+            mock.patch.object(overlay.user32, "GetWindowLongW", return_value=overlay.WS_CHILD),
+            mock.patch.object(overlay.user32, "SetWindowLongW") as set_style,
+            mock.patch.object(overlay.user32, "SetParent") as set_parent,
+            mock.patch.object(overlay.user32, "GetParent", return_value=None),
+            mock.patch.object(overlay.user32, "SetWindowPos") as set_window_pos,
+        ):
+            self.assertTrue(overlay._set_parent_verified(100, 0))
+
+        set_parent.assert_called_once_with(100, 0)
+        set_style.assert_called_once_with(
+            100,
+            overlay.GWL_STYLE,
+            ctypes.c_long(overlay.WS_POPUP).value,
+        )
+        set_window_pos.assert_called_once()
+
+    def test_set_parent_verified_sets_child_style_before_embedding(self):
+        with (
+            mock.patch.object(overlay.user32, "IsWindow", return_value=True),
+            mock.patch.object(overlay.user32, "GetWindowLongW", return_value=overlay.WS_POPUP),
+            mock.patch.object(overlay.user32, "SetWindowLongW") as set_style,
+            mock.patch.object(overlay.user32, "SetParent") as set_parent,
+            mock.patch.object(overlay.user32, "GetParent", return_value=200),
+            mock.patch.object(overlay.user32, "SetWindowPos") as set_window_pos,
+        ):
+            self.assertTrue(overlay._set_parent_verified(100, 200))
+
+        set_style.assert_called_once_with(100, overlay.GWL_STYLE, overlay.WS_CHILD)
+        set_parent.assert_called_once_with(100, 200)
+        set_window_pos.assert_called_once()
+
+    def test_find_desktop_host_rejects_progman_parent_that_dies_with_explorer(self):
+        progman = 100
+
+        def find_window_ex(parent, after, class_name, _title):
+            if (parent, class_name) == (progman, "SHELLDLL_DefView"):
+                return 200
+            return 0
+
+        def enum_windows(callback, _lparam):
+            callback(progman, 0)
+            return True
+
+        with (
+            mock.patch.object(overlay.user32, "FindWindowW", return_value=progman),
+            mock.patch.object(overlay.user32, "SendMessageTimeoutW", return_value=1),
+            mock.patch.object(overlay.user32, "FindWindowExW", side_effect=find_window_ex),
+            mock.patch.object(overlay.user32, "EnumWindows", side_effect=enum_windows),
+        ):
+            self.assertIsNone(overlay.find_desktop_worker_w())
+
+    def test_find_desktop_host_uses_worker_behind_defview_worker(self):
+        progman = 100
+        icons_worker = 300
+        wallpaper_worker = 400
+
+        def find_window_ex(parent, after, class_name, _title):
+            if (parent, class_name) == (icons_worker, "SHELLDLL_DefView"):
+                return 301
+            if (parent, after, class_name) == (0, icons_worker, "WorkerW"):
+                return wallpaper_worker
+            return 0
+
+        def enum_windows(callback, _lparam):
+            callback(progman, 0)
+            callback(icons_worker, 0)
+            return True
+
+        with (
+            mock.patch.object(overlay.user32, "FindWindowW", return_value=progman),
+            mock.patch.object(overlay.user32, "SendMessageTimeoutW", return_value=1),
+            mock.patch.object(overlay.user32, "FindWindowExW", side_effect=find_window_ex),
+            mock.patch.object(overlay.user32, "EnumWindows", side_effect=enum_windows),
+        ):
+            self.assertEqual(overlay.find_desktop_worker_w(), wallpaper_worker)
+
+    def test_embed_in_desktop_keeps_overlay_behind_host_children(self):
+        expected_flags = overlay.SWP_NOMOVE | overlay.SWP_NOSIZE | overlay.SWP_NOACTIVATE
+        with (
+            mock.patch.object(overlay, "find_desktop_worker_w", return_value=200),
+            mock.patch.object(overlay, "_set_parent_verified", return_value=True) as set_parent,
+            mock.patch.object(overlay.user32, "SetWindowPos", return_value=True) as set_window_pos,
+        ):
+            self.assertTrue(overlay.embed_in_desktop(100))
+
+        set_parent.assert_called_once_with(100, 200)
+        set_window_pos.assert_called_once_with(100, overlay.HWND_BOTTOM, 0, 0, 0, 0, expected_flags)
+
+    def test_stale_embed_callback_is_ignored_after_transition_cancel(self):
+        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.running = True
+        app.topmost = False
+        app.peek_visible = False
+        app._peek_animating = False
+        app.embedded = False
+        app.root = _FakeRoot()
+        app._embed_after_id = None
+        app._window_transition_generation = 0
+        app._get_hwnd = lambda: 123
+
+        with mock.patch.object(overlay, "embed_in_desktop", return_value=True) as embed:
+            app._schedule_embed(100)
+            stale_callback = app.root.after_calls[-1][1]
+            app._cancel_scheduled_embed()
+            stale_callback()
+
+        embed.assert_not_called()
+        self.assertFalse(app.embedded)
+
+    def test_screen_poll_reembeds_after_explorer_replaces_desktop_parent(self):
+        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.running = True
+        app.topmost = False
+        app.peek_visible = False
+        app._peek_animating = False
+        app.embedded = True
+        app._embed_after_id = None
+        app._monitor_areas = [((0, 0, 1920, 1080), (0, 0, 1920, 1040))]
+        app.root = _FakeRoot()
+        app._has_valid_desktop_parent = lambda: False
+        app._schedule_embed = mock.Mock()
+
+        with mock.patch.object(overlay, "_get_monitor_areas", return_value=app._monitor_areas):
+            app._poll_screen_change()
+
+        self.assertFalse(app.embedded)
+        app._schedule_embed.assert_called_once_with(50)
+        self.assertEqual(app.root.after_calls[-1][0], 5000)
+
+    def test_toggle_topmost_stays_off_when_detach_fails(self):
+        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.topmost = False
+        app.peek_visible = False
+        app._peek_animating = False
+        app._saved_pos = None
+        app.embedded = True
+        app.root = _FakeRoot()
+        app._embed_after_id = None
+        app._window_transition_generation = 0
+        app._detach_from_desktop = lambda: False
+
+        with mock.patch.object(overlay, "_show_error_message") as show_error:
+            app.toggle_topmost()
+
+        self.assertFalse(app.topmost)
+        show_error.assert_called_once()
+
+    def test_toggle_topmost_from_peek_restores_visible_alpha(self):
+        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.topmost = False
+        app.peek_visible = True
+        app._peek_animating = False
+        app._saved_pos = (100, 120)
+        app._peek_monitor_area = ((0, 0, 1920, 1080), (0, 0, 1920, 1040))
+        app.embedded = False
+        app.config = {"x": 50, "y": 60}
+        app.root = _FakeRoot()
+        app._embed_after_id = None
+        app._window_transition_generation = 0
+        app._detach_from_desktop = lambda: True
+        app._set_menu_label = lambda *_args: None
+
+        app.toggle_topmost()
+
+        self.assertTrue(app.topmost)
+        self.assertIn(("-alpha", 0.88), app.root.attribute_calls)
+        self.assertEqual(app.root.attribute_calls[-1], ("-topmost", True))
+
+    def test_peek_uses_work_area_right_edge_and_restores_alpha(self):
+        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.running = True
+        app.peek_enabled = True
+        app.peek_visible = False
+        app._peek_animating = False
+        app.topmost = False
+        app.embedded = False
+        app.config = {"x": 100, "y": 120}
+        app.root = _FakeRoot(width=200, height=120)
+        app._embed_after_id = None
+        app._window_transition_generation = 0
+        app._monitor_areas = (((0, 0, 1920, 1080), (0, 0, 1880, 1040)),)
+        app._is_desktop_at_cursor = lambda: False
+        app._detach_from_desktop = lambda: True
+        animation = []
+        app._animate_slide = lambda *args, **kwargs: animation.append((args, kwargs))
+
+        app._peek_show(app._monitor_areas[0])
+
+        self.assertEqual(animation[0][0][:3], (1920, 1680, 120))
+        self.assertIn(("-alpha", 0.88), app.root.attribute_calls)
+
     def test_toggle_peek_off_restores_saved_position_and_persists_it(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
         app.config = {"peek_enabled": True, "x": 50, "y": 60}
@@ -1205,10 +1815,10 @@ class OverlayHelperTests(unittest.TestCase):
         app.peek_visible = True
         app._peek_animating = False
         app._saved_pos = (320, 240)
+        app._peek_monitor_area = ((0, 0, 1920, 1080), (0, 0, 1920, 1040))
         app.topmost = False
         app.root = _FakeRoot()
-        app._trigger = _FakeRoot()
-        app._trigger_hidden_for_desktop = True
+        app._cursor_was_at_peek_edge = True
         app.menu_labels = []
         schedule_calls = []
         save_snapshots = []
@@ -1225,12 +1835,11 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(app.config, {"peek_enabled": False, "x": 320, "y": 240})
         self.assertEqual(app.root.geometry_calls, ["+320+240"])
         self.assertEqual(app.root.attribute_calls, [("-alpha", 0), ("-topmost", False)])
-        self.assertEqual(app._trigger.withdraw_count, 1)
         self.assertEqual(schedule_calls, [50])
         self.assertEqual(app.menu_labels, [("peek", "Peek from edge: OFF")])
         self.assertEqual(save_snapshots[-1], {"peek_enabled": False, "x": 320, "y": 240})
 
-    def test_toggle_peek_on_deiconifies_trigger_when_not_topmost(self):
+    def test_toggle_peek_on_rearms_cursor_edge(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
         app.config = {"peek_enabled": False, "x": 50, "y": 60}
         app.peek_enabled = False
@@ -1239,8 +1848,7 @@ class OverlayHelperTests(unittest.TestCase):
         app._saved_pos = None
         app.topmost = False
         app.root = _FakeRoot()
-        app._trigger = _FakeRoot()
-        app._trigger_hidden_for_desktop = True
+        app._cursor_was_at_peek_edge = True
         app.menu_labels = []
         save_snapshots = []
         app._set_menu_label = lambda key, label: app.menu_labels.append((key, label))
@@ -1250,9 +1858,7 @@ class OverlayHelperTests(unittest.TestCase):
 
         self.assertTrue(app.peek_enabled)
         self.assertEqual(app.config["peek_enabled"], True)
-        self.assertFalse(app._trigger_hidden_for_desktop)
-        self.assertEqual(app._trigger.deiconify_count, 1)
-        self.assertEqual(app._trigger.withdraw_count, 0)
+        self.assertFalse(app._cursor_was_at_peek_edge)
         self.assertEqual(app.menu_labels, [("peek", "Peek from edge: ON")])
         self.assertEqual(save_snapshots, [{"peek_enabled": True, "x": 50, "y": 60}])
 
@@ -1294,6 +1900,36 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertTrue(computer.closed)
         self.assertEqual(app.root.clipboard_value, "diagnostic dump")
 
+    def test_prepare_verified_pawnio_installer_returns_verified_path(self):
+        with mock.patch("setup.download_pawnio", return_value=r"C:\verified\PawnIO.exe"):
+            ok, detail = overlay.prepare_verified_pawnio_installer()
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, r"C:\verified\PawnIO.exe")
+
+    def test_pawnio_status_check_fails_safe_when_setup_check_breaks(self):
+        with (
+            mock.patch("setup.is_pawnio_driver_installed", side_effect=OSError("registry denied")),
+            self.assertLogs("HeatMap", level="WARNING"),
+        ):
+            self.assertFalse(overlay.is_pawnio_driver_installed())
+
+    def test_finish_pawnio_repair_opens_folder_and_explains_restart(self):
+        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.running = True
+        app._pawnio_repair_running = True
+        app.menu_labels = []
+        app._set_menu_label = lambda key, label: app.menu_labels.append((key, label))
+        with (
+            mock.patch.object(overlay.os, "startfile", create=True) as startfile,
+            mock.patch.object(overlay, "_show_info_message") as show_info,
+        ):
+            app._finish_pawnio_repair(True, r"C:\verified\PawnIO.exe")
+
+        self.assertFalse(app._pawnio_repair_running)
+        startfile.assert_called_once_with(r"C:\verified")
+        self.assertIn("hardware-smoke", show_info.call_args.args[1])
+
     def test_sensor_loop_reinitializes_after_repeated_sensor_reinit_hints(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
         old_computer = _CloseableComputer()
@@ -1320,6 +1956,29 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertIs(app.computer, new_computer)
         init_monitor.assert_called_once_with()
         self.assertTrue(any("incomplete sensor samples" in message for message in logs.output))
+
+    def test_sensor_loop_retries_initial_monitor_fallback(self):
+        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        new_computer = _CloseableComputer()
+        app.computer = None
+        app.running = True
+        app.lock = threading.Lock()
+        app._stop_event = _LoopStopEvent(iterations=1)
+        app._sensor_start_time = 0
+        data = _sample_data()
+
+        with (
+            mock.patch.object(overlay, "init_hardware_monitor", return_value=new_computer) as init_monitor,
+            mock.patch.object(overlay, "read_sensors", return_value=data) as read_sensors,
+            mock.patch.object(overlay.time, "monotonic", return_value=overlay.SENSOR_WARMUP_SECONDS + 1),
+            self.assertLogs("HeatMap", level="WARNING") as logs,
+        ):
+            app.sensor_loop()
+
+        init_monitor.assert_called_once_with()
+        read_sensors.assert_called_once_with(new_computer, update_storage=True)
+        self.assertIs(app.computer, new_computer)
+        self.assertTrue(any("Retrying unavailable hardware monitor" in message for message in logs.output))
 
     def test_sensor_loop_reinitializes_immediately_during_warmup(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
@@ -1348,6 +2007,31 @@ class OverlayHelperTests(unittest.TestCase):
         init_monitor.assert_called_once_with()
         self.assertEqual(app.sensor_data[overlay.SENSOR_STATUS_KEY], overlay.SENSOR_STATUS_WARMING_UP)
         self.assertTrue(any("incomplete sensor samples" in message for message in logs.output))
+
+    def test_sensor_loop_marks_cpu_unavailable_after_warmup(self):
+        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.computer = _CloseableComputer()
+        app.running = True
+        app.lock = threading.Lock()
+        app._stop_event = _LoopStopEvent(iterations=1)
+        app._sensor_start_time = 0
+        data = _sample_data()
+        data["cpu_temp"] = None
+
+        with (
+            mock.patch.object(overlay, "read_sensors", return_value=data),
+            mock.patch.object(
+                overlay.time,
+                "monotonic",
+                return_value=overlay.SENSOR_WARMUP_SECONDS + 1,
+            ),
+        ):
+            app.sensor_loop()
+
+        self.assertEqual(
+            app.sensor_data[overlay.SENSOR_STATUS_KEY],
+            overlay.SENSOR_STATUS_CPU_UNAVAILABLE,
+        )
 
     def test_save_config_wrapper_sets_and_clears_config_status(self):
         app = _status_app()
@@ -1463,9 +2147,14 @@ class _FakeRoot:
         self.attribute_calls = []
         self.withdraw_count = 0
         self.deiconify_count = 0
+        self.cancelled_after_ids = []
 
     def after(self, delay, callback):
         self.after_calls.append((delay, callback))
+        return f"after-{len(self.after_calls)}"
+
+    def after_cancel(self, after_id):
+        self.cancelled_after_ids.append(after_id)
 
     def geometry(self, spec):
         self.geometry_calls.append(spec)

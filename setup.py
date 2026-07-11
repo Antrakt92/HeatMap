@@ -1,18 +1,24 @@
-"""
-Setup script to download direct DLL dependencies and verify the bundled runtime.
-Run this once before using the overlay.
-"""
+"""Restore and verify the complete locked hardware-monitoring runtime."""
 import argparse
+from contextlib import contextmanager
+import ctypes
+import ctypes.wintypes
 import hashlib
 import importlib
+import importlib.metadata
 import io
 import json
+import math
+import msvcrt
 import os
 import platform
 import posixpath
 import re
+import shutil
 import ssl
+import subprocess
 import sys
+import tempfile
 import zipfile
 import urllib.request
 try:
@@ -23,20 +29,41 @@ except ImportError:  # pragma: no cover - setup is Windows-only at runtime.
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LIB_DIR = os.path.join(APP_DIR, "lib")
 MANIFEST_PATH = os.path.join(APP_DIR, "lib_manifest.json")
-PAWNIO_SETUP_PATH = os.path.join(APP_DIR, "PawnIO_setup.exe")
+RUNTIME_SOURCES_PATH = os.path.join(APP_DIR, "runtime_sources.json")
+RUNTIME_LOCK_PATH = os.path.join(APP_DIR, "runtime-lock.json")
+CONSTRAINTS_PATH = os.path.join(APP_DIR, "constraints-known-good.txt")
 MANIFEST_VERSION = 1
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MANIFEST_DLL_RE = re.compile(r"^lib/[^/\\]+\.dll$")
-_SOURCE_TYPES = {"nuget", "bundled-unknown"}
+_SOURCE_TYPES = {"runtime-lock"}
 _SUPPORTED_MACHINES = {"amd64", "x86_64", "x64"}
 _PREFLIGHT_MODULES = (
     ("psutil", "psutil"),
     ("clr", "pythonnet"),
 )
+# SYNC: overlay.py::_INSTANCE_MUTEX_NAME. Restore must not replace loaded CLR DLLs.
+_OVERLAY_INSTANCE_MUTEX = r"Local\HeatMapOverlay"
+_ERROR_ALREADY_EXISTS = 183
 
 
 class SetupError(Exception):
     """Recoverable setup failure that should become a non-zero CLI exit code."""
+
+
+def _is_overlay_running():
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    kernel32.CreateMutexW.restype = ctypes.wintypes.HANDLE
+    kernel32.GetLastError.restype = ctypes.wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+    kernel32.CloseHandle.restype = ctypes.c_bool
+    handle = kernel32.CreateMutexW(None, False, _OVERLAY_INSTANCE_MUTEX)
+    if not handle:
+        return False
+    try:
+        return kernel32.GetLastError() == _ERROR_ALREADY_EXISTS
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _unsupported_runtime_message(sys_platform=None, maxsize=None, machine=None):
@@ -55,30 +82,6 @@ def _unsupported_runtime_message(sys_platform=None, maxsize=None, machine=None):
             f"(detected machine: {machine or 'unknown'})."
         )
     return None
-
-
-PACKAGES = {
-    "LibreHardwareMonitorLib": {
-        "version": "0.9.5",
-        "url": "https://www.nuget.org/api/v2/package/LibreHardwareMonitorLib/0.9.5",
-        "dlls": [
-            "runtimes/win-x64/lib/net472/LibreHardwareMonitorLib.dll",
-        ],
-        "sha256": {
-            "LibreHardwareMonitorLib.dll": "21673a431323cd350f31f7598d3e1a161bf9d0a4c030b76ef475441fbd30ac33",
-        },
-    },
-    "HidSharp": {
-        "version": "2.6.4",
-        "url": "https://www.nuget.org/api/v2/package/HidSharp/2.6.4",
-        "dlls": [
-            "lib/net35/HidSharp.dll",
-        ],
-        "sha256": {
-            "HidSharp.dll": "d86690efde30ea9179f669320f39148853793b743a98b531afeaf30598e22f54",
-        },
-    },
-}
 
 
 def load_lib_manifest(manifest_path=MANIFEST_PATH):
@@ -151,8 +154,8 @@ def _manifest_entries_by_file(manifest):
             source_type = source.get("type")
             if source_type not in _SOURCE_TYPES:
                 messages.append(f"{file_path} has invalid source type: {source_type!r}")
-            if source_type == "nuget":
-                for field in ("package", "version", "url", "package_path"):
+            if source_type == "runtime-lock":
+                for field in ("lock_file", "package", "version", "package_path"):
                     if not isinstance(source.get(field), str) or not source[field]:
                         messages.append(f"{file_path} source.{field} must be non-empty string")
         entries[key] = entry
@@ -206,14 +209,93 @@ def _print_manifest_result(ok, messages):
         print(f"  ERROR: {message}")
 
 
-def _check_preflight_dependencies(import_module=importlib.import_module):
+def _read_known_good_versions(constraints_path=CONSTRAINTS_PATH):
+    versions = {}
+    with open(constraints_path, "r", encoding="utf-8") as constraints_file:
+        for raw_line in constraints_file:
+            line = raw_line.partition("#")[0].strip()
+            if not line:
+                continue
+            if "==" not in line:
+                raise ValueError(f"constraint must use an exact version: {line}")
+            package_name, version = (part.strip() for part in line.split("==", 1))
+            if not package_name or not version:
+                raise ValueError(f"invalid exact constraint: {line}")
+            versions[package_name] = version
+    if not versions:
+        raise ValueError("known-good constraints are empty")
+    return versions
+
+
+def _check_preflight_dependencies(
+    import_module=importlib.import_module,
+    distribution_version=importlib.metadata.version,
+    constraints_path=CONSTRAINTS_PATH,
+):
     messages = []
     for module_name, package_name in _PREFLIGHT_MODULES:
         try:
             import_module(module_name)
         except Exception as e:
             messages.append(f"missing or broken dependency {package_name} ({module_name}): {e}")
+
+    try:
+        known_good_versions = _read_known_good_versions(constraints_path)
+    except (OSError, ValueError) as e:
+        messages.append(f"known-good dependency constraints are unavailable or invalid ({constraints_path}): {e}")
+        return messages
+
+    for package_name, expected_version in known_good_versions.items():
+        try:
+            actual_version = distribution_version(package_name)
+        except Exception as e:
+            messages.append(f"missing or broken locked dependency {package_name}: {e}")
+            continue
+        if actual_version != expected_version:
+            messages.append(
+                f"unsupported dependency version {package_name}: "
+                f"expected {expected_version}, got {actual_version}"
+            )
     return messages
+
+
+def _check_lhm_bridge(import_module=importlib.import_module, lib_dir=LIB_DIR):
+    dll_path = os.path.abspath(os.path.join(lib_dir, "LibreHardwareMonitorLib.dll"))
+    try:
+        clr_module = import_module("clr")
+        clr_module.AddReference(dll_path)
+        hardware_module = import_module("LibreHardwareMonitor.Hardware")
+        for symbol in ("Computer", "HardwareType", "SensorType"):
+            if not hasattr(hardware_module, symbol):
+                raise AttributeError(f"missing {symbol}")
+    except Exception as e:
+        return [f"LibreHardwareMonitor CLR bridge failed ({dll_path}): {e}"]
+    return []
+
+
+def _check_staged_lhm_bridge(lib_dir):
+    env = dict(os.environ)
+    env["HEATMAP_STAGED_LIB"] = os.path.abspath(lib_dir)
+    script = (
+        "import os, clr; "
+        "p=os.path.join(os.environ['HEATMAP_STAGED_LIB'],'LibreHardwareMonitorLib.dll'); "
+        "clr.AddReference(p); "
+        "from LibreHardwareMonitor.Hardware import Computer, HardwareType, SensorType"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+    except Exception as e:
+        return [f"staged CLR bridge smoke could not run: {e}"]
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "no output").strip()
+        return [f"staged CLR bridge smoke failed: {detail}"]
+    return []
 
 
 def _reg_key_exists(root, path, registry=None):
@@ -280,17 +362,202 @@ def is_pawnio_driver_installed(registry=None, env=None, path_exists=os.path.exis
     return _service_registry_contains("pawnio", registry)
 
 
+def is_windows_restart_pending(registry=None):
+    registry = winreg if registry is None else registry
+    if registry is None:
+        return False
+    try:
+        with registry.OpenKey(
+            registry.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager",
+        ) as key:
+            value, _value_type = registry.QueryValueEx(key, "PendingFileRenameOperations")
+            return bool(value)
+    except OSError:
+        return False
+
+
+def _load_runtime_sources(path=None, runtime_lock_path=RUNTIME_LOCK_PATH):
+    path = RUNTIME_SOURCES_PATH if path is None else path
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        raise SetupError(f"failed to load runtime sources: {e}") from e
+    if not isinstance(data, dict) or data.get("schema_version") != 1:
+        raise SetupError("runtime sources schema_version must be 1")
+    lhm = data.get("libre_hardware_monitor")
+    pawnio = data.get("pawnio")
+    if not isinstance(lhm, dict) or not isinstance(pawnio, dict):
+        raise SetupError("runtime sources must contain LHM and PawnIO metadata")
+    for field in ("version",):
+        if not isinstance(lhm.get(field), str) or not lhm[field].strip():
+            raise SetupError(f"runtime sources LHM {field} must be a non-empty string")
+    for field in ("version", "compatible_lhm", "url", "sha256"):
+        if not isinstance(pawnio.get(field), str) or not pawnio[field].strip():
+            raise SetupError(f"runtime sources PawnIO {field} must be a non-empty string")
+    if not pawnio["url"].startswith("https://"):
+        raise SetupError("runtime sources PawnIO URL must use HTTPS")
+    if not _SHA256_RE.match(pawnio["sha256"]):
+        raise SetupError("runtime sources PawnIO sha256 is invalid")
+    if isinstance(pawnio.get("size"), bool) or not isinstance(pawnio.get("size"), int) or pawnio["size"] <= 0:
+        raise SetupError("runtime sources PawnIO size must be a positive integer")
+    authenticode = pawnio.get("authenticode")
+    if not isinstance(authenticode, dict):
+        raise SetupError("runtime sources PawnIO authenticode metadata is missing")
+    for field in ("status", "subject", "thumbprint"):
+        if not isinstance(authenticode.get(field), str) or not authenticode[field].strip():
+            raise SetupError(f"runtime sources PawnIO authenticode.{field} is invalid")
+    if authenticode["status"].casefold() != "valid":
+        raise SetupError("runtime sources PawnIO Authenticode status must be Valid")
+    if not re.fullmatch(r"[0-9A-Fa-f]{40}", authenticode["thumbprint"]):
+        raise SetupError("runtime sources PawnIO Authenticode thumbprint is invalid")
+
+    _runtime_lock, locked = load_runtime_lock(runtime_lock_path)
+    lhm_entries = [
+        entry for entry in locked.values()
+        if entry["package"].casefold() == "librehardwaremonitorlib"
+    ]
+    versions = {entry["version"] for entry in lhm_entries}
+    if len(lhm_entries) != 1 or versions != {lhm["version"]}:
+        raise SetupError("runtime sources LHM version does not match runtime-lock.json")
+    if pawnio["compatible_lhm"] != lhm["version"]:
+        raise SetupError("PawnIO compatibility does not match the locked LHM version")
+    return data
+
+
+def _pawnio_download_path(metadata, env=None):
+    env = os.environ if env is None else env
+    base = env.get("LOCALAPPDATA") or tempfile.gettempdir()
+    return os.path.join(
+        base,
+        "HeatMap",
+        "downloads",
+        f"PawnIO_setup_{metadata['version']}.exe",
+    )
+
+
+def _verify_authenticode(path, expected, run_command=None):
+    run_command = subprocess.run if run_command is None else run_command
+    env = dict(os.environ)
+    env["HEATMAP_VERIFY_PATH"] = os.path.abspath(path)
+    system_root = env.get("SystemRoot", r"C:\Windows")
+    powershell_path = os.path.join(
+        system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
+    )
+    # WHY: Windows PowerShell can fail to load its Security module when PSModulePath
+    # contains PowerShell 7 modules first; signature verification must be deterministic.
+    env["PSModulePath"] = os.path.join(
+        system_root, "System32", "WindowsPowerShell", "v1.0", "Modules"
+    )
+    script = (
+        "$s = Get-AuthenticodeSignature -LiteralPath $env:HEATMAP_VERIFY_PATH; "
+        "[pscustomobject]@{Status=$s.Status.ToString(); "
+        "Subject=$s.SignerCertificate.Subject; "
+        "Thumbprint=$s.SignerCertificate.Thumbprint} | ConvertTo-Json -Compress"
+    )
+    try:
+        result = run_command(
+            [powershell_path, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+    except Exception as e:
+        return [f"Authenticode verification failed to run: {e}"]
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "no output").strip()
+        return [f"Authenticode verification failed: {detail}"]
+    try:
+        actual = json.loads(result.stdout)
+    except Exception as e:
+        return [f"Authenticode verification returned invalid JSON: {e}"]
+    messages = []
+    for field in ("status", "subject", "thumbprint"):
+        actual_value = str(actual.get(field.capitalize(), "")).strip()
+        expected_value = str(expected.get(field, "")).strip()
+        if actual_value.casefold() != expected_value.casefold():
+            messages.append(
+                f"Authenticode {field} mismatch: expected {expected_value!r}, got {actual_value!r}"
+            )
+    return messages
+
+
+def _verify_pawnio_file(path, metadata, authenticode_checker=None):
+    authenticode_checker = _verify_authenticode if authenticode_checker is None else authenticode_checker
+    messages = []
+    try:
+        actual_size = os.path.getsize(path)
+    except OSError as e:
+        return [f"could not read PawnIO installer: {e}"]
+    if actual_size != metadata.get("size"):
+        messages.append(
+            f"PawnIO size mismatch: expected {metadata.get('size')}, got {actual_size}"
+        )
+    actual_hash = _sha256_file(path)
+    if actual_hash != metadata.get("sha256"):
+        messages.append(
+            f"PawnIO hash mismatch: expected {metadata.get('sha256')}, got {actual_hash}"
+        )
+    if not messages:
+        messages.extend(authenticode_checker(path, metadata.get("authenticode", {})))
+    return messages
+
+
+def download_pawnio(urlopen=urllib.request.urlopen, env=None):
+    metadata = _load_runtime_sources()["pawnio"]
+    destination = _pawnio_download_path(metadata, env=env)
+    if os.path.exists(destination) and not _verify_pawnio_file(destination, metadata):
+        return destination
+
+    try:
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+    except OSError as e:
+        raise SetupError(f"could not create PawnIO download directory: {e}") from e
+    staging = f"{destination}.download"
+    try:
+        request = urllib.request.Request(metadata["url"], headers={"User-Agent": "HeatMap setup"})
+        try:
+            with urlopen(request, timeout=60, context=ssl.create_default_context()) as response:
+                data = response.read()
+        except Exception as e:
+            raise SetupError(f"error downloading PawnIO {metadata['version']}: {e}") from e
+        try:
+            with open(staging, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+        except OSError as e:
+            raise SetupError(f"could not stage PawnIO installer: {e}") from e
+        messages = _verify_pawnio_file(staging, metadata)
+        if messages:
+            raise SetupError("; ".join(messages))
+        try:
+            os.replace(staging, destination)
+        except OSError as e:
+            raise SetupError(f"could not publish verified PawnIO installer: {e}") from e
+        return destination
+    finally:
+        try:
+            if os.path.exists(staging):
+                os.remove(staging)
+        except OSError:
+            pass
+
+
 def _check_pawnio_driver(path_exists=os.path.exists):
     if is_pawnio_driver_installed(path_exists=path_exists):
         return []
-    if path_exists(PAWNIO_SETUP_PATH):
+    if is_windows_restart_pending():
         return [
-            "PawnIO driver is not installed; run PawnIO_setup.exe as administrator, "
-            "then restart HeatMap."
+            "Windows has pending installer file operations; restart Windows before installing PawnIO. "
+            "After restart run 'python setup.py --download-pawnio', launch the verified installer, "
+            "and restart Windows again."
         ]
     return [
-        "PawnIO driver is not installed and PawnIO_setup.exe is missing; restore the "
-        "repository files or install PawnIO, then restart HeatMap."
+        "PawnIO driver is not installed; run 'python setup.py --download-pawnio', "
+        "then launch the verified installer shown by setup and restart Windows."
     ]
 
 
@@ -315,6 +582,74 @@ def run_preflight():
     if not ok:
         messages.extend(f"DLL runtime: {message}" for message in manifest_messages)
 
+    if not messages:
+        messages.extend(_check_lhm_bridge())
+
+    return not messages, messages
+
+
+def run_hardware_smoke(import_module=importlib.import_module, lib_dir=LIB_DIR):
+    """Open LHM and require a real positive CPU temperature reading."""
+    messages = []
+    computer = None
+    try:
+        clr_module = import_module("clr")
+        clr_module.AddReference(os.path.abspath(os.path.join(lib_dir, "LibreHardwareMonitorLib.dll")))
+        hardware_module = import_module("LibreHardwareMonitor.Hardware")
+        computer = hardware_module.Computer()
+        for field in (
+            "IsCpuEnabled", "IsGpuEnabled", "IsStorageEnabled",
+            "IsMemoryEnabled", "IsMotherboardEnabled",
+        ):
+            setattr(computer, field, True)
+        computer.Open()
+        cpu_blocks = 0
+        cpu_temperatures = []
+        hardware_items = list(computer.Hardware)
+        for hardware in hardware_items:
+            hardware.Update()
+            if hardware.HardwareType != hardware_module.HardwareType.Cpu:
+                continue
+            cpu_blocks += 1
+            sensors = list(hardware.Sensors)
+            for sub_hardware in hardware.SubHardware:
+                sub_hardware.Update()
+                sensors.extend(list(sub_hardware.Sensors))
+            for sensor in sensors:
+                if sensor.SensorType != hardware_module.SensorType.Temperature:
+                    continue
+                try:
+                    value = float(sensor.Value)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if math.isfinite(value) and 0 < value <= 150:
+                    cpu_temperatures.append(value)
+        if cpu_blocks == 0:
+            messages.append("LHM exposed no CPU hardware block")
+        elif not cpu_temperatures:
+            if is_windows_restart_pending():
+                messages.append(
+                    "CPU temperature is unavailable and Windows has pending installer operations; "
+                    "restart Windows before installing/retrying PawnIO, restart again after install, "
+                    "then rerun --hardware-smoke"
+                )
+            else:
+                messages.append(
+                    "CPU temperature is unavailable; confirm elevation, install the locked PawnIO driver, "
+                    "restart Windows, and rerun --hardware-smoke"
+                )
+        print(
+            f"Hardware smoke: blocks={len(hardware_items)}, cpu_blocks={cpu_blocks}, "
+            f"cpu_temperature_readings={len(cpu_temperatures)}"
+        )
+    except Exception as e:
+        messages.append(f"hardware smoke failed: {e}")
+    finally:
+        if computer is not None:
+            try:
+                computer.Close()
+            except Exception as e:
+                messages.append(f"hardware smoke could not close LHM: {e}")
     return not messages, messages
 
 
@@ -327,22 +662,6 @@ def _print_preflight_result(ok, messages):
         print(f"  ERROR: {message}")
 
 
-def _verify_hash(data, filename, expected_hashes):
-    """Verify SHA256 hash of downloaded DLL data. Returns True if OK."""
-    expected = expected_hashes.get(filename)
-    if not expected:
-        print(f"  WARNING: No expected hash for {filename}, rejecting")
-        return False
-    actual = hashlib.sha256(data).hexdigest()
-    if actual != expected:
-        print(f"  ERROR: {filename} hash mismatch!")
-        print(f"    Expected: {expected}")
-        print(f"    Got:      {actual}")
-        return False
-    print(f"  Hash OK: {filename}")
-    return True
-
-
 def _dll_candidates(all_files, dll_path):
     """Return DLL entries with the same filename for diagnostics."""
     target = os.path.basename(dll_path).lower()
@@ -352,45 +671,382 @@ def _dll_candidates(all_files, dll_path):
     ]
 
 
-def download_and_extract():
-    os.makedirs(LIB_DIR, exist_ok=True)
+def load_runtime_lock(runtime_lock_path=RUNTIME_LOCK_PATH):
+    try:
+        with open(runtime_lock_path, "r", encoding="utf-8") as f:
+            runtime_lock = json.load(f)
+    except Exception as e:
+        raise SetupError(f"failed to load runtime lock: {e}") from e
 
-    for name, info in PACKAGES.items():
-        print(f"Downloading {name}...")
+    messages = []
+    if not isinstance(runtime_lock, dict):
+        raise SetupError("runtime lock must be a JSON object")
+    if runtime_lock.get("schema_version") != 1:
+        messages.append("schema_version must be 1")
+    if not isinstance(runtime_lock.get("target_framework"), str) or not runtime_lock["target_framework"].strip():
+        messages.append("target_framework must be a non-empty string")
+    source_commit = runtime_lock.get("source_commit")
+    if not isinstance(source_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+        messages.append("source_commit must be a lowercase 40-character git hash")
+    files = runtime_lock.get("files")
+    if not isinstance(files, list) or not files:
+        messages.append("files must be a non-empty list")
+        files = []
+
+    entries = {}
+    packages = {}
+    required = {
+        "file", "package", "version", "package_path", "nupkg_sha256", "license"
+    }
+    for index, entry in enumerate(files):
+        label = f"runtime lock files[{index}]"
+        if not isinstance(entry, dict):
+            messages.append(f"{label} must be an object")
+            continue
+        missing = sorted(required - set(entry))
+        if missing:
+            messages.append(f"{label} missing fields: {', '.join(missing)}")
+            continue
+        file_path = entry["file"]
+        if not isinstance(file_path, str) or not _MANIFEST_DLL_RE.match(file_path):
+            messages.append(f"{label} has invalid file path: {file_path!r}")
+            continue
+        key = file_path.casefold()
+        if key in entries:
+            messages.append(f"duplicate runtime lock file: {file_path}")
+            continue
+        entries[key] = entry
+        for field in ("package", "version", "package_path", "license"):
+            if not isinstance(entry[field], str) or not entry[field].strip():
+                messages.append(f"{file_path} {field} must be a non-empty string")
+        nupkg_hash = entry["nupkg_sha256"]
+        if not isinstance(nupkg_hash, str) or not _SHA256_RE.match(nupkg_hash):
+            messages.append(f"{file_path} has invalid nupkg_sha256")
+        package_key = (str(entry["package"]).casefold(), str(entry["version"]).casefold())
+        previous_hash = packages.setdefault(package_key, nupkg_hash)
+        if previous_hash != nupkg_hash:
+            messages.append(
+                f"package {entry['package']} {entry['version']} has conflicting hashes"
+            )
+
+    if messages:
+        raise SetupError("invalid runtime lock: " + "; ".join(messages))
+    return runtime_lock, entries
+
+
+def _runtime_package_url(package, version):
+    package_lower = package.casefold()
+    version_lower = version.casefold()
+    return (
+        "https://api.nuget.org/v3-flatcontainer/"
+        f"{package_lower}/{version_lower}/{package_lower}.{version_lower}.nupkg"
+    )
+
+
+def _validate_runtime_lock_against_manifest(
+    lock_entries,
+    manifest_path=MANIFEST_PATH,
+    runtime_lock_filename=os.path.basename(RUNTIME_LOCK_PATH),
+):
+    manifest = load_lib_manifest(manifest_path)
+    manifest_entries, messages = _manifest_entries_by_file(manifest)
+    if messages:
+        raise SetupError("invalid DLL manifest: " + "; ".join(messages))
+    if set(lock_entries) != set(manifest_entries):
+        missing = sorted(set(manifest_entries) - set(lock_entries))
+        extra = sorted(set(lock_entries) - set(manifest_entries))
+        raise SetupError(
+            f"runtime lock/manifest file set mismatch (missing={missing}, extra={extra})"
+        )
+    for key, locked in lock_entries.items():
+        source = manifest_entries[key]["source"]
+        expected = {
+            "type": "runtime-lock",
+            "lock_file": runtime_lock_filename,
+            "package": locked["package"],
+            "version": locked["version"],
+            "package_path": locked["package_path"],
+        }
+        if source != expected:
+            raise SetupError(
+                f"runtime lock metadata does not match manifest for {locked['file']}"
+            )
+    return manifest_entries
+
+
+def _download_runtime_package(package, version, expected_hash, urlopen):
+    url = _runtime_package_url(package, version)
+    request = urllib.request.Request(url, headers={"User-Agent": "HeatMap setup"})
+    try:
+        with urlopen(request, timeout=60, context=ssl.create_default_context()) as response:
+            data = response.read()
+    except Exception as e:
+        raise SetupError(f"error downloading {package} {version}: {e}") from e
+    actual_hash = hashlib.sha256(data).hexdigest()
+    if actual_hash != expected_hash:
+        raise SetupError(
+            f"NuGet hash mismatch for {package} {version}: "
+            f"expected {expected_hash}, got {actual_hash}"
+        )
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        raise SetupError(f"downloaded package for {package} {version} is not a valid zip") from None
+    return archive
+
+
+def _remove_restore_tree(path, parent):
+    if not path or not os.path.lexists(path):
+        return
+    resolved_parent = os.path.realpath(parent)
+    resolved_path = os.path.realpath(path)
+    if resolved_path == resolved_parent or os.path.commonpath([resolved_parent, resolved_path]) != resolved_parent:
+        raise SetupError(f"refusing to remove restore path outside {resolved_parent}: {resolved_path}")
+    shutil.rmtree(path)
+
+
+def _write_restore_journal(path, phase):
+    staging = f"{path}.tmp"
+    try:
+        with open(staging, "w", encoding="utf-8") as f:
+            json.dump({"schema_version": 1, "phase": phase}, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(staging, path)
+    except OSError as e:
+        raise SetupError(f"could not write runtime restore journal: {e}") from e
+
+
+def _runtime_is_valid(path, manifest_path):
+    if not os.path.isdir(path):
+        return False
+    ok, _messages = verify_lib_manifest(
+        lib_dir=path,
+        manifest_path=manifest_path,
+        allow_extra_dlls=False,
+    )
+    return ok
+
+
+def _recover_runtime_transaction(lib_dir=LIB_DIR, manifest_path=MANIFEST_PATH):
+    parent = os.path.dirname(os.path.abspath(lib_dir))
+    backup_dir = f"{lib_dir}.runtime-backup"
+    journal_path = f"{lib_dir}.runtime-restore.json"
+    if not os.path.lexists(backup_dir) and not os.path.exists(journal_path):
+        return
+
+    journal = None
+    if os.path.exists(journal_path):
         try:
-            req = urllib.request.Request(info["url"], headers={"User-Agent": "Mozilla/5.0"})
-            ssl_ctx = ssl.create_default_context()
-            with urllib.request.urlopen(req, timeout=60, context=ssl_ctx) as resp:
-                data = resp.read()
+            with open(journal_path, "r", encoding="utf-8") as f:
+                journal = json.load(f)
         except Exception as e:
-            raise SetupError(f"error downloading {name}: {e}") from e
+            raise SetupError(f"could not read runtime restore journal: {e}") from e
+        if (
+            not isinstance(journal, dict)
+            or journal.get("schema_version") != 1
+            or journal.get("phase") not in ("prepared", "backup-created", "published")
+        ):
+            raise SetupError(f"invalid runtime restore journal: {journal_path}")
 
-        print(f"  Extracting DLLs...")
+    lib_valid = _runtime_is_valid(lib_dir, manifest_path)
+    backup_valid = _runtime_is_valid(backup_dir, manifest_path)
+    if lib_valid:
+        if os.path.lexists(backup_dir):
+            _remove_restore_tree(backup_dir, parent)
         try:
-            zf = zipfile.ZipFile(io.BytesIO(data))
-        except zipfile.BadZipFile:
-            raise SetupError(f"downloaded package for {name} is not a valid zip file") from None
-        with zf:
-            all_files = zf.namelist()
-            for dll_path in info["dlls"]:
-                if dll_path not in all_files:
-                    candidates = _dll_candidates(all_files, dll_path)
-                    raise SetupError(
-                        f"could not find exact DLL path for {name}: {dll_path}. "
-                        f"Available matching DLLs: {candidates}"
-                    )
+            if os.path.exists(journal_path):
+                os.remove(journal_path)
+        except OSError as e:
+            raise SetupError(f"could not clear stale runtime journal: {e}") from e
+        return
+    if not os.path.lexists(backup_dir) and journal and journal["phase"] == "prepared":
+        try:
+            os.remove(journal_path)
+        except OSError as e:
+            raise SetupError(f"could not clear pre-swap runtime journal: {e}") from e
+        return
+    if not os.path.lexists(lib_dir) and not os.path.lexists(backup_dir):
+        try:
+            if os.path.exists(journal_path):
+                os.remove(journal_path)
+        except OSError as e:
+            raise SetupError(f"could not clear interrupted fresh-install journal: {e}") from e
+        return
+    if backup_valid:
+        if os.path.lexists(lib_dir):
+            _remove_restore_tree(lib_dir, parent)
+        try:
+            os.replace(backup_dir, lib_dir)
+            if os.path.exists(journal_path):
+                os.remove(journal_path)
+        except OSError as e:
+            raise SetupError(f"could not recover previous runtime from {backup_dir}: {e}") from e
+        return
+    raise SetupError(
+        "incomplete runtime transaction could not be recovered: "
+        f"current={lib_dir}, backup={backup_dir}, journal={journal_path}"
+    )
 
-                dll_data = zf.read(dll_path)
-                out_name = os.path.basename(dll_path)
-                if not _verify_hash(dll_data, out_name, info.get("sha256", {})):
-                    raise SetupError(f"hash verification failed for {out_name}")
-                out_path = os.path.join(LIB_DIR, out_name)
-                try:
-                    with open(out_path, "wb") as f:
-                        f.write(dll_data)
-                except OSError as e:
-                    raise SetupError(f"error writing {out_name}: {e}") from e
-                print(f"  Extracted: {out_name}")
+
+@contextmanager
+def _runtime_restore_lock(app_dir=APP_DIR):
+    lock_id = hashlib.sha256(os.path.abspath(app_dir).encode("utf-8")).hexdigest()[:16]
+    lock_path = os.path.join(tempfile.gettempdir(), f"HeatMap-runtime-{lock_id}.lock")
+    lock_file = open(lock_path, "a+b")
+    try:
+        if os.path.getsize(lock_path) == 0:
+            lock_file.write(b"\0")
+            lock_file.flush()
+        lock_file.seek(0)
+        try:
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as e:
+            raise SetupError("another HeatMap runtime restore is already running") from e
+        try:
+            yield
+        finally:
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+    finally:
+        lock_file.close()
+
+
+def _publish_runtime(staging_dir, lib_dir=LIB_DIR, manifest_path=MANIFEST_PATH):
+    parent = os.path.dirname(os.path.abspath(lib_dir))
+    backup_dir = f"{lib_dir}.runtime-backup"
+    journal_path = f"{lib_dir}.runtime-restore.json"
+    if os.path.lexists(backup_dir) or os.path.exists(journal_path):
+        raise SetupError("runtime transaction state was not recovered before publish")
+    _write_restore_journal(journal_path, "prepared")
+    if os.path.lexists(lib_dir):
+        try:
+            os.replace(lib_dir, backup_dir)
+        except OSError as e:
+            try:
+                if os.path.exists(journal_path):
+                    os.remove(journal_path)
+            except OSError:
+                pass
+            raise SetupError(
+                f"could not move the current runtime; close HeatMap and retry: {e}"
+            ) from e
+        try:
+            _write_restore_journal(journal_path, "backup-created")
+        except SetupError:
+            os.replace(backup_dir, lib_dir)
+            try:
+                if os.path.exists(journal_path):
+                    os.remove(journal_path)
+            except OSError:
+                pass
+            raise
+    try:
+        os.replace(staging_dir, lib_dir)
+    except Exception as publish_error:
+        if os.path.lexists(backup_dir) and not os.path.lexists(lib_dir):
+            try:
+                os.replace(backup_dir, lib_dir)
+                if os.path.exists(journal_path):
+                    os.remove(journal_path)
+            except Exception as rollback_error:
+                raise SetupError(
+                    f"runtime publish failed ({publish_error}); rollback failed ({rollback_error}); "
+                    f"backup preserved at {backup_dir}"
+                ) from publish_error
+            raise SetupError(
+                f"runtime publish failed; previous runtime restored: {publish_error}"
+            ) from publish_error
+        backup_note = f"; backup preserved at {backup_dir}" if os.path.lexists(backup_dir) else ""
+        raise SetupError(f"runtime publish failed: {publish_error}{backup_note}") from publish_error
+    if os.path.lexists(backup_dir):
+        try:
+            _remove_restore_tree(backup_dir, parent)
+        except OSError as e:
+            print(f"  WARNING: restored runtime is active, but old backup cleanup failed: {e}")
+    try:
+        if os.path.exists(journal_path):
+            os.remove(journal_path)
+    except OSError as e:
+        print(f"  WARNING: restored runtime is active, but journal cleanup failed: {e}")
+
+
+def restore_runtime(
+    runtime_lock_path=RUNTIME_LOCK_PATH,
+    manifest_path=MANIFEST_PATH,
+    lib_dir=LIB_DIR,
+    urlopen=urllib.request.urlopen,
+    bridge_checker=None,
+):
+    bridge_checker = _check_staged_lhm_bridge if bridge_checker is None else bridge_checker
+    with _runtime_restore_lock(os.path.dirname(os.path.abspath(lib_dir))):
+        if (
+            os.path.normcase(os.path.abspath(lib_dir)) == os.path.normcase(os.path.abspath(LIB_DIR))
+            and _is_overlay_running()
+        ):
+            raise SetupError(
+                "HeatMap is running and has CLR DLLs loaded; close the overlay before restoring runtime"
+            )
+        _recover_runtime_transaction(lib_dir=lib_dir, manifest_path=manifest_path)
+        _runtime_lock, lock_entries = load_runtime_lock(runtime_lock_path)
+        manifest_entries = _validate_runtime_lock_against_manifest(
+            lock_entries,
+            manifest_path,
+            runtime_lock_filename=os.path.basename(runtime_lock_path),
+        )
+        parent = os.path.dirname(os.path.abspath(lib_dir))
+        os.makedirs(parent, exist_ok=True)
+        staging_dir = tempfile.mkdtemp(prefix=".lib-restore-", dir=parent)
+        packages = {}
+        try:
+            for locked in lock_entries.values():
+                package_key = (locked["package"].casefold(), locked["version"].casefold())
+                packages.setdefault(package_key, []).append(locked)
+
+            for package_entries in packages.values():
+                first = package_entries[0]
+                print(f"Downloading {first['package']} {first['version']}...")
+                archive = _download_runtime_package(
+                    first["package"], first["version"], first["nupkg_sha256"], urlopen
+                )
+                with archive:
+                    all_files = archive.namelist()
+                    for locked in package_entries:
+                        package_path = locked["package_path"]
+                        if package_path not in all_files:
+                            candidates = _dll_candidates(all_files, package_path)
+                            raise SetupError(
+                                f"could not find exact DLL path for {locked['package']}: "
+                                f"{package_path}. Available matching DLLs: {candidates}"
+                            )
+                        dll_data = archive.read(package_path)
+                        manifest_entry = manifest_entries[locked["file"].casefold()]
+                        actual_hash = hashlib.sha256(dll_data).hexdigest()
+                        if len(dll_data) != manifest_entry["size"] or actual_hash != manifest_entry["sha256"]:
+                            raise SetupError(
+                                f"extracted DLL does not match manifest: {locked['file']}"
+                            )
+                        output_path = os.path.join(staging_dir, os.path.basename(locked["file"]))
+                        with open(output_path, "wb") as f:
+                            f.write(dll_data)
+                            f.flush()
+                            os.fsync(f.fileno())
+
+            ok, messages = verify_lib_manifest(
+                lib_dir=staging_dir,
+                manifest_path=manifest_path,
+                allow_extra_dlls=False,
+            )
+            if not ok:
+                raise SetupError("staged runtime verification failed: " + "; ".join(messages))
+            bridge_messages = bridge_checker(staging_dir)
+            if bridge_messages:
+                raise SetupError("; ".join(bridge_messages))
+            _publish_runtime(staging_dir, lib_dir=lib_dir, manifest_path=manifest_path)
+            staging_dir = None
+        finally:
+            if staging_dir and os.path.lexists(staging_dir):
+                _remove_restore_tree(staging_dir, parent)
 
 
 def main(argv=None):
@@ -398,6 +1054,21 @@ def main(argv=None):
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--verify", action="store_true", help="Only verify lib_manifest.json against lib/*.dll.")
     group.add_argument("--preflight", action="store_true", help="Check runtime, Python deps, and DLLs without downloading.")
+    group.add_argument(
+        "--download-pawnio",
+        action="store_true",
+        help="Download and verify the LHM-compatible PawnIO installer without running it.",
+    )
+    group.add_argument(
+        "--restore-runtime",
+        action="store_true",
+        help="Restore the complete DLL runtime from runtime-lock.json.",
+    )
+    group.add_argument(
+        "--hardware-smoke",
+        action="store_true",
+        help="Open LHM on this elevated machine and require a real CPU temperature reading.",
+    )
     args = parser.parse_args(argv)
 
     if args.verify:
@@ -412,25 +1083,41 @@ def main(argv=None):
             _print_pawnio_warnings(_check_pawnio_driver())
         return 0 if ok else 1
 
+    if args.download_pawnio:
+        try:
+            path = download_pawnio()
+        except (SetupError, OSError) as e:
+            print(f"PawnIO download failed: {e}")
+            return 1
+        print("PawnIO installer verified (hash and Authenticode).")
+        print(f"Run this file as administrator, then restart Windows:\n  {path}")
+        return 0
+
+    if args.hardware_smoke:
+        preflight_ok, preflight_messages = run_preflight()
+        if not preflight_ok:
+            _print_preflight_result(preflight_ok, preflight_messages)
+            return 1
+        ok, messages = run_hardware_smoke()
+        if not ok:
+            print("Hardware smoke failed:")
+            for message in messages:
+                print(f"  ERROR: {message}")
+        return 0 if ok else 1
+
     unsupported = _unsupported_runtime_message()
     if unsupported:
         print(f"Setup failed: {unsupported}")
         return 1
 
     try:
-        download_and_extract()
-    except SetupError as e:
+        restore_runtime()
+    except (SetupError, OSError) as e:
         print(f"Setup failed: {e}")
         return 1
     ok, messages = verify_lib_manifest()
     _print_manifest_result(ok, messages)
     if not ok:
-        print(
-            "\nDirect DLLs were restored, but the full bundled runtime does not match lib_manifest.json."
-        )
-        print(
-            "Restore the tracked lib/ directory from git or reclone the repository until full runtime restore is implemented."
-        )
         return 1
     print("\nSetup complete! DLLs are in the 'lib' directory.")
     _print_pawnio_warnings(_check_pawnio_driver())

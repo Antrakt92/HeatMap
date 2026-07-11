@@ -7,9 +7,13 @@
       "size": 32768,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "BlackSharp.Core",
+        "version": "1.0.7",
+        "package_path": "lib/net472/BlackSharp.Core.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MPL-2.0 license metadata."
     },
     {
       "file": "lib/DiskInfoToolkit.dll",
@@ -17,9 +21,13 @@
       "size": 903168,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "DiskInfoToolkit",
+        "version": "1.1.1",
+        "package_path": "lib/net472/DiskInfoToolkit.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MPL-2.0 license metadata."
     },
     {
       "file": "lib/HidSharp.dll",
@@ -27,13 +35,13 @@
       "size": 262792,
       "required": true,
       "source": {
-        "type": "nuget",
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
         "package": "HidSharp",
         "version": "2.6.4",
-        "url": "https://www.nuget.org/api/v2/package/HidSharp/2.6.4",
         "package_path": "lib/net35/HidSharp.dll"
       },
-      "notes": "Direct setup.py dependency with pinned SHA256."
+      "notes": "Exact NuGet asset locked with package hash and Apache-2.0 license metadata."
     },
     {
       "file": "lib/LibreHardwareMonitorLib.dll",
@@ -41,13 +49,13 @@
       "size": 1138688,
       "required": true,
       "source": {
-        "type": "nuget",
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
         "package": "LibreHardwareMonitorLib",
         "version": "0.9.5",
-        "url": "https://www.nuget.org/api/v2/package/LibreHardwareMonitorLib/0.9.5",
         "package_path": "runtimes/win-x64/lib/net472/LibreHardwareMonitorLib.dll"
       },
-      "notes": "Direct setup.py dependency with pinned SHA256."
+      "notes": "Exact NuGet asset locked with package hash and MPL-2.0 license metadata."
     },
     {
       "file": "lib/Microsoft.Bcl.AsyncInterfaces.dll",
@@ -55,9 +63,13 @@
       "size": 28432,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "Microsoft.Bcl.AsyncInterfaces",
+        "version": "10.0.1",
+        "package_path": "lib/net462/Microsoft.Bcl.AsyncInterfaces.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MIT license metadata."
     },
     {
       "file": "lib/Microsoft.Bcl.HashCode.dll",
@@ -65,9 +77,13 @@
       "size": 26920,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "Microsoft.Bcl.HashCode",
+        "version": "6.0.0",
+        "package_path": "lib/net462/Microsoft.Bcl.HashCode.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MIT license metadata."
     },
     {
       "file": "lib/RAMSPDToolkit-NDD.dll",
@@ -75,9 +91,13 @@
       "size": 233472,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "RAMSPDToolkit-NDD",
+        "version": "1.4.2",
+        "package_path": "lib/net472/RAMSPDToolkit-NDD.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MPL-2.0 license metadata."
     },
     {
       "file": "lib/System.Buffers.dll",
@@ -85,9 +105,13 @@
       "size": 23816,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "System.Buffers",
+        "version": "4.6.1",
+        "package_path": "lib/net462/System.Buffers.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MIT license metadata."
     },
     {
       "file": "lib/System.CodeDom.dll",
@@ -95,9 +119,13 @@
       "size": 34056,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "System.CodeDom",
+        "version": "10.0.1",
+        "package_path": "lib/net462/System.CodeDom.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MIT license metadata."
     },
     {
       "file": "lib/System.Collections.Immutable.dll",
@@ -105,9 +133,13 @@
       "size": 253192,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "System.Collections.Immutable",
+        "version": "10.0.1",
+        "package_path": "lib/net462/System.Collections.Immutable.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MIT license metadata."
     },
     {
       "file": "lib/System.Formats.Nrbf.dll",
@@ -115,9 +147,13 @@
       "size": 71480,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "System.Formats.Nrbf",
+        "version": "10.0.1",
+        "package_path": "lib/net462/System.Formats.Nrbf.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MIT license metadata."
     },
     {
       "file": "lib/System.IO.Pipelines.dll",
@@ -125,9 +161,13 @@
       "size": 85816,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "System.IO.Pipelines",
+        "version": "10.0.1",
+        "package_path": "lib/net462/System.IO.Pipelines.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MIT license metadata."
     },
     {
       "file": "lib/System.Memory.dll",
@@ -135,9 +175,13 @@
       "size": 145200,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "System.Memory",
+        "version": "4.6.3",
+        "package_path": "lib/net462/System.Memory.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MIT license metadata."
     },
     {
       "file": "lib/System.Numerics.Vectors.dll",
@@ -145,9 +189,13 @@
       "size": 110344,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "System.Numerics.Vectors",
+        "version": "4.6.1",
+        "package_path": "lib/net462/System.Numerics.Vectors.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MIT license metadata."
     },
     {
       "file": "lib/System.Reflection.Metadata.dll",
@@ -155,9 +203,13 @@
       "size": 515336,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "System.Reflection.Metadata",
+        "version": "10.0.1",
+        "package_path": "lib/net462/System.Reflection.Metadata.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MIT license metadata."
     },
     {
       "file": "lib/System.Resources.Extensions.dll",
@@ -165,9 +217,13 @@
       "size": 116016,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "System.Resources.Extensions",
+        "version": "10.0.1",
+        "package_path": "lib/net462/System.Resources.Extensions.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MIT license metadata."
     },
     {
       "file": "lib/System.Runtime.CompilerServices.Unsafe.dll",
@@ -175,9 +231,13 @@
       "size": 19256,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "System.Runtime.CompilerServices.Unsafe",
+        "version": "6.1.2",
+        "package_path": "lib/net462/System.Runtime.CompilerServices.Unsafe.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MIT license metadata."
     },
     {
       "file": "lib/System.Security.AccessControl.dll",
@@ -185,9 +245,13 @@
       "size": 35952,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "System.Security.AccessControl",
+        "version": "6.0.0",
+        "package_path": "lib/net461/System.Security.AccessControl.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MIT license metadata."
     },
     {
       "file": "lib/System.Security.Principal.Windows.dll",
@@ -195,9 +259,13 @@
       "size": 18312,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "System.Security.Principal.Windows",
+        "version": "5.0.0",
+        "package_path": "lib/net461/System.Security.Principal.Windows.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MIT license metadata."
     },
     {
       "file": "lib/System.Text.Encodings.Web.dll",
@@ -205,9 +273,13 @@
       "size": 87816,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "System.Text.Encodings.Web",
+        "version": "10.0.1",
+        "package_path": "lib/net462/System.Text.Encodings.Web.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MIT license metadata."
     },
     {
       "file": "lib/System.Text.Json.dll",
@@ -215,9 +287,13 @@
       "size": 777480,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "System.Text.Json",
+        "version": "10.0.1",
+        "package_path": "lib/net462/System.Text.Json.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MIT license metadata."
     },
     {
       "file": "lib/System.Threading.AccessControl.dll",
@@ -225,9 +301,13 @@
       "size": 34576,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "System.Threading.AccessControl",
+        "version": "10.0.1",
+        "package_path": "lib/net462/System.Threading.AccessControl.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MIT license metadata."
     },
     {
       "file": "lib/System.Threading.Tasks.Extensions.dll",
@@ -235,9 +315,13 @@
       "size": 27960,
       "required": true,
       "source": {
-        "type": "bundled-unknown"
+        "type": "runtime-lock",
+        "lock_file": "runtime-lock.json",
+        "package": "System.Threading.Tasks.Extensions",
+        "version": "4.6.3",
+        "package_path": "lib/net462/System.Threading.Tasks.Extensions.dll"
       },
-      "notes": "Bundled runtime file; source package and restore path are not yet proven."
+      "notes": "Exact NuGet asset locked with package hash and MIT license metadata."
     }
   ]
 }

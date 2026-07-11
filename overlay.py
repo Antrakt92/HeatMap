@@ -4,15 +4,19 @@ Desktop widget showing hardware temperatures and usage.
 Sits on the desktop layer — above wallpaper, below all app windows.
 Requires admin privileges to read hardware sensors.
 """
+import base64
 import ctypes
+import csv
 import math
 import re
 import ctypes.wintypes
+from dataclasses import dataclass
 import json
 import locale
 import logging
 import logging.handlers
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -30,9 +34,8 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LIB_DIR = os.path.join(APP_DIR, "lib")
 LIB_MANIFEST_PATH = os.path.join(APP_DIR, "lib_manifest.json")
 CONFIG_PATH = os.path.join(APP_DIR, "overlay_config.json")
-SCRIPT_PATH = os.path.join(APP_DIR, "overlay.py")
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
-_LOG_DATEFMT = "%H:%M:%S"
+_LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
 
 def _get_log_path(env=None, app_dir=APP_DIR):
@@ -70,7 +73,7 @@ def _configure_logging():
     return log_path
 
 
-LOG_PATH = _configure_logging()
+LOG_PATH = _get_log_path()
 
 SENSOR_STATUS_KEY = "_sensor_status"
 SENSOR_REINIT_KEY = "_sensor_reinit"
@@ -78,7 +81,9 @@ SENSOR_STATUS_PSUTIL_FALLBACK = "psutil_fallback"
 SENSOR_STATUS_PARTIAL = "partial"
 SENSOR_STATUS_WARMING_UP = "warming_up"
 SENSOR_STATUS_DRIVER_MISSING = "driver_missing"
+SENSOR_STATUS_CPU_UNAVAILABLE = "cpu_unavailable"
 SENSOR_WARMUP_SECONDS = 60
+SENSOR_INIT_RETRY_SECONDS = 30
 STATUS_CONFIG_SAVE_ERROR = "config_save_error"
 STATUS_CONFIG_ADJUSTED = "config_adjusted"
 CONFIG_STATUSES = (STATUS_CONFIG_SAVE_ERROR, STATUS_CONFIG_ADJUSTED)
@@ -89,6 +94,7 @@ STATUS_TEXT = {
     SENSOR_STATUS_PARTIAL: "Sensors: partial data",
     SENSOR_STATUS_WARMING_UP: "Sensors: warming up",
     SENSOR_STATUS_DRIVER_MISSING: "Driver: install PawnIO",
+    SENSOR_STATUS_CPU_UNAVAILABLE: "CPU sensor unavailable",
 }
 STATUS_COLOR = {
     STATUS_CONFIG_SAVE_ERROR: "#f87171",
@@ -97,15 +103,21 @@ STATUS_COLOR = {
     SENSOR_STATUS_PARTIAL: "#facc15",
     SENSOR_STATUS_WARMING_UP: "#facc15",
     SENSOR_STATUS_DRIVER_MISSING: "#f87171",
+    SENSOR_STATUS_CPU_UNAVAILABLE: "#f87171",
 }
 
 # --- Windows API constants ---
+GWL_STYLE = -16
 GWL_EXSTYLE = -20
+WS_CHILD = 0x40000000
+WS_POPUP = 0x80000000
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_NOACTIVATE = 0x08000000
 SWP_NOMOVE = 0x0002
 SWP_NOSIZE = 0x0001
+SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020
 HWND_BOTTOM = 1
 user32 = ctypes.windll.user32
 user32.SetWindowLongW.argtypes = [ctypes.wintypes.HWND, ctypes.c_int, ctypes.c_long]
@@ -130,9 +142,22 @@ user32.FindWindowExW.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.HWND, cty
 user32.FindWindowExW.restype = ctypes.wintypes.HWND
 user32.SetParent.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.HWND]
 user32.SetParent.restype = ctypes.wintypes.HWND
+user32.GetParent.argtypes = [ctypes.wintypes.HWND]
+user32.GetParent.restype = ctypes.wintypes.HWND
+user32.IsWindow.argtypes = [ctypes.wintypes.HWND]
+user32.IsWindow.restype = ctypes.c_bool
 
 class POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.wintypes.DWORD),
+        ("rcMonitor", ctypes.wintypes.RECT),
+        ("rcWork", ctypes.wintypes.RECT),
+        ("dwFlags", ctypes.wintypes.DWORD),
+    ]
 
 user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
 user32.GetCursorPos.restype = ctypes.c_bool
@@ -146,6 +171,22 @@ user32.GetClassName.restype = ctypes.c_int
 GA_PARENT = 1
 user32.GetWindowThreadProcessId.argtypes = [ctypes.wintypes.HWND, ctypes.POINTER(ctypes.wintypes.DWORD)]
 user32.GetWindowThreadProcessId.restype = ctypes.wintypes.DWORD
+_MONITOR_ENUM_PROC = ctypes.WINFUNCTYPE(
+    ctypes.c_bool,
+    ctypes.wintypes.HMONITOR,
+    ctypes.wintypes.HDC,
+    ctypes.POINTER(ctypes.wintypes.RECT),
+    ctypes.wintypes.LPARAM,
+)
+user32.EnumDisplayMonitors.argtypes = [
+    ctypes.wintypes.HDC,
+    ctypes.POINTER(ctypes.wintypes.RECT),
+    _MONITOR_ENUM_PROC,
+    ctypes.wintypes.LPARAM,
+]
+user32.EnumDisplayMonitors.restype = ctypes.c_bool
+user32.GetMonitorInfoW.argtypes = [ctypes.wintypes.HMONITOR, ctypes.POINTER(MONITORINFO)]
+user32.GetMonitorInfoW.restype = ctypes.c_bool
 _MY_PID = os.getpid()
 
 # Virtual screen metrics (all monitors combined)
@@ -155,10 +196,161 @@ SM_CXVIRTUALSCREEN = 78
 SM_CYVIRTUALSCREEN = 79
 user32.GetSystemMetrics.argtypes = [ctypes.c_int]
 user32.GetSystemMetrics.restype = ctypes.c_int
+kernel32 = ctypes.windll.kernel32
+kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+kernel32.CreateMutexW.restype = ctypes.wintypes.HANDLE
+kernel32.ReleaseMutex.argtypes = [ctypes.wintypes.HANDLE]
+kernel32.ReleaseMutex.restype = ctypes.c_bool
+kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+kernel32.CloseHandle.restype = ctypes.c_bool
+kernel32.GetLastError.restype = ctypes.wintypes.DWORD
+kernel32.GetWindowsDirectoryW.argtypes = [ctypes.c_wchar_p, ctypes.wintypes.UINT]
+kernel32.GetWindowsDirectoryW.restype = ctypes.wintypes.UINT
+kernel32.ProcessIdToSessionId.argtypes = [ctypes.wintypes.DWORD, ctypes.POINTER(ctypes.wintypes.DWORD)]
+kernel32.ProcessIdToSessionId.restype = ctypes.c_bool
+wtsapi32 = ctypes.windll.wtsapi32
+wtsapi32.WTSQuerySessionInformationW.argtypes = [
+    ctypes.wintypes.HANDLE,
+    ctypes.wintypes.DWORD,
+    ctypes.c_int,
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(ctypes.wintypes.DWORD),
+]
+wtsapi32.WTSQuerySessionInformationW.restype = ctypes.c_bool
+wtsapi32.WTSFreeMemory.argtypes = [ctypes.c_void_p]
+wtsapi32.WTSFreeMemory.restype = None
+_INSTANCE_MUTEX_NAME = r"Local\HeatMapOverlay"
+_ERROR_ALREADY_EXISTS = 183
+_instance_mutex_handle = None
+
+
+def _rect_tuple(rect):
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
+def _get_monitor_areas():
+    areas = []
+
+    @_MONITOR_ENUM_PROC
+    def callback(monitor, _hdc, _rect, _lparam):
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        if user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            areas.append((_rect_tuple(info.rcMonitor), _rect_tuple(info.rcWork)))
+        return True
+
+    if user32.EnumDisplayMonitors(0, None, callback, 0) and areas:
+        return tuple(areas)
+    left = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+    top = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+    rect = (
+        left,
+        top,
+        left + user32.GetSystemMetrics(SM_CXVIRTUALSCREEN),
+        top + user32.GetSystemMetrics(SM_CYVIRTUALSCREEN),
+    )
+    return ((rect, rect),)
+
+
+def _rect_contains_point(rect, x, y):
+    left, top, right, bottom = rect
+    return left <= x < right and top <= y < bottom
+
+
+def _rect_intersection_area(first, second):
+    left = max(first[0], second[0])
+    top = max(first[1], second[1])
+    right = min(first[2], second[2])
+    bottom = min(first[3], second[3])
+    return max(0, right - left) * max(0, bottom - top)
+
+
+def _distance_to_rect_squared(rect, x, y):
+    dx = max(rect[0] - x, 0, x - rect[2])
+    dy = max(rect[1] - y, 0, y - rect[3])
+    return dx * dx + dy * dy
+
+
+def _select_monitor_for_window(x, y, width, height, monitor_areas):
+    if not monitor_areas:
+        return None
+    window_rect = (x, y, x + max(1, width), y + max(1, height))
+    ranked = [
+        (_rect_intersection_area(window_rect, work), monitor, work)
+        for monitor, work in monitor_areas
+    ]
+    best = max(ranked, key=lambda item: item[0])
+    if best[0] > 0:
+        return best[1], best[2]
+    center_x = x + max(1, width) // 2
+    center_y = y + max(1, height) // 2
+    return min(
+        monitor_areas,
+        key=lambda area: _distance_to_rect_squared(area[1], center_x, center_y),
+    )
+
+
+def _clamp_overlay_to_monitor_areas(x, y, width, height, monitor_areas):
+    selected = _select_monitor_for_window(x, y, width, height, monitor_areas)
+    if selected is None:
+        return int(x), int(y)
+    _monitor, work = selected
+    return _clamp_overlay_position(
+        x,
+        y,
+        width,
+        height,
+        work[0],
+        work[1],
+        work[2] - work[0],
+        work[3] - work[1],
+    )
+
+
+def _exposed_right_edge_monitor(x, y, monitor_areas, width=6):
+    for area in monitor_areas:
+        monitor, _work = area
+        if not _rect_contains_point(monitor, x, y) or x < monitor[2] - width:
+            continue
+        if any(
+            other is not area
+            and other[0][0] <= monitor[2]
+            and other[0][2] > monitor[2]
+            and other[0][1] <= y < other[0][3]
+            for other in monitor_areas
+        ):
+            continue
+        return area
+    return None
+
+
+def acquire_single_instance():
+    global _instance_mutex_handle
+    if _instance_mutex_handle:
+        return True
+    handle = kernel32.CreateMutexW(None, True, _INSTANCE_MUTEX_NAME)
+    if not handle:
+        log.warning("Could not create single-instance mutex")
+        return False
+    if kernel32.GetLastError() == _ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle(handle)
+        return False
+    _instance_mutex_handle = handle
+    return True
+
+
+def release_single_instance():
+    global _instance_mutex_handle
+    handle = _instance_mutex_handle
+    _instance_mutex_handle = None
+    if not handle:
+        return
+    kernel32.ReleaseMutex(handle)
+    kernel32.CloseHandle(handle)
 
 # --- Desktop widget: embed window into the desktop layer ---
 def find_desktop_worker_w():
-    """Find the WorkerW window behind desktop icons for widget embedding."""
+    """Find a dedicated WorkerW wallpaper host behind desktop icons."""
     progman = user32.FindWindowW("Progman", None)
     if not progman:
         return None
@@ -174,8 +366,16 @@ def find_desktop_worker_w():
         nonlocal worker_w
         shell_view = user32.FindWindowExW(hwnd, 0, "SHELLDLL_DefView", None)
         if shell_view:
-            # The WorkerW we want is the NEXT one after the one containing SHELLDLL_DefView
+            if hwnd == progman:
+                # Parenting an external Tk window directly to Progman makes
+                # Explorer destroy it during shell restart. Keep searching and
+                # let the caller use its independent HWND_BOTTOM fallback.
+                return True
+            # Older Explorer layouts place the icon view under a WorkerW; the
+            # following WorkerW is the dedicated wallpaper host behind it.
             worker_w = user32.FindWindowExW(0, hwnd, "WorkerW", None)
+            if worker_w:
+                return False
         return True
 
     user32.EnumWindows(enum_callback, 0)
@@ -185,10 +385,60 @@ def find_desktop_worker_w():
 def embed_in_desktop(hwnd):
     """Make the tkinter window a child of the desktop WorkerW layer."""
     worker_w = find_desktop_worker_w()
-    if worker_w:
-        user32.SetParent(hwnd, worker_w)
-        return True
-    return False
+    if not worker_w or not _set_parent_verified(hwnd, worker_w):
+        return False
+    # When Progman owns SHELLDLL_DefView, a newly parented child otherwise may
+    # sit above desktop icons. Keep the overlay at the bottom of the host's
+    # child z-order; a dedicated wallpaper WorkerW is safe with the same rule.
+    return bool(
+        user32.SetWindowPos(
+            hwnd,
+            HWND_BOTTOM,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+    )
+
+
+def _set_parent_verified(hwnd, expected_parent):
+    """Set a native parent and verify the postcondition; SetParent's NULL is ambiguous."""
+    if not hwnd or not user32.IsWindow(hwnd):
+        return False
+    if expected_parent and not user32.IsWindow(expected_parent):
+        return False
+    original_style = user32.GetWindowLongW(hwnd, GWL_STYLE) & 0xFFFFFFFF
+    if expected_parent:
+        child_style = (original_style | WS_CHILD) & ~WS_POPUP
+        user32.SetWindowLongW(hwnd, GWL_STYLE, ctypes.c_long(child_style).value)
+    user32.SetParent(hwnd, expected_parent)
+    actual_parent = int(user32.GetParent(hwnd) or 0)
+    expected_parent = int(expected_parent or 0)
+    if actual_parent != expected_parent:
+        if expected_parent:
+            user32.SetWindowLongW(hwnd, GWL_STYLE, ctypes.c_long(original_style).value)
+        log.warning(
+            "SetParent postcondition failed for hwnd=%s: expected=%s actual=%s",
+            hwnd,
+            expected_parent,
+            actual_parent,
+        )
+        return False
+    if not expected_parent:
+        popup_style = (original_style | WS_POPUP) & ~WS_CHILD
+        user32.SetWindowLongW(hwnd, GWL_STYLE, ctypes.c_long(popup_style).value)
+    user32.SetWindowPos(
+        hwnd,
+        0,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+    )
+    return True
 
 
 def set_tool_window(hwnd):
@@ -205,22 +455,66 @@ def _show_error_message(title, message):
         log.warning("Failed to show error message: %s - %s", title, message, exc_info=True)
 
 
-# --- Autostart management (Task Scheduler — no UAC prompt at login) ---
+def _show_info_message(title, message):
+    try:
+        ctypes.windll.user32.MessageBoxW(0, message, title, 0x40)
+    except Exception:
+        log.warning("Failed to show information message: %s - %s", title, message, exc_info=True)
+
+
+# --- Autostart management (least-privilege task; launcher requests UAC) ---
 _CREATE_NO_WINDOW = 0x08000000
 AUTOSTART_TASK = "HWMonitorOverlay"
-AUTOSTART_DELAY = "0000:30"  # Task Scheduler /DELAY format is mmmm:ss.
+AUTOSTART_SCHEMA_VERSION = "2"
+AUTOSTART_SOURCE = "HeatMap"
+AUTOSTART_DELAY = "PT30S"
+AUTOSTART_EXECUTION_TIME_LIMIT = "PT0S"
+RUN_AS_ADMIN_PATH = os.path.join(APP_DIR, "run_as_admin.bat")
 # Legacy registry key — cleaned up when switching to Task Scheduler
 _LEGACY_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _TASK_XML_DECL_RE = re.compile(r"^\s*<\?xml[^>]*\?>", re.IGNORECASE)
 
+AUTOSTART_ABSENT = "absent"
+AUTOSTART_SAFE_CURRENT = "safe_current"
+AUTOSTART_LEGACY_UNSAFE = "legacy_unsafe"
+AUTOSTART_STALE_HEATMAP = "stale_heatmap"
+AUTOSTART_COLLISION = "collision"
 
-def get_pythonw_path():
-    """Get path to pythonw.exe (no console window)."""
-    python_dir = os.path.dirname(sys.executable)
-    pythonw = os.path.join(python_dir, "pythonw.exe")
-    if os.path.exists(pythonw):
-        return pythonw
-    return sys.executable
+
+@dataclass(frozen=True)
+class AutostartTaskDefinition:
+    source: str = ""
+    version: str = ""
+    uri: str = ""
+    enabled: str = ""
+    principal_count: int = 0
+    principal_id: str = ""
+    principal_user_id: str = ""
+    logon_type: str = ""
+    run_level: str = ""
+    total_trigger_count: int = 0
+    logon_trigger_count: int = 0
+    trigger_user_id: str = ""
+    trigger_delay: str = ""
+    trigger_enabled: str = ""
+    multiple_instances_policy: str = ""
+    disallow_start_on_batteries: str = ""
+    stop_on_batteries: str = ""
+    start_when_available: str = ""
+    run_only_if_network_available: str = ""
+    allow_start_on_demand: str = ""
+    allow_hard_terminate: str = ""
+    hidden: str = ""
+    wake_to_run: str = ""
+    idle_stop_on_end: str = ""
+    idle_restart: str = ""
+    execution_time_limit: str = ""
+    total_action_count: int = 0
+    exec_action_count: int = 0
+    actions_context: str = ""
+    command: str = ""
+    arguments: str = ""
+    working_directory: str = ""
 
 
 def _strip_outer_quotes(value):
@@ -234,12 +528,68 @@ def _normalize_path_for_compare(path):
     return os.path.normcase(os.path.abspath(_strip_outer_quotes(path)))
 
 
-def _expected_autostart_action(pythonw_path=None, script_path=None):
-    return pythonw_path or get_pythonw_path(), script_path or SCRIPT_PATH
+def _expected_autostart_action(app_dir=None, system_root=None):
+    app_dir = os.path.abspath(app_dir or APP_DIR)
+    system_root = system_root or _windows_directory()
+    command = os.path.join(system_root, "System32", "cmd.exe")
+    launcher = os.path.join(app_dir, "run_as_admin.bat")
+    arguments = f'/d /s /c ""{launcher}""'
+    return command, arguments, app_dir
 
 
-def _format_autostart_task_run(command_path, script_path):
-    return f'"{command_path}" "{script_path}"'
+def _windows_directory():
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = kernel32.GetWindowsDirectoryW(buffer, len(buffer))
+    if not length or length >= len(buffer):
+        raise OSError("GetWindowsDirectoryW failed")
+    return buffer.value
+
+
+def _run_task_powershell(script, input_text=""):
+    try:
+        windows_dir = _windows_directory()
+        powershell_path = os.path.join(
+            windows_dir, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
+        )
+        module_dir = os.path.join(
+            windows_dir, "System32", "WindowsPowerShell", "v1.0", "Modules"
+        )
+        env = dict(os.environ)
+        env["SystemRoot"] = windows_dir
+        env["PSModulePath"] = module_dir
+        encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        return subprocess.run(
+            [powershell_path, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded_script],
+            input=input_text,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=20,
+            creationflags=_CREATE_NO_WINDOW,
+            env=env,
+        ), None
+    except Exception as e:
+        return None, str(e)
+
+
+_TASK_MODULE_IMPORT = (
+    "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; "
+    "$module=Join-Path $env:SystemRoot "
+    "'System32\\WindowsPowerShell\\v1.0\\Modules\\ScheduledTasks\\ScheduledTasks.psd1'; "
+    "Import-Module -Name $module -Force; "
+)
+
+
+def _task_query_script():
+    return (
+        _TASK_MODULE_IMPORT
+        + "$tasks=@(Get-ScheduledTask -ErrorAction Stop | Where-Object { "
+        + f"$_.TaskName -eq '{AUTOSTART_TASK}' -and $_.TaskPath -eq '\\'"
+        + " }); if($tasks.Count -eq 0){exit 3}; "
+        + "if($tasks.Count -ne 1){throw 'duplicate root task definitions'}; "
+        + "$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); "
+        + f"Export-ScheduledTask -TaskName '{AUTOSTART_TASK}' -TaskPath '\\' -ErrorAction Stop"
+    )
 
 
 def _decode_output(data):
@@ -260,16 +610,6 @@ def _completed_process_message(result):
     stderr = _decode_output(getattr(result, "stderr", b"")).strip()
     detail = stderr or stdout or "no output"
     return f"exit code {result.returncode}: {detail}"
-
-
-def _run_schtasks(args):
-    try:
-        return subprocess.run(
-            ["schtasks", *args],
-            capture_output=True, timeout=10, creationflags=_CREATE_NO_WINDOW,
-        ), None
-    except Exception as e:
-        return None, str(e)
 
 
 def _decode_task_xml(xml_data):
@@ -296,61 +636,330 @@ def _local_xml_name(tag):
     return tag.rsplit("}", 1)[-1]
 
 
+def _direct_child(parent, name):
+    if parent is None:
+        return None
+    for child in parent:
+        if _local_xml_name(child.tag) == name:
+            return child
+    return None
+
+
+def _first_element(root, name):
+    for element in root.iter():
+        if _local_xml_name(element.tag) == name:
+            return element
+    return None
+
+
+def _element_text(parent, name, default=""):
+    element = _direct_child(parent, name)
+    if element is None or element.text is None:
+        return default
+    return element.text.strip()
+
+
 def _parse_autostart_task_xml(xml_data):
     try:
         root = ET.fromstring(_decode_task_xml(xml_data))
     except Exception as e:
         raise ValueError(f"could not parse task XML: {e}") from e
 
-    command = None
-    arguments = None
-    for elem in root.iter():
-        name = _local_xml_name(elem.tag)
-        if name == "Command" and command is None:
-            command = elem.text or ""
-        elif name == "Arguments" and arguments is None:
-            arguments = elem.text or ""
-    if command is None:
+    registration = _first_element(root, "RegistrationInfo")
+    principals_element = _first_element(root, "Principals")
+    principal_elements = list(principals_element) if principals_element is not None else []
+    principals = [
+        element for element in principal_elements
+        if _local_xml_name(element.tag) == "Principal"
+    ]
+    principal = principals[0] if len(principals) == 1 else None
+    settings = _first_element(root, "Settings")
+    triggers_element = _first_element(root, "Triggers")
+    trigger_elements = list(triggers_element) if triggers_element is not None else []
+    logon_triggers = [
+        element for element in trigger_elements
+        if _local_xml_name(element.tag) == "LogonTrigger"
+    ]
+    actions_element = _first_element(root, "Actions")
+    action_elements = list(actions_element) if actions_element is not None else []
+    exec_elements = [
+        element for element in action_elements
+        if _local_xml_name(element.tag) == "Exec"
+    ]
+    exec_element = exec_elements[0] if exec_elements else None
+    if exec_element is None or _direct_child(exec_element, "Command") is None:
         raise ValueError("task XML does not contain Exec/Command")
-    return command, arguments or ""
-
-
-def _autostart_action_matches(command, arguments, pythonw_path=None, script_path=None):
-    expected_command, expected_script = _expected_autostart_action(pythonw_path, script_path)
-    if not command or not arguments:
-        return False
-    return (
-        _normalize_path_for_compare(command) == _normalize_path_for_compare(expected_command)
-        and _normalize_path_for_compare(arguments) == _normalize_path_for_compare(expected_script)
+    trigger = logon_triggers[0] if len(logon_triggers) == 1 else None
+    idle_settings = _direct_child(settings, "IdleSettings")
+    return AutostartTaskDefinition(
+        source=_element_text(registration, "Source"),
+        version=_element_text(registration, "Version"),
+        uri=_element_text(registration, "URI"),
+        enabled=_element_text(settings, "Enabled"),
+        principal_count=len(principals),
+        principal_id=(principal.get("id", "").strip() if principal is not None else ""),
+        principal_user_id=_element_text(principal, "UserId"),
+        logon_type=_element_text(principal, "LogonType"),
+        run_level=_element_text(principal, "RunLevel"),
+        total_trigger_count=len(trigger_elements),
+        logon_trigger_count=len(logon_triggers),
+        trigger_user_id=_element_text(trigger, "UserId"),
+        trigger_delay=_element_text(trigger, "Delay"),
+        trigger_enabled=_element_text(trigger, "Enabled"),
+        multiple_instances_policy=_element_text(settings, "MultipleInstancesPolicy"),
+        disallow_start_on_batteries=_element_text(settings, "DisallowStartIfOnBatteries"),
+        stop_on_batteries=_element_text(settings, "StopIfGoingOnBatteries"),
+        start_when_available=_element_text(settings, "StartWhenAvailable"),
+        run_only_if_network_available=_element_text(settings, "RunOnlyIfNetworkAvailable"),
+        allow_start_on_demand=_element_text(settings, "AllowStartOnDemand"),
+        allow_hard_terminate=_element_text(settings, "AllowHardTerminate"),
+        hidden=_element_text(settings, "Hidden"),
+        wake_to_run=_element_text(settings, "WakeToRun"),
+        idle_stop_on_end=_element_text(idle_settings, "StopOnIdleEnd"),
+        idle_restart=_element_text(idle_settings, "RestartOnIdle"),
+        execution_time_limit=_element_text(settings, "ExecutionTimeLimit"),
+        total_action_count=len(action_elements),
+        exec_action_count=len(exec_elements),
+        actions_context=(actions_element.get("Context", "").strip() if actions_element is not None else ""),
+        command=_element_text(exec_element, "Command"),
+        arguments=_element_text(exec_element, "Arguments"),
+        working_directory=_element_text(exec_element, "WorkingDirectory"),
     )
 
 
-def _query_autostart_task_action():
-    result, error = _run_schtasks(["/Query", "/TN", AUTOSTART_TASK, "/XML"])
+def _xml_tag(name):
+    return f"{{http://schemas.microsoft.com/windows/2004/02/mit/task}}{name}"
+
+
+def _add_xml_text(parent, name, value):
+    element = ET.SubElement(parent, _xml_tag(name))
+    element.text = str(value)
+    return element
+
+
+def _build_autostart_task_xml(user_id, app_dir=None, system_root=None):
+    command, arguments, working_directory = _expected_autostart_action(app_dir, system_root)
+    ET.register_namespace("", "http://schemas.microsoft.com/windows/2004/02/mit/task")
+    task = ET.Element(_xml_tag("Task"), {"version": "1.2"})
+    registration = ET.SubElement(task, _xml_tag("RegistrationInfo"))
+    _add_xml_text(registration, "Source", AUTOSTART_SOURCE)
+    _add_xml_text(registration, "Version", AUTOSTART_SCHEMA_VERSION)
+    _add_xml_text(registration, "Description", "HeatMap launcher; requests UAC for sensor access.")
+    _add_xml_text(registration, "URI", f"\\{AUTOSTART_TASK}")
+
+    triggers = ET.SubElement(task, _xml_tag("Triggers"))
+    trigger = ET.SubElement(triggers, _xml_tag("LogonTrigger"))
+    _add_xml_text(trigger, "Enabled", "true")
+    _add_xml_text(trigger, "UserId", user_id)
+    _add_xml_text(trigger, "Delay", AUTOSTART_DELAY)
+
+    principals = ET.SubElement(task, _xml_tag("Principals"))
+    principal = ET.SubElement(principals, _xml_tag("Principal"), {"id": "Author"})
+    _add_xml_text(principal, "UserId", user_id)
+    _add_xml_text(principal, "LogonType", "InteractiveToken")
+    _add_xml_text(principal, "RunLevel", "LeastPrivilege")
+
+    settings = ET.SubElement(task, _xml_tag("Settings"))
+    for name, value in (
+        ("MultipleInstancesPolicy", "IgnoreNew"),
+        ("DisallowStartIfOnBatteries", "false"),
+        ("StopIfGoingOnBatteries", "false"),
+        ("StartWhenAvailable", "true"),
+        ("RunOnlyIfNetworkAvailable", "false"),
+        ("AllowStartOnDemand", "true"),
+        ("AllowHardTerminate", "true"),
+        ("Enabled", "true"),
+        ("Hidden", "false"),
+        ("WakeToRun", "false"),
+        ("ExecutionTimeLimit", AUTOSTART_EXECUTION_TIME_LIMIT),
+    ):
+        _add_xml_text(settings, name, value)
+    idle = ET.SubElement(settings, _xml_tag("IdleSettings"))
+    _add_xml_text(idle, "StopOnIdleEnd", "false")
+    _add_xml_text(idle, "RestartOnIdle", "false")
+
+    actions = ET.SubElement(task, _xml_tag("Actions"), {"Context": "Author"})
+    exec_element = ET.SubElement(actions, _xml_tag("Exec"))
+    _add_xml_text(exec_element, "Command", command)
+    _add_xml_text(exec_element, "Arguments", arguments)
+    _add_xml_text(exec_element, "WorkingDirectory", working_directory)
+    return ET.tostring(task, encoding="utf-16", xml_declaration=True)
+
+
+def _normalized_identity(value):
+    return (value or "").strip().casefold()
+
+
+def _is_legacy_elevated_autostart(definition):
+    if definition.run_level.casefold() != "highestavailable":
+        return False
+    command_name = os.path.basename(_strip_outer_quotes(definition.command)).casefold()
+    script_name = os.path.basename(_strip_outer_quotes(definition.arguments)).casefold()
+    return command_name in ("python.exe", "pythonw.exe") and script_name == "overlay.py"
+
+
+def _classify_autostart_task(
+    definition,
+    user_id,
+    app_dir=None,
+    system_root=None,
+    accepted_trigger_user_ids=None,
+    task_name=AUTOSTART_TASK,
+):
+    if definition is None:
+        return AUTOSTART_ABSENT
+    if _is_legacy_elevated_autostart(definition):
+        return AUTOSTART_LEGACY_UNSAFE
+    expected_command, expected_arguments, expected_working_directory = _expected_autostart_action(
+        app_dir, system_root
+    )
+    accepted_trigger_user_ids = accepted_trigger_user_ids or (user_id,)
+    safe = (
+        definition.source == AUTOSTART_SOURCE
+        and definition.version == AUTOSTART_SCHEMA_VERSION
+        and definition.uri == f"\\{task_name}"
+        and definition.enabled.casefold() in ("", "true")
+        and definition.principal_count == 1
+        and definition.principal_id == "Author"
+        and _normalized_identity(definition.principal_user_id) == _normalized_identity(user_id)
+        and definition.logon_type == "InteractiveToken"
+        and definition.run_level in ("", "LeastPrivilege")
+        and definition.total_trigger_count == 1
+        and definition.logon_trigger_count == 1
+        and any(
+            _normalized_identity(definition.trigger_user_id) == _normalized_identity(identity)
+            for identity in accepted_trigger_user_ids
+        )
+        and definition.trigger_delay == AUTOSTART_DELAY
+        and definition.trigger_enabled.casefold() in ("", "true")
+        and definition.multiple_instances_policy == "IgnoreNew"
+        and definition.disallow_start_on_batteries.casefold() == "false"
+        and definition.stop_on_batteries.casefold() == "false"
+        and definition.start_when_available.casefold() == "true"
+        and definition.run_only_if_network_available.casefold() in ("", "false")
+        and definition.allow_start_on_demand.casefold() in ("", "true")
+        and definition.allow_hard_terminate.casefold() in ("", "true")
+        and definition.hidden.casefold() in ("", "false")
+        and definition.wake_to_run.casefold() in ("", "false")
+        and definition.idle_stop_on_end.casefold() in ("", "false")
+        and definition.idle_restart.casefold() in ("", "false")
+        and definition.execution_time_limit == AUTOSTART_EXECUTION_TIME_LIMIT
+        and definition.total_action_count == 1
+        and definition.exec_action_count == 1
+        and definition.actions_context == "Author"
+        and _normalize_path_for_compare(definition.command) == _normalize_path_for_compare(expected_command)
+        and definition.arguments == expected_arguments
+        and _normalize_path_for_compare(definition.working_directory)
+        == _normalize_path_for_compare(expected_working_directory)
+    )
+    if safe:
+        return AUTOSTART_SAFE_CURRENT
+    if definition.source == AUTOSTART_SOURCE:
+        return AUTOSTART_STALE_HEATMAP
+    return AUTOSTART_COLLISION
+
+
+def _query_autostart_task_definition():
+    result, error = _run_task_powershell(_task_query_script())
     if error:
-        return None, None, f"failed to query task: {error}"
+        return None, f"failed to query task: {error}"
+    if result.returncode == 3:
+        return None, None
     if result.returncode != 0:
-        return None, None, _completed_process_message(result)
+        return None, _completed_process_message(result)
     try:
-        command, arguments = _parse_autostart_task_xml(result.stdout)
+        definition = _parse_autostart_task_xml(result.stdout)
     except ValueError as e:
-        return None, None, str(e)
-    return command, arguments, None
+        return None, str(e)
+    return definition, None
+
+
+def _current_user_identity():
+    try:
+        result = subprocess.run(
+            [os.path.join(_windows_directory(), "System32", "whoami.exe"), "/user", "/fo", "csv", "/nh"],
+            capture_output=True,
+            timeout=5,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+        if result.returncode == 0:
+            rows = list(csv.reader(_decode_output(result.stdout).splitlines()))
+            if rows and len(rows[0]) >= 2 and rows[0][1].strip():
+                return rows[0][0].strip(), rows[0][1].strip()
+    except Exception:
+        log.debug("Failed to resolve current Windows identity with whoami", exc_info=True)
+    domain = os.environ.get("USERDOMAIN", "").strip()
+    username = os.environ.get("USERNAME", "").strip()
+    if username:
+        account = f"{domain}\\{username}" if domain else username
+        return account, None
+    return None, None
+
+
+def _current_user_id():
+    return _current_user_identity()[1]
+
+
+def _current_user_account():
+    return _current_user_identity()[0]
+
+
+def _wts_session_text(session_id, info_class):
+    buffer = ctypes.c_void_p()
+    byte_count = ctypes.wintypes.DWORD()
+    if not wtsapi32.WTSQuerySessionInformationW(
+        0, session_id, info_class, ctypes.byref(buffer), ctypes.byref(byte_count)
+    ):
+        return ""
+    try:
+        return ctypes.wstring_at(buffer.value).strip() if buffer.value else ""
+    finally:
+        if buffer.value:
+            wtsapi32.WTSFreeMemory(buffer)
+
+
+def _interactive_user_account():
+    session_id = ctypes.wintypes.DWORD()
+    if not kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(session_id)):
+        return None
+    username = _wts_session_text(session_id.value, 5)  # WTSUserName
+    domain = _wts_session_text(session_id.value, 7)  # WTSDomainName
+    if not username:
+        return None
+    return f"{domain}\\{username}" if domain else username
+
+
+def _resolve_autostart_identity():
+    user_id = _current_user_id()
+    token_account = _current_user_account()
+    interactive_account = _interactive_user_account()
+    if not user_id or not token_account or not interactive_account:
+        return None, (), "could not determine the elevated and interactive Windows identities"
+    if _normalized_identity(token_account) != _normalized_identity(interactive_account):
+        return (
+            None,
+            (),
+            "HeatMap was elevated with different administrator credentials; "
+            "autostart must be configured by the same interactive Windows user",
+        )
+    return user_id, (user_id, token_account, interactive_account), None
 
 
 def is_autostart_enabled():
-    """Check if our Task Scheduler task exists and points at this checkout."""
-    command, arguments, error = _query_autostart_task_action()
+    """Return true only for the exact least-privilege HeatMap task contract."""
+    user_id, accepted_identities, identity_error = _resolve_autostart_identity()
+    if identity_error:
+        log.debug("Autostart identity check failed: %s", identity_error)
+        return False
+    definition, error = _query_autostart_task_definition()
     if error:
         log.debug("Autostart task is not enabled for current app: %s", error)
         return False
-    matches = _autostart_action_matches(command, arguments)
-    if not matches:
-        log.warning(
-            "Autostart task exists but points elsewhere: command=%r arguments=%r",
-            command, arguments,
-        )
-    return matches
+    return _classify_autostart_task(
+        definition,
+        user_id,
+        accepted_trigger_user_ids=accepted_identities,
+    ) == AUTOSTART_SAFE_CURRENT
 
 
 def _delete_legacy_autostart_value():
@@ -367,48 +976,174 @@ def _delete_legacy_autostart_value():
     return True, "legacy registry entry removed"
 
 
-def enable_autostart():
-    """Create a Task Scheduler task that runs at logon with highest privileges (no UAC prompt)."""
-    pythonw, script_path = _expected_autostart_action()
-    result, error = _run_schtasks([
-        "/Create",
-        "/TN", AUTOSTART_TASK,
-        "/TR", _format_autostart_task_run(pythonw, script_path),
-        "/SC", "ONLOGON",
-        "/DELAY", AUTOSTART_DELAY,
-        "/RL", "HIGHEST",
-        "/F",
-    ])
+def _delete_autostart_task():
+    script = (
+        _TASK_MODULE_IMPORT
+        + f"Unregister-ScheduledTask -TaskName '{AUTOSTART_TASK}' -TaskPath '\\' "
+        + "-Confirm:$false -ErrorAction Stop"
+    )
+    result, error = _run_task_powershell(script)
     if error:
-        log.warning("Failed to enable autostart: %s", error)
         return False, error
     if result.returncode != 0:
-        message = _completed_process_message(result)
-        log.warning("schtasks /Create failed: %s", message)
-        return False, message
+        return False, _completed_process_message(result)
+    return True, "task deleted"
+
+
+def _disable_autostart_task():
+    script = (
+        _TASK_MODULE_IMPORT
+        + f"Disable-ScheduledTask -TaskName '{AUTOSTART_TASK}' -TaskPath '\\' "
+        + "-ErrorAction Stop | Out-Null"
+    )
+    result, error = _run_task_powershell(script)
+    if error:
+        return False, error
+    if result.returncode != 0:
+        return False, _completed_process_message(result)
+    return True, "task disabled"
+
+
+def _register_autostart_xml(xml_bytes):
+    script = (
+        _TASK_MODULE_IMPORT
+        + "$payload=[Console]::In.ReadToEnd(); "
+        + "$xml=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload)); "
+        + f"Register-ScheduledTask -TaskName '{AUTOSTART_TASK}' -TaskPath '\\' "
+        + "-Xml $xml -Force -ErrorAction Stop | Out-Null"
+    )
+    xml_text = _decode_task_xml(xml_bytes)
+    payload = base64.b64encode(xml_text.encode("utf-8")).decode("ascii")
+    result, error = _run_task_powershell(script, input_text=payload)
+    if error:
+        return False, error
+    if result.returncode != 0:
+        return False, _completed_process_message(result)
+    return True, "task registered"
+
+
+def _remove_autostart_task_fail_closed():
+    existing, error = _query_autostart_task_definition()
+    if error:
+        return False, f"could not inspect task before removal: {error}"
+    if existing is None:
+        return True, "task already absent"
+    disabled, message = _disable_autostart_task()
+    if not disabled:
+        return False, f"failed to disable task before removal: {message}"
+    definition, error = _query_autostart_task_definition()
+    if error:
+        return False, f"could not verify disabled task: {error}"
+    if definition is None:
+        return True, "task disappeared after disable"
+    if definition.enabled.casefold() != "false":
+        return False, "task did not report disabled state; refusing to delete it"
+    deleted, message = _delete_autostart_task()
+    if not deleted:
+        return False, f"disabled task could not be deleted: {message}"
+    remaining, error = _query_autostart_task_definition()
+    if error:
+        return False, f"could not verify task deletion: {error}"
+    if remaining is not None:
+        return False, "task still exists after deletion"
+    return True, "task disabled, deleted, and verified absent"
+
+
+def enable_autostart():
+    """Create a least-privilege task; run_as_admin.bat requests UAC interactively."""
+    if "%" in APP_DIR:
+        return False, "autostart is unavailable from a checkout path containing '%'"
+    user_id, accepted_identities, identity_error = _resolve_autostart_identity()
+    if identity_error:
+        return False, identity_error
+    existing, error = _query_autostart_task_definition()
+    if error:
+        return False, error
+    classification = _classify_autostart_task(
+        existing,
+        user_id,
+        accepted_trigger_user_ids=accepted_identities,
+    )
+    if classification == AUTOSTART_COLLISION:
+        return False, f"Task {AUTOSTART_TASK} exists but is not owned by HeatMap"
+    if classification == AUTOSTART_SAFE_CURRENT:
+        return True, "Autostart already enabled"
+
+    xml_bytes = _build_autostart_task_xml(user_id)
+    if existing is not None:
+        deleted, message = _remove_autostart_task_fail_closed()
+        if not deleted:
+            return False, f"failed to remove unsafe/stale task: {message}"
+
+    registered, message = _register_autostart_xml(xml_bytes)
+    if not registered:
+        return False, f"failed to create safe autostart task: {message}"
+
+    created, error = _query_autostart_task_definition()
+    created_classification = _classify_autostart_task(
+        created,
+        user_id,
+        accepted_trigger_user_ids=accepted_identities,
+    ) if not error else None
+    if error or created_classification != AUTOSTART_SAFE_CURRENT:
+        _cleanup_ok, cleanup_message = _remove_autostart_task_fail_closed()
+        return False, (
+            f"created task failed security validation: {error or 'definition mismatch'}; "
+            f"cleanup: {cleanup_message}"
+        )
 
     ok, message = _delete_legacy_autostart_value()
     if not ok:
         log.warning(message)
-    return True, "Autostart enabled"
+    return True, "Autostart enabled; Windows will request UAC at logon"
 
 
 def disable_autostart():
     """Remove the Task Scheduler task."""
-    result, error = _run_schtasks(["/Delete", "/TN", AUTOSTART_TASK, "/F"])
+    user_id, accepted_identities, identity_error = _resolve_autostart_identity()
+    if identity_error:
+        return False, identity_error
+    definition, error = _query_autostart_task_definition()
     if error:
-        log.warning("Failed to disable autostart: %s", error)
         return False, error
-    if result.returncode != 0:
-        message = _completed_process_message(result)
-        log.warning("schtasks /Delete failed: %s", message)
-        return False, message
+    if definition is not None:
+        classification = _classify_autostart_task(
+            definition,
+            user_id,
+            accepted_trigger_user_ids=accepted_identities,
+        )
+        if classification == AUTOSTART_COLLISION:
+            return False, f"Task {AUTOSTART_TASK} is not owned by HeatMap"
+        deleted, message = _remove_autostart_task_fail_closed()
+        if not deleted:
+            return False, message
 
     ok, message = _delete_legacy_autostart_value()
     if not ok:
         log.warning(message)
         return False, message
     return True, "Autostart disabled"
+
+
+def reconcile_autostart_security():
+    """Fail-closed migration of legacy HighestAvailable HeatMap tasks."""
+    user_id, accepted_identities, identity_error = _resolve_autostart_identity()
+    if identity_error:
+        return False, False, identity_error
+    definition, error = _query_autostart_task_definition()
+    if error or definition is None:
+        return False, not error, error or "no task"
+    classification = _classify_autostart_task(
+        definition,
+        user_id,
+        accepted_trigger_user_ids=accepted_identities,
+    )
+    if classification == AUTOSTART_SAFE_CURRENT:
+        return False, True, "safe task already current"
+    if classification in (AUTOSTART_LEGACY_UNSAFE, AUTOSTART_STALE_HEATMAP):
+        ok, message = enable_autostart()
+        return True, ok, message
+    return False, False, f"Task {AUTOSTART_TASK} name collision requires manual review"
 
 
 # --- Load LibreHardwareMonitor ---
@@ -481,6 +1216,17 @@ def _safe_round(value):
     if not math.isfinite(v):
         return None
     return round(v)
+
+
+_MAX_VALID_HARDWARE_TEMP_C = 150
+
+
+def _safe_temperature(value):
+    """Reject common unavailable/sentinel temperatures before they reach UI policy."""
+    rounded = _safe_round(value)
+    if rounded is None or rounded <= 0 or rounded > _MAX_VALID_HARDWARE_TEMP_C:
+        return None
+    return rounded
 
 
 def _empty_sensor_data():
@@ -611,6 +1357,17 @@ def _is_gpu_load_sensor(name):
     )
 
 
+def _gpu_load_priority(name):
+    name = _normalized_sensor_name(name)
+    if not _is_gpu_load_sensor(name):
+        return None
+    if "d3d" in name:
+        return 10
+    if name in ("gpu core", "gpu load"):
+        return 30
+    return 20
+
+
 def _gpu_temperature_key(name):
     name = _normalized_sensor_name(name)
     if not name:
@@ -651,7 +1408,35 @@ def _is_gpu_memory_total_sensor(name):
 
 def _is_ram_load_sensor(name):
     name = _normalized_sensor_name(name)
-    return name in ("memory", "memory load", "physical memory", "physical memory load")
+    return name in (
+        "memory",
+        "memory load",
+        "load memory",
+        "physical memory",
+        "physical memory load",
+    )
+
+
+def _ram_load_priority(hardware_name, sensor_name):
+    sensor_name = _normalized_sensor_name(sensor_name)
+    if not _is_ram_load_sensor(sensor_name):
+        return None
+    combined = f"{_normalized_sensor_name(hardware_name)} {sensor_name}"
+    if "virtual" in combined:
+        return 10
+    if "physical" in combined or "total memory" in combined:
+        return 30
+    return 20
+
+
+def _apply_ranked_sensor_candidates(data, candidates):
+    gpu_samples = candidates["gpus"]
+    if gpu_samples:
+        _rank, selected = max(gpu_samples, key=lambda item: item[0])
+        data.update(selected)
+    ram_loads = candidates["ram_pct"]
+    if ram_loads:
+        data["ram_pct"] = max(ram_loads)[-1]
 
 
 def _is_storage_temperature_reading(name):
@@ -659,10 +1444,11 @@ def _is_storage_temperature_reading(name):
     return not any(marker in name for marker in ("warning", "critical", "threshold", "limit"))
 
 
-def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True):
+def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_storage=True):
     hw_type = hw.HardwareType
-    # Skip intentionally ignored iGPU before touching its driver-backed sensors.
-    if hw_type == HardwareType.GpuIntel and data["gpu_temp"] is not None:
+    if hw_type == HardwareType.GpuIntel and any(
+        sample.get("gpu_temp") is not None for _rank, sample in candidates["gpus"]
+    ):
         return
     is_storage = hw_type == HardwareType.Storage
     if is_storage and not update_storage:
@@ -678,8 +1464,8 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
         for sensor in _iter_hardware_sensors(hw, include_subhardware=True):
             if sensor.SensorType == SensorType.Temperature:
                 name = sensor.Name.lower()
-                val = _safe_round(sensor.Value)
-                if val is not None and val > 0:  # 0°C = driver failure
+                val = _safe_temperature(sensor.Value)
+                if val is not None:
                     if "tctl" in name or "tdie" in name or "package" in name:
                         data["cpu_temp"] = val
                     elif data["cpu_temp"] is None:
@@ -698,6 +1484,13 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
             data["cpu_clock"] = round(max(core_clocks))
 
     elif hw_type in (HardwareType.GpuAmd, HardwareType.GpuNvidia, HardwareType.GpuIntel):
+        gpu_keys = (
+            "gpu_temp", "gpu_temp_label", "gpu_core_temp", "gpu_hotspot_temp",
+            "gpu_memory_temp", "gpu_load", "gpu_clock", "gpu_fan", "gpu_fan_pct",
+            "gpu_vram_pct", "gpu_vram_used_gb", "gpu_vram_total_gb",
+        )
+        gpu_sample = {key: None for key in gpu_keys}
+        gpu_load_candidates = []
         gpu_mem_used = None
         gpu_mem_total = None
         sensors = list(hw.Sensors)
@@ -708,27 +1501,30 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
             if sensor.SensorType == SensorType.Temperature:
                 temp_key = _gpu_temperature_key(sensor.Name)
                 if temp_key:
-                    val = _safe_round(sensor.Value)
+                    val = _safe_temperature(sensor.Value)
                     if val is not None:
-                        data[temp_key] = val
+                        gpu_sample[temp_key] = val
             elif sensor.SensorType == SensorType.Load:
-                if _is_gpu_load_sensor(sensor.Name):
+                priority = _gpu_load_priority(sensor.Name)
+                if priority is not None:
                     val = _safe_round(sensor.Value)
                     if val is not None:
-                        data["gpu_load"] = val
+                        gpu_load_candidates.append(
+                            (priority, _normalized_sensor_name(sensor.Name), val)
+                        )
             elif sensor.SensorType == SensorType.Fan:
                 val = _safe_round(sensor.Value)
                 if val is not None:
-                    data["gpu_fan"] = val
+                    gpu_sample["gpu_fan"] = val
             elif sensor.SensorType == SensorType.Control:
                 val = _safe_round(sensor.Value)
                 if val is not None:
-                    data["gpu_fan_pct"] = val
+                    gpu_sample["gpu_fan_pct"] = val
             elif sensor.SensorType == SensorType.Clock:
                 if "core" in sensor.Name.lower():
                     val = _safe_round(sensor.Value)
                     if val is not None:
-                        data["gpu_clock"] = val
+                        gpu_sample["gpu_clock"] = val
             elif sensor.SensorType == SensorType.SmallData:
                 if _is_gpu_memory_used_sensor(sensor.Name):
                     val = _safe_round(sensor.Value)
@@ -738,11 +1534,27 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
                     val = _safe_round(sensor.Value)
                     if val is not None:
                         gpu_mem_total = float(sensor.Value)
-        _select_gpu_display_temperature(data)
+        _select_gpu_display_temperature(gpu_sample)
+        selected_load = max(gpu_load_candidates) if gpu_load_candidates else None
+        if selected_load:
+            gpu_sample["gpu_load"] = selected_load[-1]
         if gpu_mem_used is not None and gpu_mem_total and gpu_mem_total > 0:
-            data["gpu_vram_pct"] = round(gpu_mem_used / gpu_mem_total * 100)
-            data["gpu_vram_used_gb"] = round(gpu_mem_used / 1024, 1)
-            data["gpu_vram_total_gb"] = round(gpu_mem_total / 1024, 1)
+            gpu_sample["gpu_vram_pct"] = round(gpu_mem_used / gpu_mem_total * 100)
+            gpu_sample["gpu_vram_used_gb"] = round(gpu_mem_used / 1024, 1)
+            gpu_sample["gpu_vram_total_gb"] = round(gpu_mem_total / 1024, 1)
+        hardware_priority = 10 if hw_type == HardwareType.GpuIntel else 20
+        display_temp = gpu_sample["gpu_temp"]
+        load_priority = selected_load[0] if selected_load else -1
+        load_value = gpu_sample["gpu_load"]
+        rank = (
+            display_temp is not None,
+            hardware_priority,
+            display_temp if display_temp is not None else -1,
+            load_priority,
+            load_value if load_value is not None else -1,
+            _normalized_sensor_name(hw.Name),
+        )
+        candidates["gpus"].append((rank, gpu_sample))
 
     elif hw_type == HardwareType.Storage:
         disk_temp = None
@@ -752,7 +1564,7 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
             if sensor.SensorType == SensorType.Temperature:
                 if not _is_storage_temperature_reading(sensor.Name):
                     continue
-                val = _safe_round(sensor.Value)
+                val = _safe_temperature(sensor.Value)
                 if val is not None and (disk_temp is None or val > disk_temp):
                     disk_temp = val
             elif sensor.SensorType == SensorType.Load:
@@ -796,7 +1608,7 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
                 if val is not None:
                     control_sensors.append((name, val))
             elif sensor.SensorType == SensorType.Temperature:
-                val = _safe_round(sensor.Value)
+                val = _safe_temperature(sensor.Value)
                 if val is not None:
                     data["motherboard_temps"].append({
                         "name": str(sensor.Name),
@@ -819,10 +1631,16 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=True
     elif hw_type == HardwareType.Memory:
         for sensor in hw.Sensors:
             if sensor.SensorType == SensorType.Load:
-                if _is_ram_load_sensor(sensor.Name):
+                priority = _ram_load_priority(hw.Name, sensor.Name)
+                if priority is not None:
                     val = _safe_round(sensor.Value)
                     if val is not None:
-                        data["ram_pct"] = val
+                        candidates["ram_pct"].append((
+                            priority,
+                            _normalized_sensor_name(hw.Name),
+                            _normalized_sensor_name(sensor.Name),
+                            val,
+                        ))
 
 
 def read_sensors(computer, update_storage=True):
@@ -834,6 +1652,7 @@ def read_sensors(computer, update_storage=True):
                         Disk data will retain previous values from the last full update.
     """
     data = _empty_sensor_data()
+    candidates = {"gpus": [], "ram_pct": []}
 
     if computer is None:
         data[SENSOR_STATUS_KEY] = SENSOR_STATUS_PSUTIL_FALLBACK
@@ -844,6 +1663,7 @@ def read_sensors(computer, update_storage=True):
     except Exception:
         log.warning("Failed to import LibreHardwareMonitor sensor enums, falling back to psutil", exc_info=True)
         data[SENSOR_STATUS_KEY] = SENSOR_STATUS_PSUTIL_FALLBACK
+        data[SENSOR_REINIT_KEY] = True
         return _apply_psutil_fallbacks(data)
 
     try:
@@ -851,15 +1671,30 @@ def read_sensors(computer, update_storage=True):
     except Exception:
         log.warning("Failed to enumerate LibreHardwareMonitor hardware, falling back to psutil", exc_info=True)
         data[SENSOR_STATUS_KEY] = SENSOR_STATUS_PSUTIL_FALLBACK
+        data[SENSOR_REINIT_KEY] = True
         return _apply_psutil_fallbacks(data)
 
+    hardware_items.sort(
+        key=lambda hw: (
+            0 if hw.HardwareType in (HardwareType.GpuAmd, HardwareType.GpuNvidia) else
+            1 if hw.HardwareType == HardwareType.GpuIntel else 2
+        )
+    )
     for hw in hardware_items:
         try:
-            _read_hardware_block(hw, HardwareType, SensorType, data, update_storage=update_storage)
+            _read_hardware_block(
+                hw,
+                HardwareType,
+                SensorType,
+                data,
+                candidates,
+                update_storage=update_storage,
+            )
         except Exception:
             data[SENSOR_STATUS_KEY] = SENSOR_STATUS_PARTIAL
             log.warning("Skipping hardware block after sensor read failure: %s", _hardware_label(hw), exc_info=True)
 
+    _apply_ranked_sensor_candidates(data, candidates)
     _apply_psutil_fallbacks(data)
 
     return data
@@ -1119,7 +1954,11 @@ def _normalize_config(cfg, defaults):
         if key not in provided_keys:
             continue
         value = normalized.get(key)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or (isinstance(value, float) and not math.isfinite(value))
+        ):
             normalized[key] = defaults[key]
             invalid_keys.append(key)
         else:
@@ -1134,7 +1973,13 @@ def _normalize_config(cfg, defaults):
         if key not in provided_keys:
             continue
         value = normalized.get(key)
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or (isinstance(value, float) and not math.isfinite(value))
+            or value <= 0
+            or value > 100000
+        ):
             normalized[key] = defaults[key]
             invalid_keys.append(key)
         else:
@@ -1193,7 +2038,7 @@ def save_config(cfg):
     tmp_path = f"{CONFIG_PATH}.tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(cfg, f)
+            json.dump(cfg, f, allow_nan=False)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, CONFIG_PATH)
@@ -1229,7 +2074,15 @@ def is_pawnio_driver_installed():
         return check_pawnio()
     except Exception:
         log.warning("Failed to check PawnIO driver status", exc_info=True)
-        return True
+        return False
+
+
+def prepare_verified_pawnio_installer():
+    try:
+        from setup import download_pawnio
+        return True, download_pawnio()
+    except Exception as e:
+        return False, str(e)
 
 
 # --- Main overlay class ---
@@ -1243,7 +2096,7 @@ class OverlayApp:
         self._config_status = STATUS_CONFIG_ADJUSTED if config_warning else None
         self._driver_status = (
             SENSOR_STATUS_DRIVER_MISSING
-            if self.computer is not None and not is_pawnio_driver_installed()
+            if not is_pawnio_driver_installed()
             else None
         )
         self._sensor_start_time = time.monotonic()
@@ -1257,7 +2110,8 @@ class OverlayApp:
         self.sensor_data = {}
         self.lock = threading.Lock()
         self.embedded = False
-        self._embed_scheduled = False
+        self._embed_after_id = None
+        self._window_transition_generation = 0
 
         # --- Alert system ---
         self.alerts_enabled = self.config.get("alerts_enabled", True)
@@ -1409,6 +2263,9 @@ class OverlayApp:
             self.content, text="", font=("Segoe UI", 8),
             fg="#facc15", bg="#1a1a2e", anchor="w"
         )
+        if self._driver_status == SENSOR_STATUS_DRIVER_MISSING:
+            self.status_label.configure(cursor="hand2")
+            self.status_label.bind("<Button-1>", lambda _event: self.prepare_pawnio_repair())
         self._status_label_visible = False
         self._refresh_runtime_status()
         self._clamp_saved_position_to_visible_screen(persist=True)
@@ -1421,7 +2278,7 @@ class OverlayApp:
         self._menu_idx = {}  # label_key -> menu index
         self._add_menu_item("topmost", "Always on top: OFF", self.toggle_topmost)
         self._add_menu_item("autostart",
-            "Autostart: ON" if is_autostart_enabled() else "Autostart: OFF",
+            "Autostart: ON (UAC)" if is_autostart_enabled() else "Autostart: OFF",
             self.toggle_autostart)
         self._add_menu_item("alerts",
             "Alerts: ON" if self.alerts_enabled else "Alerts: OFF",
@@ -1433,6 +2290,12 @@ class OverlayApp:
         self._add_menu_item("details",
             "Details: ON" if self.details_enabled else "Details: OFF",
             self.toggle_details)
+        if self._driver_status == SENSOR_STATUS_DRIVER_MISSING:
+            self._add_menu_item(
+                "pawnio",
+                "Prepare verified PawnIO repair...",
+                self.prepare_pawnio_repair,
+            )
         self.menu.add_separator()
         self.menu.add_command(label="Open log file", command=self.open_log_file)
         self.menu.add_command(label="Copy log path", command=self.copy_log_path)
@@ -1446,10 +2309,14 @@ class OverlayApp:
         self.peek_visible = False
         self._peek_animating = False
         self._saved_pos = None  # saved desktop position before peek
-        self._create_peek_trigger()
+        self._peek_monitor_area = None
+        self._cursor_was_at_peek_edge = False
+        self._monitor_areas = _get_monitor_areas()
+        self._poll_screen_change()
+        self._poll_peek_edge()
 
         # --- Embed into desktop after window is drawn ---
-        self.root.after(100, self._embed_into_desktop)
+        self._schedule_embed(100)
 
         # --- Start sensor thread ---
         self.sensor_thread = threading.Thread(target=self.sensor_loop, daemon=True)
@@ -1473,19 +2340,12 @@ class OverlayApp:
         if getattr(self, "peek_visible", False) or getattr(self, "_peek_animating", False):
             return False
         self.root.update_idletasks()
-        virt_x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
-        virt_y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
-        virt_w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
-        virt_h = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
-        x, y = _clamp_overlay_position(
+        x, y = _clamp_overlay_to_monitor_areas(
             self.config.get("x", 50),
             self.config.get("y", 50),
             self.root.winfo_width(),
             self.root.winfo_height(),
-            virt_x,
-            virt_y,
-            virt_w,
-            virt_h,
+            _get_monitor_areas(),
         )
         if (x, y) == (self.config.get("x", 50), self.config.get("y", 50)):
             return False
@@ -1497,10 +2357,13 @@ class OverlayApp:
         return True
 
     def _current_runtime_status(self):
-        if getattr(self, "_config_status", None):
-            return self._config_status
+        config_status = getattr(self, "_config_status", None)
+        if config_status == STATUS_CONFIG_SAVE_ERROR:
+            return config_status
         if getattr(self, "_driver_status", None):
             return self._driver_status
+        if config_status:
+            return config_status
         return getattr(self, "_sensor_status", None)
 
     def _refresh_runtime_status(self):
@@ -1525,6 +2388,7 @@ class OverlayApp:
             SENSOR_STATUS_PSUTIL_FALLBACK,
             SENSOR_STATUS_PARTIAL,
             SENSOR_STATUS_WARMING_UP,
+            SENSOR_STATUS_CPU_UNAVAILABLE,
         ):
             status = None
         self._sensor_status = status
@@ -1582,6 +2446,50 @@ class OverlayApp:
                 except Exception:
                     log.debug("Failed to close diagnostics hardware monitor", exc_info=True)
 
+    def prepare_pawnio_repair(self):
+        if getattr(self, "_pawnio_repair_running", False):
+            return
+        self._pawnio_repair_running = True
+        self._set_menu_label("pawnio", "Preparing PawnIO repair...")
+        self._pawnio_repair_results = queue.Queue(maxsize=1)
+
+        def worker():
+            self._pawnio_repair_results.put(prepare_verified_pawnio_installer())
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(100, self._poll_pawnio_repair)
+
+    def _poll_pawnio_repair(self):
+        if not self.running:
+            return
+        try:
+            ok, detail = self._pawnio_repair_results.get_nowait()
+        except queue.Empty:
+            self.root.after(100, self._poll_pawnio_repair)
+            return
+        self._finish_pawnio_repair(ok, detail)
+
+    def _finish_pawnio_repair(self, ok, detail):
+        self._pawnio_repair_running = False
+        if not self.running:
+            return
+        self._set_menu_label("pawnio", "Prepare verified PawnIO repair...")
+        if not ok:
+            _show_error_message("PawnIO repair", f"Could not prepare PawnIO installer:\n{detail}")
+            return
+        installer_path = os.path.abspath(detail)
+        try:
+            os.startfile(os.path.dirname(installer_path))
+        except Exception:
+            log.warning("Failed to open PawnIO download folder", exc_info=True)
+        _show_info_message(
+            "PawnIO repair ready",
+            "Verified PawnIO installer is ready.\n\n"
+            f"{installer_path}\n\n"
+            "Close HeatMap, run the installer as administrator, restart Windows, "
+            "then run: python setup.py --hardware-smoke",
+        )
+
     def _apply_details_visibility(self):
         if self.details_enabled:
             pack_options = {"fill": "x"}
@@ -1604,14 +2512,40 @@ class OverlayApp:
                 return hwnd
         return self.root.winfo_id()
 
-    def _embed_into_desktop(self):
+    def _can_embed_now(self):
+        return (
+            self.running
+            and not self.topmost
+            and not self.peek_visible
+            and not self._peek_animating
+        )
+
+    def _cancel_scheduled_embed(self):
+        self._window_transition_generation += 1
+        after_id = self._embed_after_id
+        self._embed_after_id = None
+        if after_id is not None:
+            try:
+                self.root.after_cancel(after_id)
+            except Exception:
+                log.debug("Failed to cancel scheduled desktop embed", exc_info=True)
+
+    def _embed_into_desktop(self, expected_generation=None):
         """Embed the window into the desktop layer (above wallpaper, below icons and apps)."""
-        self._embed_scheduled = False
+        if (
+            expected_generation is not None
+            and expected_generation != self._window_transition_generation
+        ):
+            return
+        self._embed_after_id = None
+        if not self._can_embed_now():
+            return
         hwnd = self._get_hwnd()
         set_tool_window(hwnd)
         if embed_in_desktop(hwnd):
             self.embedded = True
         else:
+            self.embedded = False
             # Fallback: just send to bottom, no topmost
             user32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0,
                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
@@ -1619,10 +2553,33 @@ class OverlayApp:
         self.root.wm_attributes("-alpha", 0.88)
 
     def _schedule_embed(self, delay=50):
-        """Schedule _embed_into_desktop with dedup guard."""
-        if not self._embed_scheduled:
-            self._embed_scheduled = True
-            self.root.after(delay, self._embed_into_desktop)
+        """Schedule a generation-guarded embed; stale callbacks become no-ops."""
+        self._cancel_scheduled_embed()
+        generation = self._window_transition_generation
+        self._embed_after_id = self.root.after(
+            delay,
+            lambda: self._embed_into_desktop(generation),
+        )
+
+    def _detach_from_desktop(self):
+        if not self.embedded:
+            return True
+        hwnd = self._get_hwnd()
+        if not _set_parent_verified(hwnd, 0):
+            return False
+        self.embedded = False
+        return True
+
+    def _has_valid_desktop_parent(self):
+        if not self.embedded:
+            return False
+        hwnd = self._get_hwnd()
+        parent = user32.GetParent(hwnd)
+        if not parent or not user32.IsWindow(parent):
+            return False
+        class_name = ctypes.create_unicode_buffer(256)
+        user32.GetClassNameW(parent, class_name, 256)
+        return class_name.value == "WorkerW"
 
     def _make_row(self, key, label_text, parent=None, label_fg="#a0a0c0"):
         parent = parent or self.content
@@ -1663,101 +2620,52 @@ class OverlayApp:
         self.rows[key] = temp_lbl
         self.rows[key + "_usage"] = usage_lbl
 
-    # --- Peek from edge methods ---
-    def _create_peek_trigger(self):
-        """Create an invisible strip on the right edge of the screen."""
-        self._trigger = tk.Toplevel(self.root)
-        self._trigger.overrideredirect(True)
-        self._trigger.wm_attributes("-alpha", 0.01)
-        self._trigger.wm_attributes("-topmost", True)
-        self._trigger.configure(bg="black")
-
-        self._update_trigger_geometry()
-
-        # Make it a tool window (no taskbar, no alt-tab)
-        self._trigger.update_idletasks()
-        try:
-            trigger_hwnd = int(self._trigger.wm_frame(), 16) or self._trigger.winfo_id()
-        except (ValueError, TypeError):
-            trigger_hwnd = self._trigger.winfo_id()
-        set_tool_window(trigger_hwnd)
-
-        self._trigger.bind("<Enter>", lambda _: self._peek_show())
-
-        if not self.peek_enabled:
-            self._trigger.withdraw()
-
-        # Periodically re-check screen geometry for resolution/monitor changes
-        self._last_screen_x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
-        self._last_screen_y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
-        self._last_screen_w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
-        self._last_screen_h = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
-        self._trigger_hidden_for_desktop = False
-        self._poll_screen_change()
-        self._poll_trigger_visibility()
-
-    def _update_trigger_geometry(self):
-        """Position the trigger strip on the right edge of the virtual screen (all monitors)."""
-        virt_x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
-        virt_y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
-        virt_w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
-        virt_h = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
-        trigger_w = 6
-        self._trigger.geometry(f"{trigger_w}x{virt_h}+{virt_x + virt_w - trigger_w}+{virt_y}")
-
     def _poll_screen_change(self):
-        """Re-position trigger strip if screen geometry changed (resolution or monitor rearrangement)."""
+        """React to monitor topology/work-area changes, including equal bounding boxes."""
         if not self.running:
             return
-        screen_x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
-        screen_y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
-        screen_w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
-        screen_h = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
-        if (screen_x != self._last_screen_x or screen_y != self._last_screen_y
-                or screen_w != self._last_screen_w or screen_h != self._last_screen_h):
-            self._last_screen_x = screen_x
-            self._last_screen_y = screen_y
-            self._last_screen_w = screen_w
-            self._last_screen_h = screen_h
-            self._update_trigger_geometry()
+        monitor_areas = _get_monitor_areas()
+        if monitor_areas != self._monitor_areas:
+            self._monitor_areas = monitor_areas
+            self._cursor_was_at_peek_edge = False
+            if self.peek_visible or self._peek_animating:
+                self._restore_desktop_mode()
             self._clamp_saved_position_to_visible_screen(persist=True)
+        if self._can_embed_now():
+            if self.embedded and not self._has_valid_desktop_parent():
+                self.embedded = False
+            if not self.embedded and self._embed_after_id is None:
+                self._schedule_embed(50)
         self.root.after(5000, self._poll_screen_change)
 
-    def _poll_trigger_visibility(self):
-        """Hide the peek trigger strip when the desktop is visible (widget already shown)."""
+    def _poll_peek_edge(self):
         if not self.running:
             return
-        if self.peek_enabled and not self.topmost and not self.peek_visible and not self._peek_animating:
-            if self._is_desktop_at_widget():
-                if not self._trigger_hidden_for_desktop:
-                    self._trigger_hidden_for_desktop = True
-                    self._trigger.withdraw()
-            else:
-                if self._trigger_hidden_for_desktop:
-                    self._trigger_hidden_for_desktop = False
-                    self._trigger.deiconify()
-        self.root.after(500, self._poll_trigger_visibility)
+        point = POINT()
+        edge_monitor = None
+        if user32.GetCursorPos(ctypes.byref(point)):
+            edge_monitor = _exposed_right_edge_monitor(
+                point.x, point.y, self._monitor_areas
+            )
+        at_edge = edge_monitor is not None
+        if (
+            at_edge
+            and not self._cursor_was_at_peek_edge
+            and self.peek_enabled
+            and not self.topmost
+            and not self.peek_visible
+            and not self._peek_animating
+            and not self._is_desktop_at_cursor()
+        ):
+            self._peek_show(edge_monitor)
+        self._cursor_was_at_peek_edge = at_edge
+        self.root.after(100, self._poll_peek_edge)
 
     def _is_desktop_at_cursor(self):
-        """Hide trigger and check if desktop is under the cursor.
-
-        Does NOT restore the trigger — _poll_trigger_visibility handles that.
-        Restoring (deiconify) here would fire a new <Enter> event while the
-        cursor is still over the trigger, creating an infinite event loop.
-        """
+        """Check whether the desktop, rather than an application, is under the cursor."""
         pt = POINT()
-        user32.GetCursorPos(ctypes.byref(pt))
-        self._trigger.withdraw()
-        self._trigger.update_idletasks()
-        self._trigger_hidden_for_desktop = True  # poll will restore if needed
-        hwnd = user32.WindowFromPoint(pt)
-        return self._is_desktop_hwnd(hwnd)
-
-    def _is_desktop_at_widget(self):
-        """Check if the desktop is visible at the widget's position."""
-        x = self.config.get("x", 50) + 20
-        y = self.config.get("y", 50) + 20
-        pt = POINT(x, y)
+        if not user32.GetCursorPos(ctypes.byref(pt)):
+            return False
         hwnd = user32.WindowFromPoint(pt)
         return self._is_desktop_hwnd(hwnd)
 
@@ -1765,10 +2673,7 @@ class OverlayApp:
         """Check if the given HWND belongs to a desktop-layer window."""
         if not hwnd:
             return True
-        # Any window from our own process IS the overlay widget — treat as desktop.
-        # (trigger strip is always withdrawn before WindowFromPoint calls,
-        #  so it can't be returned here)
-        # Works regardless of embedded state (HWND_BOTTOM fallback also counts).
+        # Any window from our own process is the overlay widget; treat it as desktop.
         pid = ctypes.wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         if pid.value == _MY_PID:
@@ -1790,47 +2695,76 @@ class OverlayApp:
                 return True
         return False
 
-    def _peek_show(self):
+    def _restore_desktop_mode(self, delay=50):
+        self._peek_animating = False
+        self.peek_visible = False
+        self.root.wm_attributes("-alpha", 0)
+        self.root.wm_attributes("-topmost", False)
+        if self._saved_pos:
+            x, y = self._saved_pos
+            self.root.geometry(f"+{x}+{y}")
+            self.config["x"] = x
+            self.config["y"] = y
+            self._saved_pos = None
+        self._peek_monitor_area = None
+        self._schedule_embed(delay)
+
+    def _peek_show(self, monitor_area=None):
         """Slide the overlay in from the right edge."""
         if not self.running or not self.peek_enabled or self.peek_visible or self._peek_animating or self.topmost:
             return
-        # Check what's actually under the cursor (with trigger hidden) —
-        # if it's the desktop, the widget is already visible, skip peek
+        # If the desktop is under the cursor, the embedded widget is already visible.
         if self._is_desktop_at_cursor():
             return
-
-        self._peek_animating = True
+        if monitor_area is None:
+            point = POINT()
+            if user32.GetCursorPos(ctypes.byref(point)):
+                monitor_area = _exposed_right_edge_monitor(
+                    point.x, point.y, self._monitor_areas
+                )
+        if monitor_area is None:
+            selected = _select_monitor_for_window(
+                self.config.get("x", 50),
+                self.config.get("y", 50),
+                max(1, self.root.winfo_width()),
+                max(1, self.root.winfo_height()),
+                self._monitor_areas,
+            )
+            monitor_area = selected
+        if monitor_area is None:
+            return
+        self._peek_monitor_area = monitor_area
 
         # Save current desktop position
         self._saved_pos = (self.config.get("x", 50), self.config.get("y", 50))
 
-        # Unembed from desktop
-        if self.embedded:
-            hwnd = self._get_hwnd()
-            user32.SetParent(hwnd, 0)
-            self.embedded = False
+        self._cancel_scheduled_embed()
+        if not self._detach_from_desktop():
+            self._saved_pos = None
+            self._peek_monitor_area = None
+            log.warning("Cannot enter peek mode because desktop detach failed")
+            return
+
+        self._peek_animating = True
 
         # Make topmost
+        self.root.wm_attributes("-alpha", 0.88)
         self.root.wm_attributes("-topmost", True)
 
-        virt_x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
-        virt_w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
-        screen_right = virt_x + virt_w
+        monitor_rect, work_rect = monitor_area
+        screen_right = monitor_rect[2]
         try:
             self.root.update_idletasks()
             overlay_w = self.root.winfo_width()
+            overlay_h = self.root.winfo_height()
         except tk.TclError:
-            self._peek_animating = False
-            self.root.wm_attributes("-topmost", False)
-            if self._saved_pos:
-                self.root.geometry(f"+{self._saved_pos[0]}+{self._saved_pos[1]}")
-                self._saved_pos = None
-            self._schedule_embed(50)
+            self._restore_desktop_mode()
             return
 
         # Keep the same Y position as on the desktop
-        target_x = screen_right - overlay_w
-        target_y = self._saved_pos[1] if self._saved_pos else self.config.get("y", 50)
+        target_x = work_rect[2] - overlay_w
+        saved_y = self._saved_pos[1] if self._saved_pos else self.config.get("y", 50)
+        target_y = min(max(saved_y, work_rect[1]), max(work_rect[1], work_rect[3] - overlay_h))
 
         # Start off-screen
         self.root.geometry(f"+{screen_right}+{target_y}")
@@ -1855,14 +2789,8 @@ class OverlayApp:
             self.root.geometry(f"+{current_x}+{y}")
             self.root.after(10, lambda: self._animate_slide(current_x + step, target_x, y, step, callback))
         except tk.TclError:
-            self._peek_animating = False
-            self.peek_visible = False
             try:
-                self.root.wm_attributes("-topmost", False)
-                if self._saved_pos:
-                    self.root.geometry(f"+{self._saved_pos[0]}+{self._saved_pos[1]}")
-                    self._saved_pos = None
-                self._schedule_embed(50)
+                self._restore_desktop_mode()
             except tk.TclError:
                 pass
 
@@ -1891,10 +2819,8 @@ class OverlayApp:
             return
         over_overlay = ox <= mx <= ox + ow and oy <= my <= oy + oh
 
-        # Check if mouse is over the trigger strip (right edge of virtual screen)
-        virt_x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
-        virt_w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
-        over_trigger = mx >= virt_x + virt_w - 10
+        edge_monitor = _exposed_right_edge_monitor(mx, my, self._monitor_areas, width=10)
+        over_trigger = edge_monitor is not None
 
         if over_overlay or over_trigger:
             self.root.after(200, self._peek_check_mouse)
@@ -1909,7 +2835,10 @@ class OverlayApp:
         self._peek_animating = True
         # peek_visible stays True until animation finishes (in _peek_hidden)
 
-        screen_right = user32.GetSystemMetrics(SM_XVIRTUALSCREEN) + user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+        if self._peek_monitor_area is None:
+            self._restore_desktop_mode()
+            return
+        screen_right = self._peek_monitor_area[0][2]
         current_x = self.root.winfo_rootx()
         current_y = self.root.winfo_rooty()
 
@@ -1917,80 +2846,46 @@ class OverlayApp:
 
     def _peek_hidden(self):
         """Called when slide-out animation finishes."""
-        self._peek_animating = False
-        self.peek_visible = False
-
-        # Hide with alpha=0 before repositioning to prevent blink
-        # (withdraw/deiconify resets z-order on Windows)
-        self.root.wm_attributes("-alpha", 0)
-
-        # Restore topmost off
-        self.root.wm_attributes("-topmost", False)
-
-        # Restore saved desktop position and update config
-        if self._saved_pos:
-            x, y = self._saved_pos
-            self.root.geometry(f"+{x}+{y}")
-            self.config["x"] = x
-            self.config["y"] = y
-            self._saved_pos = None
-
-        # Re-embed in desktop (alpha restored inside _embed_into_desktop)
-        self._schedule_embed(50)
+        self._restore_desktop_mode()
 
     def toggle_peek(self):
         self.peek_enabled = not self.peek_enabled
         self.config["peek_enabled"] = self.peek_enabled
-        self._trigger_hidden_for_desktop = False
-        if self.peek_enabled and not self.topmost:
-            self._trigger.deiconify()
-        else:
-            self._trigger.withdraw()
-            if self.peek_visible or self._peek_animating:
-                # Force-cancel any running animation and return to desktop
-                self._peek_animating = False
-                self.peek_visible = False
-                self.root.wm_attributes("-alpha", 0)
-                self.root.wm_attributes("-topmost", False)
-                if self._saved_pos:
-                    x, y = self._saved_pos
-                    self.root.geometry(f"+{x}+{y}")
-                    self.config["x"] = x
-                    self.config["y"] = y
-                    self._saved_pos = None
-                self._schedule_embed(50)
+        self._cursor_was_at_peek_edge = False
+        if not self.peek_enabled and (self.peek_visible or self._peek_animating):
+            self._restore_desktop_mode()
         self._save_config()
         self._set_menu_label("peek",
             "Peek from edge: ON" if self.peek_enabled else "Peek from edge: OFF"
         )
 
     def toggle_topmost(self):
-        self.topmost = not self.topmost
-        if self.topmost:
-            # Hide peek trigger — not needed in topmost mode
-            self._trigger.withdraw()
+        target_topmost = not self.topmost
+        if target_topmost:
+            self._cancel_scheduled_embed()
             if self.peek_visible or self._peek_animating:
-                self.peek_visible = False
-                self._peek_animating = False
-            # Unembed from desktop if embedded, make topmost
-            if self.embedded:
-                hwnd = self._get_hwnd()
-                user32.SetParent(hwnd, 0)
-                self.embedded = False
+                self._restore_desktop_mode()
+                self._cancel_scheduled_embed()
+            if not self._detach_from_desktop():
+                log.warning("Cannot enable always-on-top because desktop detach failed")
+                _show_error_message(
+                    "HeatMap window",
+                    "Could not detach the overlay from the desktop. Always on top remains off.",
+                )
+                return
+            self.topmost = True
             # Restore saved position if we were peeking
             if self._saved_pos:
                 x, y = self._saved_pos
                 self.root.geometry(f"+{x}+{y}")
                 self._saved_pos = None
             self.root.deiconify()
+            self.root.wm_attributes("-alpha", 0.88)
             self.root.wm_attributes("-topmost", True)
         else:
+            self.topmost = False
             self.root.wm_attributes("-topmost", False)
             self._schedule_embed(100)
-            # Restore peek trigger if enabled (poll will manage desktop visibility)
-            self._trigger_hidden_for_desktop = False
-            if self.peek_enabled:
-                self._trigger.deiconify()
         self._set_menu_label("topmost",
             "Always on top: ON" if self.topmost else "Always on top: OFF"
         )
@@ -2009,7 +2904,7 @@ class OverlayApp:
             )
             return
         self._set_menu_label("autostart",
-            "Autostart: ON" if is_autostart_enabled() else "Autostart: OFF"
+            "Autostart: ON (UAC)" if is_autostart_enabled() else "Autostart: OFF"
         )
 
     def toggle_alerts(self):
@@ -2115,6 +3010,7 @@ class OverlayApp:
     def sensor_loop(self):
         consecutive_errors = 0
         consecutive_reinit_hints = 0
+        next_init_retry = time.monotonic() if self.computer is None else None
         _storage_counter = 14  # start at INTERVAL-1 so first cycle updates storage
         _STORAGE_INTERVAL = 15  # update storage every 15 cycles (~30s)
         while not self._stop_event.is_set():
@@ -2127,6 +3023,23 @@ class OverlayApp:
                     if not self.running:
                         break
                     computer = self.computer
+                retry_now = time.monotonic()
+                if computer is None and next_init_retry is not None and retry_now >= next_init_retry:
+                    next_init_retry = retry_now + SENSOR_INIT_RETRY_SECONDS
+                    log.warning("Retrying unavailable hardware monitor initialization")
+                    replacement = init_hardware_monitor()
+                    with self.lock:
+                        if not self.running:
+                            if replacement is not None:
+                                try:
+                                    replacement.Close()
+                                except Exception:
+                                    log.debug("Failed to close unused hardware monitor", exc_info=True)
+                            break
+                        self.computer = replacement
+                        computer = replacement
+                    if computer is not None:
+                        next_init_retry = None
                 # Read sensors outside lock to avoid blocking UI thread
                 data = read_sensors(computer, update_storage=update_storage)
                 warmup = (
@@ -2135,6 +3048,8 @@ class OverlayApp:
                 )
                 if warmup and data.get(SENSOR_REINIT_KEY):
                     data[SENSOR_STATUS_KEY] = SENSOR_STATUS_WARMING_UP
+                elif computer is not None and not warmup and data.get("cpu_temp") is None:
+                    data[SENSOR_STATUS_KEY] = SENSOR_STATUS_CPU_UNAVAILABLE
                 with self.lock:
                     self.sensor_data = data
                 consecutive_errors = 0
@@ -2370,6 +3285,7 @@ class OverlayApp:
             label.config(text="ERR", fg="#f87171")
 
     def quit(self):
+        self._cancel_scheduled_embed()
         self.running = False
         self._stop_event.set()
         # Cancel all pending after() callbacks to prevent TclError on destroy
@@ -2395,11 +3311,6 @@ class OverlayApp:
         self.config["gpu_fan_max_rpm"] = self._GPU_FAN_MAX_RPM
         self.config["cpu_fan_max_rpm"] = self._CPU_FAN_MAX_RPM
         self._save_config(update_status=False)
-        # Destroy trigger window
-        try:
-            self._trigger.destroy()
-        except Exception:
-            log.debug("Failed to destroy trigger window", exc_info=True)
         # Wait for sensor thread to finish before closing hardware monitor
         # _stop_event is already set above; join with timeout to avoid hanging
         try:
@@ -2416,52 +3327,10 @@ class OverlayApp:
         elif self.computer is not None:
             log.warning("Sensor thread did not stop in time; leaving hardware monitor open")
         self.root.destroy()
+        release_single_instance()
 
     def run(self):
         self.root.mainloop()
-
-
-def kill_previous_instances():
-    """Kill any other overlay.py instances matching our script path."""
-    my_pid = os.getpid()
-    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-        try:
-            if proc.info['pid'] == my_pid:
-                continue
-            cmdline = proc.info.get('cmdline') or []
-            proc_cwd = None
-            try:
-                proc_cwd = proc.cwd()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-            if any(is_same_script_invocation(SCRIPT_PATH, arg, proc_cwd) for arg in cmdline):
-                proc.terminate()
-                try:
-                    proc.wait(timeout=3)
-                except psutil.TimeoutExpired:
-                    proc.kill()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
-
-
-def is_same_script_invocation(script_path, arg, cwd=None):
-    if not arg:
-        return False
-
-    candidate = arg.strip().strip('"')
-    if not candidate:
-        return False
-
-    script_name = os.path.basename(script_path)
-    if os.path.basename(candidate).lower() != script_name.lower():
-        return False
-
-    if not os.path.isabs(candidate):
-        if not cwd:
-            return False
-        candidate = os.path.join(cwd, candidate)
-
-    return os.path.normcase(os.path.abspath(candidate)) == os.path.normcase(os.path.abspath(script_path))
 
 
 def _is_admin():
@@ -2485,17 +3354,33 @@ def main():
         )
         sys.exit(1)
 
-    kill_previous_instances()
+    if not acquire_single_instance():
+        log.warning("Another HeatMap instance is already running")
+        return
 
-    if not _is_admin():
+    is_admin = _is_admin()
+    if is_admin:
+        _changed, ok, message = reconcile_autostart_security()
+        if not ok:
+            log.error("Failed to migrate insecure autostart task: %s", message)
+            _show_error_message(
+                "HeatMap autostart",
+                "The old elevated autostart task could not be migrated and may be disabled.\n\n"
+                f"{message}\n\nOpen HeatMap and toggle Autostart after resolving the error.",
+            )
+    else:
         log.warning("Running without admin privileges — hardware sensors may be unavailable")
 
-    app = OverlayApp()
     try:
-        app.run()
-    except KeyboardInterrupt:
-        app.quit()
+        app = OverlayApp()
+        try:
+            app.run()
+        except KeyboardInterrupt:
+            app.quit()
+    finally:
+        release_single_instance()
 
 
 if __name__ == "__main__":
+    LOG_PATH = _configure_logging()
     main()

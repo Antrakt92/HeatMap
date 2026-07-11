@@ -1,0 +1,421 @@
+{
+  "schema_version": 1,
+  "canonical_licenses": {
+    "MIT": {
+      "path": "third_party_licenses/spdx/MIT.txt",
+      "source_url": "https://raw.githubusercontent.com/spdx/license-list-data/c4a7237ec8f4654e867546f9f409749300f1bf4c/text/MIT.txt",
+      "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+      "size": 1078
+    },
+    "MPL-2.0": {
+      "path": "third_party_licenses/spdx/MPL-2.0.txt",
+      "source_url": "https://raw.githubusercontent.com/spdx/license-list-data/c4a7237ec8f4654e867546f9f409749300f1bf4c/text/MPL-2.0.txt",
+      "sha256": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172",
+      "size": 16727
+    }
+  },
+  "packages": [
+    {
+      "package": "BlackSharp.Core",
+      "version": "1.0.7",
+      "nupkg_sha256": "4f713fe18ee7c85a7c49f28309adaa815714333326aa81fd4d4a81619ecaa0ab",
+      "license": {
+        "expression": "MPL-2.0",
+        "type": "expression",
+        "value": "MPL-2.0",
+        "path": "BlackSharp.Core.nuspec",
+        "artifact": "third_party_licenses/spdx/MPL-2.0.txt"
+      },
+      "artifacts": []
+    },
+    {
+      "package": "DiskInfoToolkit",
+      "version": "1.1.1",
+      "nupkg_sha256": "756fec316dc707d4d5ed146d0221850a763c96fe01137763aace3d8cc371c840",
+      "license": {
+        "expression": "MPL-2.0",
+        "type": "expression",
+        "value": "MPL-2.0",
+        "path": "DiskInfoToolkit.nuspec",
+        "artifact": "third_party_licenses/spdx/MPL-2.0.txt"
+      },
+      "artifacts": []
+    },
+    {
+      "package": "HidSharp",
+      "version": "2.6.4",
+      "nupkg_sha256": "cf55d4b4d7b42dc1d8496b7b592ba00d1ecd48a70bc07bd8dabd3e9976d108e7",
+      "license": {
+        "expression": "Apache-2.0",
+        "type": "file",
+        "value": "LICENSE.txt",
+        "path": "HidSharp.nuspec",
+        "artifact": "third_party_licenses/package_artifacts/b065e07179f06490c96bf946e73f821086b2f29efde395f092aea69a907eae16-LICENSE.txt"
+      },
+      "artifacts": [
+        {
+          "package_path": "LICENSE.txt",
+          "path": "third_party_licenses/package_artifacts/b065e07179f06490c96bf946e73f821086b2f29efde395f092aea69a907eae16-LICENSE.txt",
+          "sha256": "b065e07179f06490c96bf946e73f821086b2f29efde395f092aea69a907eae16",
+          "size": 10784
+        }
+      ]
+    },
+    {
+      "package": "LibreHardwareMonitorLib",
+      "version": "0.9.5",
+      "nupkg_sha256": "009261658ae522dc5571c540f624017951660db49d68f1ae777fc684d9093ee6",
+      "license": {
+        "expression": "MPL-2.0",
+        "type": "expression",
+        "value": "MPL-2.0",
+        "path": "LibreHardwareMonitorLib.nuspec",
+        "artifact": "third_party_licenses/spdx/MPL-2.0.txt"
+      },
+      "artifacts": []
+    },
+    {
+      "package": "Microsoft.Bcl.AsyncInterfaces",
+      "version": "10.0.1",
+      "nupkg_sha256": "687a2c9511a6028b7fcf51820aa4b38c0c53fe196dc4e388675fe8b62e166c66",
+      "license": {
+        "expression": "MIT",
+        "type": "expression",
+        "value": "MIT",
+        "path": "Microsoft.Bcl.AsyncInterfaces.nuspec",
+        "artifact": "third_party_licenses/spdx/MIT.txt"
+      },
+      "artifacts": [
+        {
+          "package_path": "THIRD-PARTY-NOTICES.TXT",
+          "path": "third_party_licenses/package_artifacts/6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21-THIRD-PARTY-NOTICES.TXT",
+          "sha256": "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21",
+          "size": 78041
+        }
+      ]
+    },
+    {
+      "package": "Microsoft.Bcl.HashCode",
+      "version": "6.0.0",
+      "nupkg_sha256": "f3b9b2bab0bf8cc717d5fdf6d7aee3ec54e36d9e85bd41347acae161319cbd6b",
+      "license": {
+        "expression": "MIT",
+        "type": "expression",
+        "value": "MIT",
+        "path": "Microsoft.Bcl.HashCode.nuspec",
+        "artifact": "third_party_licenses/spdx/MIT.txt"
+      },
+      "artifacts": []
+    },
+    {
+      "package": "RAMSPDToolkit-NDD",
+      "version": "1.4.2",
+      "nupkg_sha256": "57c893824a68c71538055f242586616d4205a671c300897c21b2a6f88270ce64",
+      "license": {
+        "expression": "MPL-2.0",
+        "type": "expression",
+        "value": "MPL-2.0",
+        "path": "RAMSPDToolkit-NDD.nuspec",
+        "artifact": "third_party_licenses/spdx/MPL-2.0.txt"
+      },
+      "artifacts": []
+    },
+    {
+      "package": "System.Buffers",
+      "version": "4.6.1",
+      "nupkg_sha256": "b00451e91d016fbec091ad1e361f3a7015e1d91d4047f7e48a74455b2a673d79",
+      "license": {
+        "expression": "MIT",
+        "type": "expression",
+        "value": "MIT",
+        "path": "System.Buffers.nuspec",
+        "artifact": "third_party_licenses/spdx/MIT.txt"
+      },
+      "artifacts": []
+    },
+    {
+      "package": "System.CodeDom",
+      "version": "10.0.1",
+      "nupkg_sha256": "8a5a54dab9137a958fd1ef83178ac4649833d9470d1ab7131251a8e081834e63",
+      "license": {
+        "expression": "MIT",
+        "type": "expression",
+        "value": "MIT",
+        "path": "System.CodeDom.nuspec",
+        "artifact": "third_party_licenses/spdx/MIT.txt"
+      },
+      "artifacts": [
+        {
+          "package_path": "THIRD-PARTY-NOTICES.TXT",
+          "path": "third_party_licenses/package_artifacts/6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21-THIRD-PARTY-NOTICES.TXT",
+          "sha256": "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21",
+          "size": 78041
+        }
+      ]
+    },
+    {
+      "package": "System.Collections.Immutable",
+      "version": "10.0.1",
+      "nupkg_sha256": "3836cd6220804071ef9449ca1eac814437d1fe0ecb8762df490fd96f87cd49e8",
+      "license": {
+        "expression": "MIT",
+        "type": "expression",
+        "value": "MIT",
+        "path": "System.Collections.Immutable.nuspec",
+        "artifact": "third_party_licenses/spdx/MIT.txt"
+      },
+      "artifacts": [
+        {
+          "package_path": "THIRD-PARTY-NOTICES.TXT",
+          "path": "third_party_licenses/package_artifacts/6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21-THIRD-PARTY-NOTICES.TXT",
+          "sha256": "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21",
+          "size": 78041
+        }
+      ]
+    },
+    {
+      "package": "System.Formats.Nrbf",
+      "version": "10.0.1",
+      "nupkg_sha256": "d3a9b85d19029cc5632f082e922826c9fe4543f4ac2ab5a430e5764df1aec411",
+      "license": {
+        "expression": "MIT",
+        "type": "expression",
+        "value": "MIT",
+        "path": "System.Formats.Nrbf.nuspec",
+        "artifact": "third_party_licenses/spdx/MIT.txt"
+      },
+      "artifacts": [
+        {
+          "package_path": "THIRD-PARTY-NOTICES.TXT",
+          "path": "third_party_licenses/package_artifacts/6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21-THIRD-PARTY-NOTICES.TXT",
+          "sha256": "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21",
+          "size": 78041
+        }
+      ]
+    },
+    {
+      "package": "System.IO.Pipelines",
+      "version": "10.0.1",
+      "nupkg_sha256": "dcd1d08ef3b59923e8f07abdbcc33941e289792f7fcb7529ce789d7807f9a490",
+      "license": {
+        "expression": "MIT",
+        "type": "expression",
+        "value": "MIT",
+        "path": "System.IO.Pipelines.nuspec",
+        "artifact": "third_party_licenses/spdx/MIT.txt"
+      },
+      "artifacts": [
+        {
+          "package_path": "THIRD-PARTY-NOTICES.TXT",
+          "path": "third_party_licenses/package_artifacts/6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21-THIRD-PARTY-NOTICES.TXT",
+          "sha256": "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21",
+          "size": 78041
+        }
+      ]
+    },
+    {
+      "package": "System.Memory",
+      "version": "4.6.3",
+      "nupkg_sha256": "26078aeb758c9ae985e8bf851f973026061da6a5eb4837204d0c2d2204c72955",
+      "license": {
+        "expression": "MIT",
+        "type": "expression",
+        "value": "MIT",
+        "path": "System.Memory.nuspec",
+        "artifact": "third_party_licenses/spdx/MIT.txt"
+      },
+      "artifacts": []
+    },
+    {
+      "package": "System.Numerics.Vectors",
+      "version": "4.6.1",
+      "nupkg_sha256": "2bc500a86dcb02f2032d6d877f9e2d6e9e4a79080e57239b4198679d4031f2c7",
+      "license": {
+        "expression": "MIT",
+        "type": "expression",
+        "value": "MIT",
+        "path": "System.Numerics.Vectors.nuspec",
+        "artifact": "third_party_licenses/spdx/MIT.txt"
+      },
+      "artifacts": []
+    },
+    {
+      "package": "System.Reflection.Metadata",
+      "version": "10.0.1",
+      "nupkg_sha256": "c63032a103a356e4145d2a29f54cfbfe50479396fb8ae903ae21293293901538",
+      "license": {
+        "expression": "MIT",
+        "type": "expression",
+        "value": "MIT",
+        "path": "System.Reflection.Metadata.nuspec",
+        "artifact": "third_party_licenses/spdx/MIT.txt"
+      },
+      "artifacts": [
+        {
+          "package_path": "THIRD-PARTY-NOTICES.TXT",
+          "path": "third_party_licenses/package_artifacts/6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21-THIRD-PARTY-NOTICES.TXT",
+          "sha256": "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21",
+          "size": 78041
+        }
+      ]
+    },
+    {
+      "package": "System.Resources.Extensions",
+      "version": "10.0.1",
+      "nupkg_sha256": "0303d4579dc3959dc6252b72424dc0b9caee881fc579bbbee192f3180ba0d5a3",
+      "license": {
+        "expression": "MIT",
+        "type": "expression",
+        "value": "MIT",
+        "path": "System.Resources.Extensions.nuspec",
+        "artifact": "third_party_licenses/spdx/MIT.txt"
+      },
+      "artifacts": [
+        {
+          "package_path": "THIRD-PARTY-NOTICES.TXT",
+          "path": "third_party_licenses/package_artifacts/6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21-THIRD-PARTY-NOTICES.TXT",
+          "sha256": "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21",
+          "size": 78041
+        }
+      ]
+    },
+    {
+      "package": "System.Runtime.CompilerServices.Unsafe",
+      "version": "6.1.2",
+      "nupkg_sha256": "5f6a7f53af3465f92beb6da873ebe0e496206c313313b98badee4355a6b25937",
+      "license": {
+        "expression": "MIT",
+        "type": "expression",
+        "value": "MIT",
+        "path": "System.Runtime.CompilerServices.Unsafe.nuspec",
+        "artifact": "third_party_licenses/spdx/MIT.txt"
+      },
+      "artifacts": []
+    },
+    {
+      "package": "System.Security.AccessControl",
+      "version": "6.0.0",
+      "nupkg_sha256": "a8ec961016cdaf7123c92f9eb451bcff331bb8f8c0f8ef9d8bbd7b24ff42c728",
+      "license": {
+        "expression": "MIT",
+        "type": "expression",
+        "value": "MIT",
+        "path": "System.Security.AccessControl.nuspec",
+        "artifact": "third_party_licenses/spdx/MIT.txt"
+      },
+      "artifacts": [
+        {
+          "package_path": "LICENSE.TXT",
+          "path": "third_party_licenses/package_artifacts/d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b-LICENSE.TXT",
+          "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b",
+          "size": 1139
+        },
+        {
+          "package_path": "THIRD-PARTY-NOTICES.TXT",
+          "path": "third_party_licenses/package_artifacts/a6344bfb229bc08d1071cec400eea216e307439f961c5943ec1b56d2245acb95-THIRD-PARTY-NOTICES.TXT",
+          "sha256": "a6344bfb229bc08d1071cec400eea216e307439f961c5943ec1b56d2245acb95",
+          "size": 46990
+        }
+      ]
+    },
+    {
+      "package": "System.Security.Principal.Windows",
+      "version": "5.0.0",
+      "nupkg_sha256": "081390c25f6f78592b28ada853c24514488a221fe9f9a24efaaf5373643ff3d6",
+      "license": {
+        "expression": "MIT",
+        "type": "expression",
+        "value": "MIT",
+        "path": "System.Security.Principal.Windows.nuspec",
+        "artifact": "third_party_licenses/spdx/MIT.txt"
+      },
+      "artifacts": [
+        {
+          "package_path": "LICENSE.TXT",
+          "path": "third_party_licenses/package_artifacts/d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b-LICENSE.TXT",
+          "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b",
+          "size": 1139
+        },
+        {
+          "package_path": "THIRD-PARTY-NOTICES.TXT",
+          "path": "third_party_licenses/package_artifacts/78e22d4d24a710d2a09426c09060f3448204778ed506b1da55447a6089b54fae-THIRD-PARTY-NOTICES.TXT",
+          "sha256": "78e22d4d24a710d2a09426c09060f3448204778ed506b1da55447a6089b54fae",
+          "size": 44279
+        }
+      ]
+    },
+    {
+      "package": "System.Text.Encodings.Web",
+      "version": "10.0.1",
+      "nupkg_sha256": "74137d4697be27517cfdc773c0dc4b1d88aabf38125f5afdd76f185f26f60ca3",
+      "license": {
+        "expression": "MIT",
+        "type": "expression",
+        "value": "MIT",
+        "path": "System.Text.Encodings.Web.nuspec",
+        "artifact": "third_party_licenses/spdx/MIT.txt"
+      },
+      "artifacts": [
+        {
+          "package_path": "THIRD-PARTY-NOTICES.TXT",
+          "path": "third_party_licenses/package_artifacts/6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21-THIRD-PARTY-NOTICES.TXT",
+          "sha256": "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21",
+          "size": 78041
+        }
+      ]
+    },
+    {
+      "package": "System.Text.Json",
+      "version": "10.0.1",
+      "nupkg_sha256": "59f4a03a944be0329f22bcbf1fe787c491c7ae3e84359dfe3fa436a25dd1d973",
+      "license": {
+        "expression": "MIT",
+        "type": "expression",
+        "value": "MIT",
+        "path": "System.Text.Json.nuspec",
+        "artifact": "third_party_licenses/spdx/MIT.txt"
+      },
+      "artifacts": [
+        {
+          "package_path": "THIRD-PARTY-NOTICES.TXT",
+          "path": "third_party_licenses/package_artifacts/6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21-THIRD-PARTY-NOTICES.TXT",
+          "sha256": "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21",
+          "size": 78041
+        }
+      ]
+    },
+    {
+      "package": "System.Threading.AccessControl",
+      "version": "10.0.1",
+      "nupkg_sha256": "adbf87a22d1d5a75e16a7b326f3ceec87079dfa86cd30eafd443c9ce2297c10f",
+      "license": {
+        "expression": "MIT",
+        "type": "expression",
+        "value": "MIT",
+        "path": "System.Threading.AccessControl.nuspec",
+        "artifact": "third_party_licenses/spdx/MIT.txt"
+      },
+      "artifacts": [
+        {
+          "package_path": "THIRD-PARTY-NOTICES.TXT",
+          "path": "third_party_licenses/package_artifacts/6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21-THIRD-PARTY-NOTICES.TXT",
+          "sha256": "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21",
+          "size": 78041
+        }
+      ]
+    },
+    {
+      "package": "System.Threading.Tasks.Extensions",
+      "version": "4.6.3",
+      "nupkg_sha256": "1abc92c7517a021ead7e79d0b7f3c70be75bce0fac7cfe3b38e157d32245ff1a",
+      "license": {
+        "expression": "MIT",
+        "type": "expression",
+        "value": "MIT",
+        "path": "System.Threading.Tasks.Extensions.nuspec",
+        "artifact": "third_party_licenses/spdx/MIT.txt"
+      },
+      "artifacts": []
+    }
+  ]
+}
