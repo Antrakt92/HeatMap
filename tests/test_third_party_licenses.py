@@ -1,6 +1,7 @@
 import hashlib
 import io
 import os
+import subprocess
 import sys
 import unittest
 import zipfile
@@ -48,6 +49,21 @@ class ThirdPartyLicenseTests(unittest.TestCase):
 
         self.assertIn("third_party_licenses/package_artifacts/** -text", attributes)
         self.assertIn("third_party_licenses/spdx/** -text", attributes)
+
+    def test_hash_pinned_artifact_bytes_are_exact_in_git_index(self):
+        manifest, _packages = licenses.validate_local()
+        artifacts = list(manifest["canonical_licenses"].values())
+        for package in manifest["packages"]:
+            artifacts.extend(package["artifacts"])
+
+        by_path = {artifact["path"]: artifact for artifact in artifacts}
+        for path, metadata in by_path.items():
+            tracked_bytes = subprocess.check_output(
+                ["git", "show", f":{path}"],
+                cwd=REPO_ROOT,
+            )
+            self.assertEqual(len(tracked_bytes), metadata["size"], path)
+            self.assertEqual(hashlib.sha256(tracked_bytes).hexdigest(), metadata["sha256"], path)
 
     def test_tracked_manifest_covers_every_locked_package_and_exact_local_bytes(self):
         manifest, packages = licenses.validate_local()
