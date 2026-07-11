@@ -1,0 +1,4 @@
+# These legal artifacts are hash-pinned byte-for-byte. Windows checkout must
+# not normalize their upstream line endings.
+third_party_licenses/package_artifacts/** -text
+third_party_licenses/spdx/** -text

@@ -41,6 +41,14 @@ def _nuspec(license_type="expression", value="MIT"):
 
 
 class ThirdPartyLicenseTests(unittest.TestCase):
+    def test_hash_pinned_artifacts_disable_git_text_normalization(self):
+        attributes_path = os.path.join(REPO_ROOT, ".gitattributes")
+        with open(attributes_path, "r", encoding="utf-8") as stream:
+            attributes = stream.read()
+
+        self.assertIn("third_party_licenses/package_artifacts/** -text", attributes)
+        self.assertIn("third_party_licenses/spdx/** -text", attributes)
+
     def test_tracked_manifest_covers_every_locked_package_and_exact_local_bytes(self):
         manifest, packages = licenses.validate_local()
 
