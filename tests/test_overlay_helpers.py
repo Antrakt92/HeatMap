@@ -499,11 +499,58 @@ class OverlayHelperTests(unittest.TestCase):
 
     def test_query_autostart_does_not_treat_generic_exit_one_as_absent(self):
         result = _completed(returncode=1, stderr=b"Access is denied")
-        with mock.patch.object(overlay, "_run_task_powershell", return_value=(result, None)):
+        with (
+            mock.patch.object(
+                overlay, "_run_task_powershell", return_value=(result, None)
+            ) as run,
+            mock.patch.object(overlay.time, "sleep") as sleep,
+        ):
             definition, error = overlay._query_autostart_task_definition()
 
         self.assertIsNone(definition)
         self.assertIn("Access is denied", error)
+        run.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_completed_process_message_decodes_powershell_clixml(self):
+        result = _completed(returncode=1, stderr=_task_rpc_clixml_error())
+
+        message = overlay._completed_process_message(result)
+
+        self.assertIn("Get-ScheduledTask : The remote procedure call failed.", message)
+        self.assertIn("HRESULT 0x800706be,Get-ScheduledTask", message)
+        self.assertNotIn("CLIXML", message)
+        self.assertNotIn("_x000D_", message)
+        self.assertNotIn("<Objs", message)
+
+    def test_query_autostart_retries_transient_rpc_failure(self):
+        user_id = r"DESKTOP\Dima"
+        failure = _completed(returncode=1, stderr=_task_rpc_clixml_error())
+        success = _completed(stdout=overlay._build_autostart_task_xml(user_id))
+        with (
+            mock.patch.object(
+                overlay,
+                "_run_task_powershell",
+                side_effect=[(failure, None), (success, None)],
+            ) as run,
+            mock.patch.object(overlay.time, "sleep") as sleep,
+        ):
+            definition, error = overlay._query_autostart_task_definition()
+
+        self.assertIsNone(error)
+        self.assertEqual(definition.source, overlay.AUTOSTART_SOURCE)
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_called_once()
+
+    def test_reconcile_error_message_does_not_claim_unattempted_migration(self):
+        message = overlay._format_autostart_reconcile_error(
+            False,
+            "exit code 1: Get-ScheduledTask failed",
+        )
+
+        self.assertIn("could not verify autostart security", message)
+        self.assertIn("No autostart task was changed", message)
+        self.assertNotIn("old elevated autostart task", message)
 
     def test_register_autostart_passes_xml_in_memory(self):
         result = _completed(returncode=0)
@@ -2261,6 +2308,18 @@ class _FakeInitComputer:
 
 def _completed(returncode=0, stdout=b"", stderr=b""):
     return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+def _task_rpc_clixml_error():
+    return (
+        '#< CLIXML\n<Objs Version="1.1.0.1" '
+        'xmlns="http://schemas.microsoft.com/powershell/2004/04">'
+        '<S S="Error">Get-ScheduledTask : The remote procedure call failed. '
+        '_x000D__x000A_</S>'
+        '<S S="Error">    + FullyQualifiedErrorId : HRESULT '
+        '0x800706be,Get-ScheduledTask_x000D__x000A_</S>'
+        '</Objs>'
+    ).encode("utf-8")
 
 
 def _status_app():

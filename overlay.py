@@ -473,6 +473,10 @@ RUN_AS_ADMIN_PATH = os.path.join(APP_DIR, "run_as_admin.bat")
 # Legacy registry key — cleaned up when switching to Task Scheduler
 _LEGACY_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _TASK_XML_DECL_RE = re.compile(r"^\s*<\?xml[^>]*\?>", re.IGNORECASE)
+_POWERSHELL_XML_ESCAPE_RE = re.compile(r"_x([0-9a-fA-F]{4})_")
+_TASK_QUERY_MAX_ATTEMPTS = 3
+_TASK_QUERY_RETRY_SECONDS = 0.25
+_TRANSIENT_TASK_HRESULTS = ("0x800706ba", "0x800706be")
 
 AUTOSTART_ABSENT = "absent"
 AUTOSTART_SAFE_CURRENT = "safe_current"
@@ -605,11 +609,38 @@ def _decode_output(data):
     return data.decode(errors="replace")
 
 
+def _decode_powershell_clixml(data):
+    text = _decode_output(data).strip()
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "#< CLIXML":
+        return text
+    try:
+        root = ET.fromstring("\n".join(lines[1:]))
+    except ET.ParseError:
+        return text
+
+    errors = []
+    for element in root.iter():
+        if element.tag.rsplit("}", 1)[-1] != "S" or element.get("S") != "Error":
+            continue
+        value = _POWERSHELL_XML_ESCAPE_RE.sub(
+            lambda match: chr(int(match.group(1), 16)),
+            element.text or "",
+        )
+        errors.append(value)
+    return "".join(errors).strip() or text
+
+
 def _completed_process_message(result):
-    stdout = _decode_output(getattr(result, "stdout", b"")).strip()
-    stderr = _decode_output(getattr(result, "stderr", b"")).strip()
+    stdout = _decode_powershell_clixml(getattr(result, "stdout", b""))
+    stderr = _decode_powershell_clixml(getattr(result, "stderr", b""))
     detail = stderr or stdout or "no output"
     return f"exit code {result.returncode}: {detail}"
+
+
+def _is_transient_task_query_failure(result):
+    message = _completed_process_message(result).casefold()
+    return any(hresult in message for hresult in _TRANSIENT_TASK_HRESULTS)
 
 
 def _decode_task_xml(xml_data):
@@ -860,18 +891,26 @@ def _classify_autostart_task(
 
 
 def _query_autostart_task_definition():
-    result, error = _run_task_powershell(_task_query_script())
-    if error:
-        return None, f"failed to query task: {error}"
-    if result.returncode == 3:
-        return None, None
-    if result.returncode != 0:
-        return None, _completed_process_message(result)
-    try:
-        definition = _parse_autostart_task_xml(result.stdout)
-    except ValueError as e:
-        return None, str(e)
-    return definition, None
+    for attempt in range(_TASK_QUERY_MAX_ATTEMPTS):
+        result, error = _run_task_powershell(_task_query_script())
+        if error:
+            return None, f"failed to query task: {error}"
+        if result.returncode == 3:
+            return None, None
+        if result.returncode != 0:
+            if (
+                attempt + 1 < _TASK_QUERY_MAX_ATTEMPTS
+                and _is_transient_task_query_failure(result)
+            ):
+                time.sleep(_TASK_QUERY_RETRY_SECONDS * (attempt + 1))
+                continue
+            return None, _completed_process_message(result)
+        try:
+            definition = _parse_autostart_task_xml(result.stdout)
+        except ValueError as e:
+            return None, str(e)
+        return definition, None
+    return None, "task query retry limit reached"
 
 
 def _current_user_identity():
@@ -1144,6 +1183,19 @@ def reconcile_autostart_security():
         ok, message = enable_autostart()
         return True, ok, message
     return False, False, f"Task {AUTOSTART_TASK} name collision requires manual review"
+
+
+def _format_autostart_reconcile_error(changed, message):
+    if changed:
+        return (
+            "The old elevated autostart task could not be migrated and may be disabled.\n\n"
+            f"{message}\n\nOpen HeatMap and toggle Autostart after resolving the error."
+        )
+    return (
+        "HeatMap could not verify autostart security.\n\n"
+        f"{message}\n\nNo autostart task was changed. "
+        "Open HeatMap and toggle Autostart later to retry."
+    )
 
 
 # --- Load LibreHardwareMonitor ---
@@ -3360,13 +3412,17 @@ def main():
 
     is_admin = _is_admin()
     if is_admin:
-        _changed, ok, message = reconcile_autostart_security()
+        changed, ok, message = reconcile_autostart_security()
         if not ok:
-            log.error("Failed to migrate insecure autostart task: %s", message)
+            operation = (
+                "migrate insecure autostart task"
+                if changed
+                else "verify autostart security"
+            )
+            log.error("Failed to %s: %s", operation, message)
             _show_error_message(
                 "HeatMap autostart",
-                "The old elevated autostart task could not be migrated and may be disabled.\n\n"
-                f"{message}\n\nOpen HeatMap and toggle Autostart after resolving the error.",
+                _format_autostart_reconcile_error(changed, message),
             )
     else:
         log.warning("Running without admin privileges — hardware sensors may be unavailable")
