@@ -134,7 +134,7 @@ user32.FindWindowW.restype = ctypes.wintypes.HWND
 user32.SendMessageTimeoutW.argtypes = [
     ctypes.wintypes.HWND, ctypes.c_uint, ctypes.wintypes.WPARAM,
     ctypes.wintypes.LPARAM, ctypes.c_uint, ctypes.c_uint,
-    ctypes.POINTER(ctypes.wintypes.DWORD),
+    ctypes.POINTER(ctypes.c_size_t),
 ]
 user32.SendMessageTimeoutW.restype = ctypes.wintypes.LPARAM
 user32.EnumWindows.argtypes = [ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM), ctypes.wintypes.LPARAM]
@@ -356,7 +356,7 @@ def find_desktop_worker_w():
         return None
 
     # Send Progman a 0x052C message to spawn a WorkerW behind the icons
-    result = ctypes.wintypes.DWORD(0)
+    result = ctypes.c_size_t(0)
     user32.SendMessageTimeoutW(progman, 0x052C, 0, 0, 0x0000, 1000, ctypes.byref(result))
 
     worker_w = None
@@ -1211,9 +1211,9 @@ def _check_lhm_cpu_temperature(computer, HardwareType, SensorType):
     has_cpu_temp = False
     for hw in hardware_items:
         try:
-            hw.Update()
             if hw.HardwareType != HardwareType.Cpu:
                 continue
+            hw.Update()
             checked_cpu = True
             for sensor in _iter_hardware_sensors(hw, include_subhardware=True):
                 if sensor.SensorType == SensorType.Temperature and sensor.Value is not None:
@@ -1233,8 +1233,17 @@ def _check_lhm_cpu_temperature(computer, HardwareType, SensorType):
         )
 
 
+def _close_hardware_monitor(computer):
+    if computer is not None:
+        try:
+            computer.Close()
+        except Exception:
+            log.debug("Failed to close hardware monitor", exc_info=True)
+
+
 def init_hardware_monitor():
     """Initialize LibreHardwareMonitor via pythonnet."""
+    computer = None
     try:
         import clr  # pythonnet
         dll_path = os.path.join(LIB_DIR, "LibreHardwareMonitorLib.dll")
@@ -1257,6 +1266,7 @@ def init_hardware_monitor():
         return computer
     except Exception:
         log.warning("Failed to init LibreHardwareMonitor, falling back to psutil", exc_info=True)
+        _close_hardware_monitor(computer)
         return None
 
 
@@ -2140,10 +2150,8 @@ def prepare_verified_pawnio_installer():
 # --- Main overlay class ---
 class OverlayApp:
     def __init__(self):
-        # Warm up psutil cpu_percent so first real call returns meaningful data
-        psutil.cpu_percent(interval=0)
-
-        self.computer = init_hardware_monitor()
+        # Hardware discovery runs on the sensor thread so it cannot delay Tk.
+        self.computer = None
         self.config, config_warning = load_config_result()
         self._config_status = STATUS_CONFIG_ADJUSTED if config_warning else None
         self._driver_status = (
@@ -2152,11 +2160,7 @@ class OverlayApp:
             else None
         )
         self._sensor_start_time = time.monotonic()
-        self._sensor_status = (
-            SENSOR_STATUS_PSUTIL_FALLBACK
-            if self.computer is None
-            else SENSOR_STATUS_WARMING_UP
-        )
+        self._sensor_status = SENSOR_STATUS_WARMING_UP
         self.running = True
         self._stop_event = threading.Event()
         self.sensor_data = {}
@@ -2363,6 +2367,7 @@ class OverlayApp:
         self._saved_pos = None  # saved desktop position before peek
         self._peek_monitor_area = None
         self._cursor_was_at_peek_edge = False
+        self._peek_poll_after_id = None
         self._monitor_areas = _get_monitor_areas()
         self._poll_screen_change()
         self._poll_peek_edge()
@@ -2690,8 +2695,17 @@ class OverlayApp:
                 self._schedule_embed(50)
         self.root.after(5000, self._poll_screen_change)
 
+    def _schedule_peek_poll(self):
+        after_id = getattr(self, "_peek_poll_after_id", None)
+        if after_id is not None:
+            self.root.after_cancel(after_id)
+        self._peek_poll_after_id = None
+        if self.running and self.peek_enabled and not self.topmost:
+            self._peek_poll_after_id = self.root.after(100, self._poll_peek_edge)
+
     def _poll_peek_edge(self):
-        if not self.running:
+        self._peek_poll_after_id = None
+        if not self.running or not self.peek_enabled or self.topmost:
             return
         point = POINT()
         edge_monitor = None
@@ -2711,7 +2725,7 @@ class OverlayApp:
         ):
             self._peek_show(edge_monitor)
         self._cursor_was_at_peek_edge = at_edge
-        self.root.after(100, self._poll_peek_edge)
+        self._schedule_peek_poll()
 
     def _is_desktop_at_cursor(self):
         """Check whether the desktop, rather than an application, is under the cursor."""
@@ -2910,6 +2924,7 @@ class OverlayApp:
         self._set_menu_label("peek",
             "Peek from edge: ON" if self.peek_enabled else "Peek from edge: OFF"
         )
+        self._schedule_peek_poll()
 
     def toggle_topmost(self):
         target_topmost = not self.topmost
@@ -2941,6 +2956,8 @@ class OverlayApp:
         self._set_menu_label("topmost",
             "Always on top: ON" if self.topmost else "Always on top: OFF"
         )
+        self._cursor_was_at_peek_edge = False
+        self._schedule_peek_poll()
 
     def toggle_autostart(self):
         if is_autostart_enabled():
@@ -3060,87 +3077,78 @@ class OverlayApp:
         self.menu.tk_popup(event.x_root, event.y_root)
 
     def sensor_loop(self):
+        # psutil maintains its CPU baseline per thread.
+        psutil.cpu_percent(interval=0)
+        computer = self.computer
         consecutive_errors = 0
         consecutive_reinit_hints = 0
-        next_init_retry = time.monotonic() if self.computer is None else None
-        _storage_counter = 14  # start at INTERVAL-1 so first cycle updates storage
-        _STORAGE_INTERVAL = 15  # update storage every 15 cycles (~30s)
-        while not self._stop_event.is_set():
-            try:
-                _storage_counter += 1
-                update_storage = _storage_counter >= _STORAGE_INTERVAL
-                if update_storage:
-                    _storage_counter = 0
-                with self.lock:
-                    if not self.running:
-                        break
-                    computer = self.computer
-                retry_now = time.monotonic()
-                if computer is None and next_init_retry is not None and retry_now >= next_init_retry:
-                    next_init_retry = retry_now + SENSOR_INIT_RETRY_SECONDS
-                    log.warning("Retrying unavailable hardware monitor initialization")
-                    replacement = init_hardware_monitor()
-                    with self.lock:
-                        if not self.running:
-                            if replacement is not None:
-                                try:
-                                    replacement.Close()
-                                except Exception:
-                                    log.debug("Failed to close unused hardware monitor", exc_info=True)
-                            break
-                        self.computer = replacement
-                        computer = replacement
+        next_init_retry = 0
+        next_storage_update = 0
+        needs_reinit = computer is None
+        first_initialization = computer is None
+        try:
+            while self.running and not self._stop_event.is_set():
+                if (computer is None or needs_reinit) and time.monotonic() >= next_init_retry:
                     if computer is not None:
-                        next_init_retry = None
-                # Read sensors outside lock to avoid blocking UI thread
-                data = read_sensors(computer, update_storage=update_storage)
-                warmup = (
-                    computer is not None
-                    and time.monotonic() - getattr(self, "_sensor_start_time", 0) < SENSOR_WARMUP_SECONDS
-                )
-                if warmup and data.get(SENSOR_REINIT_KEY):
-                    data[SENSOR_STATUS_KEY] = SENSOR_STATUS_WARMING_UP
-                elif computer is not None and not warmup and data.get("cpu_temp") is None:
-                    data[SENSOR_STATUS_KEY] = SENSOR_STATUS_CPU_UNAVAILABLE
-                with self.lock:
-                    self.sensor_data = data
-                consecutive_errors = 0
-                if computer is not None and data.get(SENSOR_REINIT_KEY):
-                    consecutive_reinit_hints += 1
-                    reinit_threshold = 1 if warmup else 3
-                    if consecutive_reinit_hints >= reinit_threshold:
-                        log.warning(
-                            "Reinitializing hardware monitor after %d incomplete sensor samples",
-                            consecutive_reinit_hints,
-                        )
-                        with self.lock:
-                            try:
-                                self.computer.Close()
-                            except Exception:
-                                log.debug("Failed to close hardware monitor", exc_info=True)
-                            self.computer = init_hardware_monitor()
-                            computer = self.computer
-                        consecutive_reinit_hints = 0
-                else:
-                    consecutive_reinit_hints = 0
-            except Exception as e:
-                consecutive_errors += 1
-                consecutive_reinit_hints = 0
-                log.error("Sensor read error: %s", e, exc_info=True)
-                with self.lock:
-                    self.sensor_data = {"error": str(e)}
-                # After 3 consecutive failures, try to reinitialize the hardware monitor
-                if consecutive_errors >= 3 and computer is not None:
-                    log.warning("Reinitializing hardware monitor after %d errors", consecutive_errors)
+                        log.warning("Reinitializing hardware monitor after incomplete sensor samples or read errors")
+                    elif not first_initialization:
+                        log.warning("Retrying unavailable hardware monitor initialization")
                     with self.lock:
-                        try:
-                            self.computer.Close()
-                        except Exception:
-                            log.debug("Failed to close hardware monitor", exc_info=True)
-                        self.computer = init_hardware_monitor()
-                        computer = self.computer
+                        self.computer = None
+                    # Close/Open can take seconds. Only this worker owns the handle;
+                    # never hold the UI data lock during native hardware operations.
+                    _close_hardware_monitor(computer)
+                    computer = None
+                    if not self.running or self._stop_event.is_set():
+                        break
+                    computer = init_hardware_monitor()
+                    now = time.monotonic()
+                    next_init_retry = now + SENSOR_INIT_RETRY_SECONDS
+                    next_storage_update = 0
+                    if first_initialization:
+                        self._sensor_start_time = now
+                        first_initialization = False
+                    if not self.running or self._stop_event.is_set():
+                        break
+                    with self.lock:
+                        self.computer = computer
+                    needs_reinit = False
+                    consecutive_errors = consecutive_reinit_hints = 0
+                try:
+                    update_storage = time.monotonic() >= next_storage_update
+                    data = read_sensors(computer, update_storage=update_storage)
+                    if update_storage:
+                        next_storage_update = time.monotonic() + 30
+                    warmup = (
+                        computer is not None
+                        and time.monotonic() - self._sensor_start_time < SENSOR_WARMUP_SECONDS
+                    )
+                    if warmup and data.get(SENSOR_REINIT_KEY):
+                        data[SENSOR_STATUS_KEY] = SENSOR_STATUS_WARMING_UP
+                    elif computer is not None and not warmup and data.get("cpu_temp") is None:
+                        data[SENSOR_STATUS_KEY] = SENSOR_STATUS_CPU_UNAVAILABLE
+                    with self.lock:
+                        self.sensor_data = data
                     consecutive_errors = 0
-            self._stop_event.wait(2)
+                    if computer is not None and data.get(SENSOR_REINIT_KEY):
+                        consecutive_reinit_hints += 1
+                        needs_reinit = consecutive_reinit_hints >= (1 if warmup else 3)
+                    else:
+                        consecutive_reinit_hints = 0
+                        needs_reinit = False
+                except Exception as e:
+                    consecutive_errors += 1
+                    consecutive_reinit_hints = 0
+                    log.error("Sensor read error: %s", e, exc_info=True)
+                    with self.lock:
+                        self.sensor_data = {"error": str(e)}
+                    needs_reinit = consecutive_errors >= 3
+                self._stop_event.wait(2)
+        finally:
+            # The worker closes its own handle once native calls return.
+            _close_hardware_monitor(computer)
+            with self.lock:
+                self.computer = None
 
     def update_ui(self):
         if not self.running:
@@ -3369,15 +3377,8 @@ class OverlayApp:
             self.sensor_thread.join(timeout=5)
         except Exception:
             log.debug("Failed to join sensor thread", exc_info=True)
-        # Close hardware monitor only after the sensor thread has stopped using it.
-        if self.computer is not None and not self.sensor_thread.is_alive():
-            try:
-                self.computer.Close()
-            except Exception:
-                log.debug("Failed to close hardware monitor", exc_info=True)
-            self.computer = None
-        elif self.computer is not None:
-            log.warning("Sensor thread did not stop in time; leaving hardware monitor open")
+        if self.sensor_thread.is_alive():
+            log.warning("Sensor thread did not stop in time; hardware cleanup remains with the worker")
         self.root.destroy()
         release_single_instance()
 

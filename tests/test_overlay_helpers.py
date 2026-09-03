@@ -1349,7 +1349,7 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["cpu_load"], 35)
         self.assertTrue(any("Bad GPU" in message for message in logs.output))
 
-    def test_init_hardware_monitor_keeps_opened_computer_when_sanity_check_block_fails(self):
+    def test_init_hardware_monitor_sanity_check_skips_non_cpu_hardware(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
         clr_module = ModuleType("clr")
         clr_module.AddReference = lambda _path: None
@@ -1366,13 +1366,14 @@ class OverlayHelperTests(unittest.TestCase):
         with (
             mock.patch.dict(sys.modules, modules),
             mock.patch.object(overlay.os.path, "exists", return_value=True),
-            self.assertLogs("HeatMap", level="WARNING") as logs,
+            self.assertNoLogs("HeatMap", level="WARNING"),
         ):
             result = overlay.init_hardware_monitor()
 
         self.assertIs(result, computer)
         self.assertTrue(computer.opened)
-        self.assertTrue(any("Bad GPU" in message for message in logs.output))
+        self.assertEqual(bad_gpu.update_calls, 0)
+        self.assertEqual(cpu.update_calls, 1)
 
     def test_init_hardware_monitor_keeps_opened_computer_when_cpu_sanity_check_fails(self):
         modules, HardwareType, _SensorType = _fake_lhm_modules()
@@ -1410,6 +1411,7 @@ class OverlayHelperTests(unittest.TestCase):
             result = overlay.init_hardware_monitor()
 
         self.assertIsNone(result)
+        self.assertTrue(computer.closed)
         self.assertTrue(any("Failed to init LibreHardwareMonitor" in message for message in logs.output))
 
     def test_runtime_status_hides_ok_and_config_priorities_override_sensor_warning(self):
@@ -1813,6 +1815,8 @@ class OverlayHelperTests(unittest.TestCase):
 
     def test_toggle_topmost_from_peek_restores_visible_alpha(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.running = True
+        app.peek_enabled = True
         app.topmost = False
         app.peek_visible = True
         app._peek_animating = False
@@ -1857,6 +1861,7 @@ class OverlayHelperTests(unittest.TestCase):
 
     def test_toggle_peek_off_restores_saved_position_and_persists_it(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.running = True
         app.config = {"peek_enabled": True, "x": 50, "y": 60}
         app.peek_enabled = True
         app.peek_visible = True
@@ -1888,6 +1893,7 @@ class OverlayHelperTests(unittest.TestCase):
 
     def test_toggle_peek_on_rearms_cursor_edge(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.running = True
         app.config = {"peek_enabled": False, "x": 50, "y": 60}
         app.peek_enabled = False
         app.peek_visible = False
@@ -1984,7 +1990,7 @@ class OverlayHelperTests(unittest.TestCase):
         app.computer = old_computer
         app.running = True
         app.lock = threading.Lock()
-        app._stop_event = _LoopStopEvent(iterations=3)
+        app._stop_event = _LoopStopEvent(iterations=4)
         app._sensor_start_time = 0
 
         data = _sample_data(status=overlay.SENSOR_STATUS_PARTIAL)
@@ -1998,9 +2004,10 @@ class OverlayHelperTests(unittest.TestCase):
         ):
             app.sensor_loop()
 
-        self.assertEqual(read_sensors.call_count, 3)
+        self.assertEqual(read_sensors.call_count, 4)
         self.assertTrue(old_computer.closed)
-        self.assertIs(app.computer, new_computer)
+        self.assertTrue(new_computer.closed)
+        self.assertIsNone(app.computer)
         init_monitor.assert_called_once_with()
         self.assertTrue(any("incomplete sensor samples" in message for message in logs.output))
 
@@ -2018,23 +2025,23 @@ class OverlayHelperTests(unittest.TestCase):
             mock.patch.object(overlay, "init_hardware_monitor", return_value=new_computer) as init_monitor,
             mock.patch.object(overlay, "read_sensors", return_value=data) as read_sensors,
             mock.patch.object(overlay.time, "monotonic", return_value=overlay.SENSOR_WARMUP_SECONDS + 1),
-            self.assertLogs("HeatMap", level="WARNING") as logs,
+            self.assertNoLogs("HeatMap", level="WARNING"),
         ):
             app.sensor_loop()
 
         init_monitor.assert_called_once_with()
         read_sensors.assert_called_once_with(new_computer, update_storage=True)
-        self.assertIs(app.computer, new_computer)
-        self.assertTrue(any("Retrying unavailable hardware monitor" in message for message in logs.output))
+        self.assertTrue(new_computer.closed)
+        self.assertIsNone(app.computer)
 
-    def test_sensor_loop_reinitializes_immediately_during_warmup(self):
+    def test_sensor_loop_schedules_reinitialization_during_warmup(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
         old_computer = _CloseableComputer()
         new_computer = _CloseableComputer()
         app.computer = old_computer
         app.running = True
         app.lock = threading.Lock()
-        app._stop_event = _LoopStopEvent(iterations=1)
+        app._stop_event = _LoopStopEvent(iterations=2)
         app._sensor_start_time = 100
 
         data = _sample_data(status=overlay.SENSOR_STATUS_PARTIAL)
@@ -2048,9 +2055,10 @@ class OverlayHelperTests(unittest.TestCase):
         ):
             app.sensor_loop()
 
-        self.assertEqual(read_sensors.call_count, 1)
+        self.assertEqual(read_sensors.call_count, 2)
         self.assertTrue(old_computer.closed)
-        self.assertIs(app.computer, new_computer)
+        self.assertTrue(new_computer.closed)
+        self.assertIsNone(app.computer)
         init_monitor.assert_called_once_with()
         self.assertEqual(app.sensor_data[overlay.SENSOR_STATUS_KEY], overlay.SENSOR_STATUS_WARMING_UP)
         self.assertTrue(any("incomplete sensor samples" in message for message in logs.output))
@@ -2294,6 +2302,7 @@ class _FakeInitComputer:
         self.Hardware = hardware
         self._open_error = open_error
         self.opened = False
+        self.closed = False
         self.IsCpuEnabled = False
         self.IsGpuEnabled = False
         self.IsStorageEnabled = False
@@ -2304,6 +2313,9 @@ class _FakeInitComputer:
         if self._open_error is not None:
             raise self._open_error
         self.opened = True
+
+    def Close(self):
+        self.closed = True
 
 
 def _completed(returncode=0, stdout=b"", stderr=b""):
