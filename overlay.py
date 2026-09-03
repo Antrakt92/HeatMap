@@ -390,17 +390,20 @@ def embed_in_desktop(hwnd):
     # When Progman owns SHELLDLL_DefView, a newly parented child otherwise may
     # sit above desktop icons. Keep the overlay at the bottom of the host's
     # child z-order; a dedicated wallpaper WorkerW is safe with the same rule.
-    return bool(
-        user32.SetWindowPos(
-            hwnd,
-            HWND_BOTTOM,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        )
-    )
+    if not user32.SetWindowPos(
+        hwnd,
+        HWND_BOTTOM,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+    ):
+        # A failed z-order change does not undo SetParent. Keep tracking a
+        # retained host so Peek/Topmost still detach the window before moving it.
+        log.warning("Failed to lower overlay within its desktop host")
+        return bool(user32.IsWindow(worker_w) and user32.GetParent(hwnd) == worker_w)
+    return True
 
 
 def _set_parent_verified(hwnd, expected_parent):
@@ -1164,25 +1167,35 @@ def disable_autostart():
     return True, "Autostart disabled"
 
 
+@dataclass(frozen=True)
+class AutostartReconcileResult:
+    changed: bool
+    ok: bool
+    message: str
+    enabled: bool | None
+
+
 def reconcile_autostart_security():
     """Fail-closed migration of legacy HighestAvailable HeatMap tasks."""
     user_id, accepted_identities, identity_error = _resolve_autostart_identity()
     if identity_error:
-        return False, False, identity_error
+        return AutostartReconcileResult(False, False, identity_error, None)
     definition, error = _query_autostart_task_definition()
     if error or definition is None:
-        return False, not error, error or "no task"
+        return AutostartReconcileResult(False, not error, error or "no task", None if error else False)
     classification = _classify_autostart_task(
         definition,
         user_id,
         accepted_trigger_user_ids=accepted_identities,
     )
     if classification == AUTOSTART_SAFE_CURRENT:
-        return False, True, "safe task already current"
+        return AutostartReconcileResult(False, True, "safe task already current", True)
     if classification in (AUTOSTART_LEGACY_UNSAFE, AUTOSTART_STALE_HEATMAP):
         ok, message = enable_autostart()
-        return True, ok, message
-    return False, False, f"Task {AUTOSTART_TASK} name collision requires manual review"
+        return AutostartReconcileResult(True, ok, message, True if ok else None)
+    return AutostartReconcileResult(
+        False, False, f"Task {AUTOSTART_TASK} name collision requires manual review", None
+    )
 
 
 def _format_autostart_reconcile_error(changed, message):
@@ -1270,14 +1283,22 @@ def init_hardware_monitor():
         return None
 
 
-def _safe_round(value):
-    """Convert sensor value to rounded int, returning None for invalid values."""
+def _safe_round(value, minimum=None, maximum=None):
+    """Validate raw sensor bounds before rounding so invalid values cannot round into range."""
     if value is None:
         return None
     v = float(value)
     if not math.isfinite(v):
         return None
+    if minimum is not None and v < minimum:
+        return None
+    if maximum is not None and v > maximum:
+        return None
     return round(v)
+
+
+def _safe_percentage(value):
+    return _safe_round(value, minimum=0, maximum=100)
 
 
 _MAX_VALID_HARDWARE_TEMP_C = 150
@@ -1390,14 +1411,17 @@ def _select_cpu_fan(fan_sensors):
 def _select_cpu_fan_control(control_sensors, fan_name, has_cpu_fan):
     if not control_sensors:
         return None
-    for name, val in control_sensors:
-        if _is_primary_cpu_fan_name(name):
-            return val
     fan_idx = _fan_number(fan_name or "")
+    for name, val in control_sensors:
+        if _is_primary_cpu_fan_name(name) and (
+            fan_idx is None or _fan_number(name) in (None, fan_idx)
+        ):
+            return val
     if fan_idx:
         for name, val in control_sensors:
             if _fan_number(name) == fan_idx:
                 return val
+        return None
     for name, val in control_sensors:
         if _fan_number(name) == "1":
             return val
@@ -1492,6 +1516,9 @@ def _ram_load_priority(hardware_name, sensor_name):
 
 
 def _apply_ranked_sensor_candidates(data, candidates):
+    cpu_temps = candidates["cpu_temp"]
+    if cpu_temps:
+        data["cpu_temp"] = max(cpu_temps)[-1]
     gpu_samples = candidates["gpus"]
     if gpu_samples:
         _rank, selected = max(gpu_samples, key=lambda item: item[0])
@@ -1528,18 +1555,16 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
                 name = sensor.Name.lower()
                 val = _safe_temperature(sensor.Value)
                 if val is not None:
-                    if "tctl" in name or "tdie" in name or "package" in name:
-                        data["cpu_temp"] = val
-                    elif data["cpu_temp"] is None:
-                        data["cpu_temp"] = val
+                    preferred = any(marker in name for marker in ("tctl", "tdie", "package"))
+                    candidates["cpu_temp"].append((preferred, val))
             elif sensor.SensorType == SensorType.Load:
                 if "total" in sensor.Name.lower():
-                    val = _safe_round(sensor.Value)
+                    val = _safe_percentage(sensor.Value)
                     if val is not None:
                         data["cpu_load"] = val
             elif sensor.SensorType == SensorType.Clock:
                 if "core" in sensor.Name.lower():
-                    val = _safe_round(sensor.Value)
+                    val = _safe_round(sensor.Value, minimum=0)
                     if val is not None and val > 0:
                         core_clocks.append(val)
         if core_clocks:
@@ -1569,38 +1594,38 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
             elif sensor.SensorType == SensorType.Load:
                 priority = _gpu_load_priority(sensor.Name)
                 if priority is not None:
-                    val = _safe_round(sensor.Value)
+                    val = _safe_percentage(sensor.Value)
                     if val is not None:
                         gpu_load_candidates.append(
                             (priority, _normalized_sensor_name(sensor.Name), val)
                         )
             elif sensor.SensorType == SensorType.Fan:
-                val = _safe_round(sensor.Value)
+                val = _safe_round(sensor.Value, minimum=0)
                 if val is not None:
                     gpu_sample["gpu_fan"] = val
             elif sensor.SensorType == SensorType.Control:
-                val = _safe_round(sensor.Value)
+                val = _safe_percentage(sensor.Value)
                 if val is not None:
                     gpu_sample["gpu_fan_pct"] = val
             elif sensor.SensorType == SensorType.Clock:
                 if "core" in sensor.Name.lower():
-                    val = _safe_round(sensor.Value)
+                    val = _safe_round(sensor.Value, minimum=0)
                     if val is not None:
                         gpu_sample["gpu_clock"] = val
             elif sensor.SensorType == SensorType.SmallData:
                 if _is_gpu_memory_used_sensor(sensor.Name):
-                    val = _safe_round(sensor.Value)
-                    if val is not None:
-                        gpu_mem_used = float(sensor.Value)
+                    value = sensor.Value
+                    if _safe_round(value, minimum=0) is not None:
+                        gpu_mem_used = float(value)
                 elif _is_gpu_memory_total_sensor(sensor.Name):
-                    val = _safe_round(sensor.Value)
-                    if val is not None:
-                        gpu_mem_total = float(sensor.Value)
+                    value = sensor.Value
+                    if _safe_round(value, minimum=0) is not None:
+                        gpu_mem_total = float(value)
         _select_gpu_display_temperature(gpu_sample)
         selected_load = max(gpu_load_candidates) if gpu_load_candidates else None
         if selected_load:
             gpu_sample["gpu_load"] = selected_load[-1]
-        if gpu_mem_used is not None and gpu_mem_total and gpu_mem_total > 0:
+        if gpu_mem_used is not None and gpu_mem_total and 0 <= gpu_mem_used <= gpu_mem_total:
             gpu_sample["gpu_vram_pct"] = round(gpu_mem_used / gpu_mem_total * 100)
             gpu_sample["gpu_vram_used_gb"] = round(gpu_mem_used / 1024, 1)
             gpu_sample["gpu_vram_total_gb"] = round(gpu_mem_total / 1024, 1)
@@ -1631,16 +1656,20 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
                     disk_temp = val
             elif sensor.SensorType == SensorType.Load:
                 if "used space" in sensor.Name.lower():
-                    val = _safe_round(sensor.Value)
+                    val = _safe_percentage(sensor.Value)
                     if val is not None:
                         disk_used = val
             elif sensor.SensorType == SensorType.Level:
                 name = sensor.Name.lower()
-                val = _safe_round(sensor.Value)
-                if val is not None:
-                    if name == "life" or "remaining life" in name:
+                if name == "life" or "remaining life" in name:
+                    val = _safe_percentage(sensor.Value)
+                    if val is not None:
                         disk_life = val
-                    elif "percentage used" in name and disk_life is None:
+                elif "percentage used" in name and disk_life is None:
+                    # NVMe wear may exceed 100%; exhausted endurance means no
+                    # estimated life remains, not an invalid percentage sample.
+                    val = _safe_round(sensor.Value, minimum=0)
+                    if val is not None:
                         disk_life = max(0, min(100, 100 - val))
         # Always show storage devices — even without sensors
         name = re.sub(
@@ -1662,11 +1691,11 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
         for sensor in _iter_hardware_sensors(hw, include_subhardware=True):
             name = sensor.Name.lower()
             if sensor.SensorType == SensorType.Fan:
-                val = _safe_round(sensor.Value)
+                val = _safe_round(sensor.Value, minimum=0)
                 if val is not None:
                     fan_sensors.append((name, val))
             elif sensor.SensorType == SensorType.Control:
-                val = _safe_round(sensor.Value)
+                val = _safe_percentage(sensor.Value)
                 if val is not None:
                     control_sensors.append((name, val))
             elif sensor.SensorType == SensorType.Temperature:
@@ -1695,7 +1724,7 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
             if sensor.SensorType == SensorType.Load:
                 priority = _ram_load_priority(hw.Name, sensor.Name)
                 if priority is not None:
-                    val = _safe_round(sensor.Value)
+                    val = _safe_percentage(sensor.Value)
                     if val is not None:
                         candidates["ram_pct"].append((
                             priority,
@@ -1714,7 +1743,7 @@ def read_sensors(computer, update_storage=True):
                         Disk data will retain previous values from the last full update.
     """
     data = _empty_sensor_data()
-    candidates = {"gpus": [], "ram_pct": []}
+    candidates = {"cpu_temp": [], "gpus": [], "ram_pct": []}
 
     if computer is None:
         data[SENSOR_STATUS_KEY] = SENSOR_STATUS_PSUTIL_FALLBACK
@@ -1732,6 +1761,11 @@ def read_sensors(computer, update_storage=True):
         hardware_items = list(computer.Hardware)
     except Exception:
         log.warning("Failed to enumerate LibreHardwareMonitor hardware, falling back to psutil", exc_info=True)
+        data[SENSOR_STATUS_KEY] = SENSOR_STATUS_PSUTIL_FALLBACK
+        data[SENSOR_REINIT_KEY] = True
+        return _apply_psutil_fallbacks(data)
+
+    if not hardware_items:
         data[SENSOR_STATUS_KEY] = SENSOR_STATUS_PSUTIL_FALLBACK
         data[SENSOR_REINIT_KEY] = True
         return _apply_psutil_fallbacks(data)
@@ -2149,7 +2183,7 @@ def prepare_verified_pawnio_installer():
 
 # --- Main overlay class ---
 class OverlayApp:
-    def __init__(self):
+    def __init__(self, autostart_result=None):
         # Hardware discovery runs on the sensor thread so it cannot delay Tk.
         self.computer = None
         self.config, config_warning = load_config_result()
@@ -2333,8 +2367,13 @@ class OverlayApp:
                            font=("Segoe UI", 9))
         self._menu_idx = {}  # label_key -> menu index
         self._add_menu_item("topmost", "Always on top: OFF", self.toggle_topmost)
+        autostart_enabled = (
+            is_autostart_enabled() if autostart_result is None else autostart_result.enabled
+        )
         self._add_menu_item("autostart",
-            "Autostart: ON (UAC)" if is_autostart_enabled() else "Autostart: OFF",
+            "Autostart: ERROR" if autostart_enabled is None else (
+                "Autostart: ON (UAC)" if autostart_enabled else "Autostart: OFF"
+            ),
             self.toggle_autostart)
         self._add_menu_item("alerts",
             "Alerts: ON" if self.alerts_enabled else "Alerts: OFF",
@@ -2355,7 +2394,7 @@ class OverlayApp:
         self.menu.add_separator()
         self.menu.add_command(label="Open log file", command=self.open_log_file)
         self.menu.add_command(label="Copy log path", command=self.copy_log_path)
-        self.menu.add_command(label="Copy diagnostics", command=self.copy_diagnostics)
+        self._add_menu_item("diagnostics", "Copy diagnostics", self.copy_diagnostics)
         self.menu.add_command(label="Reset peaks", command=self.reset_peaks)
         self.menu.add_separator()
         self.menu.add_command(label="Close", command=self.quit)
@@ -2486,22 +2525,59 @@ class OverlayApp:
             _show_error_message("HeatMap Log", f"Failed to copy log path:\n{e}\n\nLog path:\n{LOG_PATH}")
 
     def copy_diagnostics(self):
-        computer = None
+        if not self.running or getattr(self, "_diagnostics_running", False):
+            return
+        self._diagnostics_running = True
+        self._set_menu_label("diagnostics", "Collecting diagnostics...")
+        results = queue.Queue(maxsize=1)
+        self._diagnostics_results = results
+
+        def worker():
+            computer = None
+            result = None
+            try:
+                if self._stop_event.is_set():
+                    return
+                computer = init_hardware_monitor()
+                if self._stop_event.is_set():
+                    return
+                data = read_sensors(computer)
+                if not self._stop_event.is_set():
+                    result = (True, build_sensor_diagnostics(computer, data))
+            except Exception as e:
+                log.warning("Failed to collect diagnostics: %s", e, exc_info=True)
+                result = (False, str(e))
+            finally:
+                _close_hardware_monitor(computer)
+            if result is not None and not self._stop_event.is_set():
+                results.put_nowait(result)
+
+        self._diagnostics_thread = threading.Thread(target=worker, daemon=True)
         try:
-            computer = init_hardware_monitor()
-            data = read_sensors(computer)
-            text = build_sensor_diagnostics(computer, data)
-            self.root.clipboard_clear()
-            self.root.clipboard_append(text)
+            self._diagnostics_thread.start()
         except Exception as e:
-            log.warning("Failed to copy diagnostics: %s", e, exc_info=True)
-            _show_error_message("HeatMap Diagnostics", f"Failed to copy diagnostics:\n{e}")
-        finally:
-            if computer is not None:
-                try:
-                    computer.Close()
-                except Exception:
-                    log.debug("Failed to close diagnostics hardware monitor", exc_info=True)
+            results.put_nowait((False, str(e)))
+        self.root.after(100, self._poll_diagnostics)
+
+    def _poll_diagnostics(self):
+        if not self.running or not getattr(self, "_diagnostics_running", False):
+            return
+        try:
+            ok, detail = self._diagnostics_results.get_nowait()
+        except queue.Empty:
+            self.root.after(100, self._poll_diagnostics)
+            return
+        self._diagnostics_running = False
+        self._set_menu_label("diagnostics", "Copy diagnostics")
+        if ok:
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(detail)
+                return
+            except Exception as e:
+                log.warning("Failed to copy diagnostics: %s", e, exc_info=True)
+                detail = str(e)
+        _show_error_message("HeatMap Diagnostics", f"Failed to copy diagnostics:\n{detail}")
 
     def prepare_pawnio_repair(self):
         if getattr(self, "_pawnio_repair_running", False):
@@ -3371,14 +3447,23 @@ class OverlayApp:
         self.config["gpu_fan_max_rpm"] = self._GPU_FAN_MAX_RPM
         self.config["cpu_fan_max_rpm"] = self._CPU_FAN_MAX_RPM
         self._save_config(update_status=False)
-        # Wait for sensor thread to finish before closing hardware monitor
-        # _stop_event is already set above; join with timeout to avoid hanging
-        try:
-            self.sensor_thread.join(timeout=5)
-        except Exception:
-            log.debug("Failed to join sensor thread", exc_info=True)
-        if self.sensor_thread.is_alive():
-            log.warning("Sensor thread did not stop in time; hardware cleanup remains with the worker")
+        # Both workers own their monitors; share one deadline for their cleanup.
+        deadline = time.monotonic() + 5
+        for name, worker in (
+            ("Sensor", getattr(self, "sensor_thread", None)),
+            ("Diagnostics", getattr(self, "_diagnostics_thread", None)),
+        ):
+            if worker is None or not worker.is_alive():
+                continue
+            try:
+                worker.join(timeout=max(0.0, deadline - time.monotonic()))
+            except RuntimeError:
+                log.debug("Failed to join %s thread", name.lower(), exc_info=True)
+            if worker.is_alive():
+                log.warning(
+                    "%s thread did not stop in time; hardware cleanup remains with the worker",
+                    name,
+                )
         self.root.destroy()
         release_single_instance()
 
@@ -3411,25 +3496,26 @@ def main():
         log.warning("Another HeatMap instance is already running")
         return
 
-    is_admin = _is_admin()
-    if is_admin:
-        changed, ok, message = reconcile_autostart_security()
-        if not ok:
-            operation = (
-                "migrate insecure autostart task"
-                if changed
-                else "verify autostart security"
-            )
-            log.error("Failed to %s: %s", operation, message)
-            _show_error_message(
-                "HeatMap autostart",
-                _format_autostart_reconcile_error(changed, message),
-            )
-    else:
-        log.warning("Running without admin privileges — hardware sensors may be unavailable")
-
     try:
-        app = OverlayApp()
+        autostart_result = None
+        if _is_admin():
+            autostart_result = reconcile_autostart_security()
+            if not autostart_result.ok:
+                operation = (
+                    "migrate insecure autostart task"
+                    if autostart_result.changed
+                    else "verify autostart security"
+                )
+                log.error("Failed to %s: %s", operation, autostart_result.message)
+                _show_error_message(
+                    "HeatMap autostart",
+                    _format_autostart_reconcile_error(
+                        autostart_result.changed, autostart_result.message
+                    ),
+                )
+        else:
+            log.warning("Running without admin privileges — hardware sensors may be unavailable")
+        app = OverlayApp(autostart_result=autostart_result)
         try:
             app.run()
         except KeyboardInterrupt:

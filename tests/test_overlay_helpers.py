@@ -1754,6 +1754,43 @@ class OverlayHelperTests(unittest.TestCase):
         set_parent.assert_called_once_with(100, 200)
         set_window_pos.assert_called_once_with(100, overlay.HWND_BOTTOM, 0, 0, 0, 0, expected_flags)
 
+    def test_failed_lowering_keeps_native_parent_tracked_for_later_detach(self):
+        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.running = True
+        app.topmost = False
+        app.peek_visible = False
+        app._peek_animating = False
+        app.embedded = False
+        app.root = _FakeRoot()
+        app._embed_after_id = None
+        app._get_hwnd = lambda: 100
+        with (
+            mock.patch.object(overlay, "find_desktop_worker_w", return_value=200),
+            mock.patch.object(overlay, "_set_parent_verified", return_value=True) as set_parent,
+            mock.patch.object(overlay, "set_tool_window"),
+            mock.patch.object(overlay.user32, "SetWindowPos", return_value=False),
+            mock.patch.object(overlay.user32, "GetParent", return_value=200),
+            mock.patch.object(overlay.user32, "IsWindow", return_value=True),
+            mock.patch.object(overlay.log, "warning"),
+        ):
+            app._embed_into_desktop()
+            self.assertTrue(app.embedded)
+            self.assertTrue(app._detach_from_desktop())
+
+        self.assertFalse(app.embedded)
+        self.assertEqual(set_parent.call_args_list, [mock.call(100, 200), mock.call(100, 0)])
+
+    def test_failed_lowering_does_not_claim_a_lost_desktop_parent(self):
+        with (
+            mock.patch.object(overlay, "find_desktop_worker_w", return_value=200),
+            mock.patch.object(overlay, "_set_parent_verified", return_value=True),
+            mock.patch.object(overlay.user32, "SetWindowPos", return_value=False),
+            mock.patch.object(overlay.user32, "GetParent", return_value=0),
+            mock.patch.object(overlay.user32, "IsWindow", return_value=False),
+            mock.patch.object(overlay.log, "warning"),
+        ):
+            self.assertFalse(overlay.embed_in_desktop(100))
+
     def test_stale_embed_callback_is_ignored_after_transition_cancel(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
         app.running = True
@@ -1937,6 +1974,9 @@ class OverlayHelperTests(unittest.TestCase):
 
     def test_copy_diagnostics_uses_fresh_monitor_and_clipboard(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.running = True
+        app._stop_event = threading.Event()
+        app._set_menu_label = mock.Mock()
         app.root = _FakeRoot()
         computer = _CloseableComputer()
 
@@ -1946,6 +1986,8 @@ class OverlayHelperTests(unittest.TestCase):
             mock.patch.object(overlay, "build_sensor_diagnostics", return_value="diagnostic dump") as build,
         ):
             app.copy_diagnostics()
+            app._diagnostics_thread.join(3)
+            app._poll_diagnostics()
 
         init_monitor.assert_called_once_with()
         read_sensors.assert_called_once_with(computer)

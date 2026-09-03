@@ -39,31 +39,6 @@
 - Menu state совпадает с native parent/topmost state после каждого transition, а
   display removal не оставляет invisible live process или stale saved position.
 
-## P3 - Убрать синхронное открытие отдельного monitor из Copy diagnostics
-
-Файл: `overlay.py`, `OverlayApp.copy_diagnostics`.
-
-Команда открывает новый LHM Computer и читает все sensors на потоке Tk. Медленный
-driver может задержать интерфейс на время диагностики. Обычный запуск и фоновое
-восстановление уже используют sensor worker, но этот ручной путь остаётся отдельным.
-
-Что сделать: собирать diagnostic snapshot вне Tk, передавать результат в главный
-поток для записи в clipboard; проверить закрытие окна во время сбора и очистку
-отдельного Computer. Не обращаться к worker-owned Computer из второго потока.
-
-## P3 - Повторная проверка Task Scheduler при старте
-
-Файл: `overlay.py`, `main`, `reconcile_autostart_security`, `OverlayApp.__init__`.
-
-Elevated startup сначала проверяет/мигрирует autostart task, затем отдельно
-запрашивает его состояние для меню. Каждый запрос запускает PowerShell. В текущей
-локальной проверке один вызов `is_autostart_enabled` занял 0,881 секунды; время
-зависит от состояния Windows и не является замером загрузки ОС.
-
-Что сделать: возвращать проверенное состояние вместе с результатом reconciliation
-и использовать его при создании меню. Сохранить fail-closed миграцию, проверку
-interactive/elevated identity и свежую проверку перед ручным изменением задачи.
-
 ## Parking - Атомарно обновить LibreHardwareMonitor и PawnIO до следующего bundle
 
 Promote when: появляется конкретная hardware fix/security reason для upgrade либо
