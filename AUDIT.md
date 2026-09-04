@@ -4,6 +4,22 @@
 а не сохраняются как история сессий. Приоритет отражает impact и likelihood, а не
 размер изменения.
 
+## P2 - Подтвердить Show Desktop на реальной оболочке Windows после перезапуска
+
+Файл: `overlay.py`; процедура: `docs/audit-2026-09-05.md`.
+
+Автотесты покрывают панель задач, сохранение позиции, отменённые анимации,
+tray-focused desktop и размещение ниже приложений. Отдельный native smoke
+использует настоящие временные Win32-окна: восстановление после минимизации,
+порядок окон, отсутствие захвата фокуса, успешный DWM attribute setter.
+Он не переключает Explorer в Show Desktop и не заменяет проверку пользовательского
+сценария. Нужны наведение и повторные клики на кнопке возле часов, Win+D во время
+Peek, Peek OFF, auto-hide taskbar и возврат в приложение.
+
+В независимом fallback окно нельзя гарантированно разместить под дочерними
+значками Explorer. README теперь явно отличает этот режим от WorkerW embedding.
+Проверить отсутствие неприемлемого перекрытия значков в выбранной позиции.
+
 ## P3 - Выполнить physical multi-monitor и mixed-DPI acceptance matrix
 
 Файл: `overlay.py`
@@ -12,10 +28,10 @@
 
 - Pure/fake tests покрывают monitor gaps, exposed edges, right-side work area,
   stale callbacks, verified WorkerW parent transitions и Peek/Topmost invariants.
-- Single-monitor Windows acceptance покрывает 125% scaling, bottom taskbar,
-  Explorer restart, Show Desktop, repeated Peek/Topmost transitions и close during
-  animation. На shell topology без dedicated WorkerW overlay остаётся независимым
-  `HWND_BOTTOM`, потому что parenting к `Progman` уничтожает Tk HWND вместе с Explorer.
+- Предыдущая single-monitor acceptance не выявила повторный сценарий Show Desktop
+  из пользовательского отчёта. Новая проверка выделена выше. На shell topology без
+  dedicated WorkerW overlay остаётся независимым окном над поверхностью desktop,
+  потому что parenting к `Progman` уничтожает Tk HWND вместе с Explorer.
 - Доступная topology содержит только один monitor; negative coordinates, staggered
   layouts, mixed DPI и disconnect/reconnect нельзя подтвердить без второго display
   или отдельной Windows VM.
@@ -60,5 +76,6 @@ scheduled latest-compatible/provenance lane показывает несовме�
 
 ## Рекомендованные следующие bundles
 
-1. **Desktop acceptance:** physical multi-monitor/mixed-DPI matrix и только
+1. **Show Desktop acceptance:** точный пользовательский сценарий после перезапуска.
+2. **Desktop acceptance:** physical multi-monitor/mixed-DPI matrix и только
    воспроизводимые follow-up fixes.

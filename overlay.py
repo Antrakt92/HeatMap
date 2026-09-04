@@ -77,11 +77,14 @@ LOG_PATH = _get_log_path()
 
 SENSOR_STATUS_KEY = "_sensor_status"
 SENSOR_REINIT_KEY = "_sensor_reinit"
+SENSOR_STORAGE_FAILED_KEY = "_storage_read_failed"
 SENSOR_STATUS_PSUTIL_FALLBACK = "psutil_fallback"
 SENSOR_STATUS_PARTIAL = "partial"
 SENSOR_STATUS_WARMING_UP = "warming_up"
 SENSOR_STATUS_DRIVER_MISSING = "driver_missing"
 SENSOR_STATUS_CPU_UNAVAILABLE = "cpu_unavailable"
+SENSOR_STATUS_STALE = "stale"
+SENSOR_STALE_SECONDS = 10
 SENSOR_WARMUP_SECONDS = 60
 SENSOR_INIT_RETRY_SECONDS = 30
 STATUS_CONFIG_SAVE_ERROR = "config_save_error"
@@ -95,6 +98,7 @@ STATUS_TEXT = {
     SENSOR_STATUS_WARMING_UP: "Sensors: warming up",
     SENSOR_STATUS_DRIVER_MISSING: "Driver: install PawnIO",
     SENSOR_STATUS_CPU_UNAVAILABLE: "CPU sensor unavailable",
+    SENSOR_STATUS_STALE: "Sensors: waiting for fresh data",
 }
 STATUS_COLOR = {
     STATUS_CONFIG_SAVE_ERROR: "#f87171",
@@ -104,6 +108,7 @@ STATUS_COLOR = {
     SENSOR_STATUS_WARMING_UP: "#facc15",
     SENSOR_STATUS_DRIVER_MISSING: "#f87171",
     SENSOR_STATUS_CPU_UNAVAILABLE: "#f87171",
+    SENSOR_STATUS_STALE: "#facc15",
 }
 
 # --- Windows API constants ---
@@ -119,6 +124,11 @@ SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 SWP_FRAMECHANGED = 0x0020
 HWND_BOTTOM = 1
+HWND_TOP = 0
+SW_SHOWNOACTIVATE = 4
+GW_HWNDPREV = 3
+WS_EX_TOPMOST = 0x00000008
+DWMWA_EXCLUDED_FROM_PEEK = 12
 user32 = ctypes.windll.user32
 user32.SetWindowLongW.argtypes = [ctypes.wintypes.HWND, ctypes.c_int, ctypes.c_long]
 user32.SetWindowLongW.restype = ctypes.c_long
@@ -146,6 +156,21 @@ user32.GetParent.argtypes = [ctypes.wintypes.HWND]
 user32.GetParent.restype = ctypes.wintypes.HWND
 user32.IsWindow.argtypes = [ctypes.wintypes.HWND]
 user32.IsWindow.restype = ctypes.c_bool
+user32.GetForegroundWindow.argtypes = []
+user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
+user32.IsIconic.argtypes = [ctypes.wintypes.HWND]
+user32.IsIconic.restype = ctypes.wintypes.BOOL
+user32.IsWindowVisible.argtypes = [ctypes.wintypes.HWND]
+user32.IsWindowVisible.restype = ctypes.wintypes.BOOL
+user32.ShowWindow.argtypes = [ctypes.wintypes.HWND, ctypes.c_int]
+user32.ShowWindow.restype = ctypes.wintypes.BOOL
+user32.GetWindow.argtypes = [ctypes.wintypes.HWND, ctypes.c_uint]
+user32.GetWindow.restype = ctypes.wintypes.HWND
+dwmapi = ctypes.windll.dwmapi
+dwmapi.DwmSetWindowAttribute.argtypes = [
+    ctypes.wintypes.HWND, ctypes.wintypes.DWORD, ctypes.c_void_p, ctypes.wintypes.DWORD,
+]
+dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
 
 class POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
@@ -309,8 +334,10 @@ def _clamp_overlay_to_monitor_areas(x, y, width, height, monitor_areas):
 
 def _exposed_right_edge_monitor(x, y, monitor_areas, width=6):
     for area in monitor_areas:
-        monitor, _work = area
-        if not _rect_contains_point(monitor, x, y) or x < monitor[2] - width:
+        monitor, work = area
+        # The taskbar (including Show Desktop) is not a Peek target. A right
+        # taskbar moves the trigger to the last pixels of usable workspace.
+        if not _rect_contains_point(work, x, y) or x < work[2] - width:
             continue
         if any(
             other is not area
@@ -449,6 +476,67 @@ def set_tool_window(hwnd):
     style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
     style |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
     user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+    # Windows' desktop preview must not fade this desktop widget away.
+    enabled = ctypes.wintypes.BOOL(True)
+    result = dwmapi.DwmSetWindowAttribute(
+        hwnd, DWMWA_EXCLUDED_FROM_PEEK, ctypes.byref(enabled), ctypes.sizeof(enabled),
+    )
+    if result < 0:
+        log.debug("Desktop Peek exclusion unavailable: HRESULT=%s", result)
+
+
+def _window_has_class(hwnd, classes):
+    """Recognize shell children too, without relying on translated titles."""
+    name = ctypes.create_unicode_buffer(256)
+    for _ in range(20):
+        if not hwnd:
+            break
+        name.value = ""
+        user32.GetClassName(hwnd, name, len(name))
+        if name.value in classes:
+            return True
+        parent = user32.GetAncestor(hwnd, GA_PARENT)
+        if parent == hwnd:
+            break
+        hwnd = parent
+    return False
+
+
+def _find_desktop_surface():
+    """Find the shell icon host; it is a z-order reference, never our parent."""
+    progman = user32.FindWindowW("Progman", None)
+    if progman and user32.FindWindowExW(progman, 0, "SHELLDLL_DefView", None):
+        return progman
+    found = None
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+    def callback(hwnd, _lparam):
+        nonlocal found
+        if user32.FindWindowExW(hwnd, 0, "SHELLDLL_DefView", None):
+            found = hwnd
+            return False
+        return True
+
+    user32.EnumWindows(callback, 0)
+    return found
+
+
+def _position_above_desktop(hwnd):
+    """Keep the independent widget above wallpaper but below application windows."""
+    desktop = _find_desktop_surface()
+    if not desktop:
+        return False
+    preceding = user32.GetWindow(desktop, GW_HWNDPREV)
+    if preceding == hwnd:
+        return True
+    # Inserting after a topmost HWND would also promote this window to topmost.
+    # HWND_TOP preserves its normal band when the desktop has no normal predecessor.
+    if preceding and user32.GetWindowLongW(preceding, GWL_EXSTYLE) & WS_EX_TOPMOST:
+        preceding = HWND_TOP
+    return bool(user32.SetWindowPos(
+        hwnd, preceding or HWND_TOP, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+    ))
 
 
 def _show_error_message(title, message):
@@ -1287,7 +1375,10 @@ def _safe_round(value, minimum=None, maximum=None):
     """Validate raw sensor bounds before rounding so invalid values cannot round into range."""
     if value is None:
         return None
-    v = float(value)
+    try:
+        v = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
     if not math.isfinite(v):
         return None
     if minimum is not None and v < minimum:
@@ -1788,6 +1879,9 @@ def read_sensors(computer, update_storage=True):
             )
         except Exception:
             data[SENSOR_STATUS_KEY] = SENSOR_STATUS_PARTIAL
+            data[SENSOR_REINIT_KEY] = True
+            if hw.HardwareType == HardwareType.Storage:
+                data[SENSOR_STORAGE_FAILED_KEY] = True
             log.warning("Skipping hardware block after sensor read failure: %s", _hardware_label(hw), exc_info=True)
 
     _apply_ranked_sensor_candidates(data, candidates)
@@ -2073,7 +2167,7 @@ def _normalize_config(cfg, defaults):
             isinstance(value, bool)
             or not isinstance(value, (int, float))
             or (isinstance(value, float) and not math.isfinite(value))
-            or value <= 0
+            or value < 1
             or value > 100000
         ):
             normalized[key] = defaults[key]
@@ -2198,6 +2292,7 @@ class OverlayApp:
         self.running = True
         self._stop_event = threading.Event()
         self.sensor_data = {}
+        self._sensor_sample_time = None
         self.lock = threading.Lock()
         self.embedded = False
         self._embed_after_id = None
@@ -2410,6 +2505,7 @@ class OverlayApp:
         self._monitor_areas = _get_monitor_areas()
         self._poll_screen_change()
         self._poll_peek_edge()
+        self.root.after(250, self._poll_desktop_visibility)
 
         # --- Embed into desktop after window is drawn ---
         self._schedule_embed(100)
@@ -2485,6 +2581,7 @@ class OverlayApp:
             SENSOR_STATUS_PARTIAL,
             SENSOR_STATUS_WARMING_UP,
             SENSOR_STATUS_CPU_UNAVAILABLE,
+            SENSOR_STATUS_STALE,
         ):
             status = None
         self._sensor_status = status
@@ -2679,9 +2776,10 @@ class OverlayApp:
             self.embedded = True
         else:
             self.embedded = False
-            # Fallback: just send to bottom, no topmost
-            user32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0,
-                               SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+            # Show Desktop may raise the shell over independent bottom windows.
+            if not _position_above_desktop(hwnd):
+                user32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0,
+                                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
         # Restore opacity (window was hidden with alpha=0, not withdraw)
         self.root.wm_attributes("-alpha", 0.88)
 
@@ -2779,6 +2877,39 @@ class OverlayApp:
         if self.running and self.peek_enabled and not self.topmost:
             self._peek_poll_after_id = self.root.after(100, self._poll_peek_edge)
 
+    def _desktop_foreground(self):
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        if _window_has_class(hwnd, {"Shell_TrayWnd", "Shell_SecondaryTrayWnd"}):
+            # Show Desktop can leave focus in the tray. Inspect the saved widget
+            # location, so the button does not require an extra desktop click.
+            x, y = self._saved_pos or (self.config.get("x", 50), self.config.get("y", 50))
+            hwnd = user32.WindowFromPoint(POINT(x, y))
+        return _window_has_class(hwnd, {"Progman", "WorkerW"})
+
+    def _poll_desktop_visibility(self):
+        """Recover Show Desktop independently of the optional edge polling."""
+        if not self.running:
+            return
+        try:
+            if self.topmost:
+                return
+            desktop = self._desktop_foreground()
+            if desktop and (self.peek_visible or self._peek_animating):
+                self._restore_desktop_mode()
+            if self.embedded or self.peek_visible or self._peek_animating:
+                return
+            hwnd = self._get_hwnd()
+            if user32.IsIconic(hwnd) or not user32.IsWindowVisible(hwnd):
+                user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+            _position_above_desktop(hwnd)
+        except tk.TclError:
+            log.debug("Desktop visibility changed during window transition", exc_info=True)
+        finally:
+            if self.running:
+                self.root.after(250, self._poll_desktop_visibility)
+
     def _poll_peek_edge(self):
         self._peek_poll_after_id = None
         if not self.running or not self.peek_enabled or self.topmost:
@@ -2809,7 +2940,9 @@ class OverlayApp:
         if not user32.GetCursorPos(ctypes.byref(pt)):
             return False
         hwnd = user32.WindowFromPoint(pt)
-        return self._is_desktop_hwnd(hwnd)
+        return self._is_desktop_hwnd(hwnd) or _window_has_class(
+            hwnd, {"Shell_TrayWnd", "Shell_SecondaryTrayWnd"},
+        )
 
     def _is_desktop_hwnd(self, hwnd):
         """Check if the given HWND belongs to a desktop-layer window."""
@@ -2820,22 +2953,7 @@ class OverlayApp:
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         if pid.value == _MY_PID:
             return True
-        # Check window class for actual desktop windows
-        class_name = ctypes.create_unicode_buffer(256)
-        user32.GetClassName(hwnd, class_name, 256)
-        if class_name.value in ("Progman", "WorkerW"):
-            return True
-        # Walk parent chain as fallback
-        current = hwnd
-        for _ in range(20):
-            parent = user32.GetAncestor(current, GA_PARENT)
-            if not parent or parent == current:
-                break
-            current = parent
-            user32.GetClassName(current, class_name, 256)
-            if class_name.value in ("Progman", "WorkerW"):
-                return True
-        return False
+        return _window_has_class(hwnd, {"Progman", "WorkerW"})
 
     def _restore_desktop_mode(self, delay=50):
         self._peek_animating = False
@@ -2915,9 +3033,12 @@ class OverlayApp:
         # Animate slide-in
         self._animate_slide(screen_right, target_x, target_y, step=-20, callback=self._peek_shown)
 
-    def _animate_slide(self, current_x, target_x, y, step, callback):
+    def _animate_slide(self, current_x, target_x, y, step, callback, expected_generation=None):
         """Animate horizontal slide."""
-        if not self.running or not self._peek_animating:
+        if expected_generation is None:
+            expected_generation = self._window_transition_generation
+        if (not self.running or not self._peek_animating
+                or expected_generation != self._window_transition_generation):
             return
         try:
             if step < 0 and current_x <= target_x:
@@ -2929,7 +3050,9 @@ class OverlayApp:
                 callback()
                 return
             self.root.geometry(f"+{current_x}+{y}")
-            self.root.after(10, lambda: self._animate_slide(current_x + step, target_x, y, step, callback))
+            self.root.after(10, lambda: self._animate_slide(
+                current_x + step, target_x, y, step, callback, expected_generation,
+            ))
         except tk.TclError:
             try:
                 self._restore_desktop_mode()
@@ -3160,6 +3283,7 @@ class OverlayApp:
         consecutive_reinit_hints = 0
         next_init_retry = 0
         next_storage_update = 0
+        storage_failed = False
         needs_reinit = computer is None
         first_initialization = computer is None
         try:
@@ -3195,6 +3319,13 @@ class OverlayApp:
                     data = read_sensors(computer, update_storage=update_storage)
                     if update_storage:
                         next_storage_update = time.monotonic() + 30
+                        storage_failed = bool(data.get(SENSOR_STORAGE_FAILED_KEY))
+                    if storage_failed:
+                        # Cached LHM reads are not evidence that a failed native
+                        # storage update recovered. Hide stale disks until refresh.
+                        data["disks"] = []
+                        data[SENSOR_STATUS_KEY] = SENSOR_STATUS_PARTIAL
+                        data[SENSOR_REINIT_KEY] = True
                     warmup = (
                         computer is not None
                         and time.monotonic() - self._sensor_start_time < SENSOR_WARMUP_SECONDS
@@ -3205,6 +3336,7 @@ class OverlayApp:
                         data[SENSOR_STATUS_KEY] = SENSOR_STATUS_CPU_UNAVAILABLE
                     with self.lock:
                         self.sensor_data = data
+                        self._sensor_sample_time = time.monotonic()
                     consecutive_errors = 0
                     if computer is not None and data.get(SENSOR_REINIT_KEY):
                         consecutive_reinit_hints += 1
@@ -3218,6 +3350,7 @@ class OverlayApp:
                     log.error("Sensor read error: %s", e, exc_info=True)
                     with self.lock:
                         self.sensor_data = {"error": str(e)}
+                        self._sensor_sample_time = time.monotonic()
                     needs_reinit = consecutive_errors >= 3
                 self._stop_event.wait(2)
         finally:
@@ -3232,9 +3365,16 @@ class OverlayApp:
 
         with self.lock:
             data = self.sensor_data
+            sample_time = getattr(self, "_sensor_sample_time", None)
 
         if not data:
             self.root.after(500, self.update_ui)
+            return
+
+        if sample_time is not None and time.monotonic() - sample_time > SENSOR_STALE_SECONDS:
+            self._set_sensor_status(SENSOR_STATUS_STALE)
+            self._show_sensor_error(text="--", color="#888888")
+            self.root.after(2000, self.update_ui)
             return
 
         if "error" in data:
@@ -3408,7 +3548,7 @@ class OverlayApp:
 
         self.root.after(2000, self.update_ui)
 
-    def _show_sensor_error(self):
+    def _show_sensor_error(self, text="ERR", color="#f87171"):
         for child in list(self.disk_frame.winfo_children()):
             child.destroy()
         for key in list(self.disk_labels):
@@ -3418,7 +3558,7 @@ class OverlayApp:
         self._last_disk_names = []
 
         for label in self.rows.values():
-            label.config(text="ERR", fg="#f87171")
+            label.config(text=text, fg=color)
 
     def quit(self):
         self._cancel_scheduled_embed()
