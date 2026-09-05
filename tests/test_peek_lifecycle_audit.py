@@ -30,17 +30,17 @@ class PeekLifecycleAuditTests(unittest.TestCase):
     def make_app(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
         app.running = app.peek_enabled = app.peek_visible = True
-        app.topmost = app.embedded = app._peek_animating = False
+        app.topmost = app.embedded = False
         app._settings_dialog_open = False
-        app._saved_pos = (120, 140)
         app._embed_after_id = app._peek_poll_after_id = None
         app._window_transition_generation = 0
         app._cursor_was_at_peek_edge = False
         app._monitor_areas = (((0, 0, 1920, 1080), (0, 0, 1920, 1040)),)
         app._peek_monitor_area = app._monitor_areas[0]
         app.config = {"x": 120, "y": 140}
-        app.root = MovingRoot()
+        app.root = MovingRoot(x=120)
         app._get_hwnd = lambda: 0
+        app._set_window_layer = mock.Mock(return_value=True)
         app._save_config = mock.Mock()
         app._peek_hide = mock.Mock()
         return app
@@ -54,7 +54,7 @@ class PeekLifecycleAuditTests(unittest.TestCase):
 
     def test_old_mouse_poll_cannot_reschedule_in_a_new_peek(self):
         app = self.make_app()
-        with mock.patch.object(overlay.user32, "GetCursorPos", side_effect=self.cursor_at(1800, 160)):
+        with mock.patch.object(overlay.user32, "GetCursorPos", side_effect=self.cursor_at(130, 160)):
             app._peek_check_mouse()
             old_callback = app.root.after_calls[-1][1]
             app._cancel_scheduled_embed()
@@ -78,22 +78,9 @@ class PeekLifecycleAuditTests(unittest.TestCase):
         app._peek_hide.assert_not_called()
         self.assertTrue(app.root.after_calls)
 
-    def test_drag_cancels_a_slide_tick_before_it_moves_the_window(self):
-        app = self.make_app()
-        app.peek_visible = False
-        app._peek_animating = True
-        app._animate_slide(1860, 1720, 140, -20, app._peek_shown)
-        old_tick = app.root.after_calls[-1][1]
-        app.start_drag(SimpleNamespace(x=10, y=10, x_root=1870, y_root=150))
-        app.on_drag(SimpleNamespace(x=30, y=20, x_root=1890, y_root=160))
-        dragged_position = (app.root.x, app.root.y)
-        old_tick()
-        self.assertEqual((app.root.x, app.root.y), dragged_position)
-
     def test_release_returns_desktop_drag_inside_work_area(self):
         app = self.make_app()
         app.peek_visible = False
-        app._saved_pos = None
         app.root.x, app.root.y = 1800, 950
         app.start_drag(SimpleNamespace(x=10, y=10, x_root=1810, y_root=960))
         app._dragged = True
@@ -122,13 +109,12 @@ class PeekLifecycleAuditTests(unittest.TestCase):
         app = self.make_app()
         app.peek_visible = False
         app._drag_active = True
-        app._desktop_foreground = lambda: False
         with (
-            mock.patch.object(overlay, "_hide_covered_desktop_window", return_value=True) as hide,
+            mock.patch.object(app, "_set_window_layer", return_value=True, create=True) as layer,
             mock.patch.object(overlay.user32, "GetAsyncKeyState", return_value=0x8000),
         ):
             app._poll_desktop_visibility()
-        hide.assert_not_called()
+        layer.assert_not_called()
         self.assertEqual(app.root.after_calls[-1][0], 250)
 
     def test_missed_button_release_is_recovered_by_visibility_poll(self):
@@ -139,9 +125,13 @@ class PeekLifecycleAuditTests(unittest.TestCase):
                 app.peek_enabled = mode == "peek"
                 app.topmost = mode == "topmost"
                 app._drag_active = True
-                app._desktop_foreground = lambda: False
                 app.end_drag = mock.Mock()
-                with mock.patch.object(overlay.user32, "GetAsyncKeyState", return_value=0):
+                with (
+                    mock.patch.object(overlay.user32, "GetAsyncKeyState", return_value=0),
+                    mock.patch.object(overlay.user32, "IsIconic", return_value=False),
+                    mock.patch.object(overlay.user32, "IsWindowVisible", return_value=True),
+                    mock.patch.object(overlay.user32, "GetWindowLongW", return_value=overlay.WS_EX_TOPMOST),
+                ):
                     app._poll_desktop_visibility()
                 app.end_drag.assert_called_once_with(None)
                 self.assertEqual(app.root.after_calls[-1][0], 250)
@@ -150,7 +140,7 @@ class PeekLifecycleAuditTests(unittest.TestCase):
         app = self.make_app()
         app.peek_visible = False
         app._drag_active = True
-        app._is_desktop_at_cursor = lambda: False
+        app._is_taskbar_at_cursor = lambda: False
         app._peek_show = mock.Mock()
         with mock.patch.object(overlay.user32, "GetCursorPos", side_effect=self.cursor_at(1919, 150)):
             app._poll_peek_edge()
@@ -161,83 +151,10 @@ class PeekLifecycleAuditTests(unittest.TestCase):
         app = self.make_app()
         app.peek_visible = False
         app._drag_active = True
-        app._is_desktop_at_cursor = lambda: False
-        app._detach_from_desktop = mock.Mock(return_value=True)
-        with (
-            mock.patch.object(overlay, "_set_window_cloaked"),
-            mock.patch.object(overlay, "_show_without_reordering"),
-            mock.patch.object(overlay.user32, "ShowWindow"),
-        ):
-            app._peek_show(app._monitor_areas[0])
-        app._detach_from_desktop.assert_not_called()
-        self.assertFalse(app._peek_animating)
-
-    def test_duplicate_release_cannot_cancel_slide_started_by_first_release(self):
-        app = self.make_app()
-        app._peek_hide = overlay.OverlayApp._peek_hide.__get__(app)
-        app.start_drag(SimpleNamespace(x=10, y=10, x_root=1730, y_root=150))
-        app._dragged = True
-        with (
-            mock.patch.object(overlay, "_get_monitor_areas", return_value=app._monitor_areas),
-            mock.patch.object(overlay.user32, "GetCursorPos", side_effect=self.cursor_at(900, 900)),
-        ):
-            app.end_drag(None)
-            self.assertTrue(app._peek_animating)
-            next_tick = app.root.after_calls[-1][1]
-            position = (app.root.x, app.root.y)
-            app.end_drag(None)
-            next_tick()
-        self.assertNotEqual((app.root.x, app.root.y), position)
-        app._save_config.assert_called_once()
-
-    def test_click_during_slide_in_settles_preview_without_moving_desktop_position(self):
-        app = self.make_app()
-        app.peek_visible = False
-        app._peek_animating = True
-        app.root.x = 1860
-        app.start_drag(SimpleNamespace(x=10, y=10, x_root=1870, y_root=150))
-        with mock.patch.object(overlay.user32, "GetCursorPos", side_effect=self.cursor_at(1870, 150)):
-            app.end_drag(None)
-        self.assertTrue(app.peek_visible)
-        self.assertLessEqual(app.root.x + app.root.width, 1914)
-        self.assertEqual(app._saved_pos, (120, 140))
-        self.assertEqual((app.config["x"], app.config["y"]), (120, 140))
-
-    def test_peek_leaves_a_clear_corridor_for_underlying_edge_controls(self):
-        for work_right, overlay_width in ((1920, 200), (1880, 200), (160, 100)):
-            with self.subTest(work_right=work_right, overlay_width=overlay_width):
-                app = self.make_app()
-                app.peek_visible = False
-                app.root.width = overlay_width
-                app._is_desktop_at_cursor = lambda: False
-                app._detach_from_desktop = lambda: True
-                app._animate_slide = mock.Mock()
-                area = ((0, 0, 1920, 1080), (0, 0, work_right, 1040))
-                with (
-                    mock.patch.object(overlay, "_set_window_cloaked"),
-                    mock.patch.object(overlay, "_show_without_reordering"),
-                    mock.patch.object(overlay.user32, "ShowWindow"),
-                ):
-                    app._peek_show(area)
-                target_x = app._animate_slide.call_args.args[1]
-                self.assertGreaterEqual(target_x, 0)
-                self.assertLessEqual(target_x + overlay_width, work_right - 6)
-
-    def test_returning_to_edge_during_slide_out_is_not_lost(self):
-        app = self.make_app()
-        app._peek_animating = True
-        app._is_desktop_at_cursor = lambda: False
-        app._peek_show = mock.Mock()
-        with (
-            mock.patch.object(overlay.user32, "GetCursorPos", side_effect=self.cursor_at(1919, 150)),
-            mock.patch.object(overlay, "_set_window_cloaked"),
-            mock.patch.object(overlay.user32, "ShowWindow"),
-        ):
-            app._poll_peek_edge()
-            app._peek_show.assert_not_called()
-            app._peek_hidden()
-            app._poll_peek_edge()
-        app._peek_show.assert_called_once_with(app._monitor_areas[0])
+        app._is_taskbar_at_cursor = lambda: False
+        app._set_window_layer = mock.Mock(return_value=True)
+        app._peek_show(app._monitor_areas[0])
+        app._set_window_layer.assert_not_called()
 
 
 if __name__ == "__main__":

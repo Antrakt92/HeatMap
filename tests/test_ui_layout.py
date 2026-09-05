@@ -144,17 +144,17 @@ class LayoutTests(TkTestCase):
             self.assertEqual(app.canvas.yview()[0], 0)
             self.assertLess(app.root.winfo_reqheight(), 640)
 
-    def test_peek_layout_uses_its_target_monitor_and_keeps_saved_position(self):
+    def test_peek_layout_uses_widget_monitor_instead_of_edge_monitor(self):
         with layout_app(height=1000) as app:
             app.details_enabled = True
             app._apply_details_visibility()
+            app._fit_content()
+            before = (app.root.winfo_reqwidth(), app.root.winfo_reqheight())
             app.peek_visible = True
-            app._saved_pos = (50, 50)
             app._peek_monitor_area = ((1280, 0, 2560, 400), (1280, 0, 2560, 400))
             app._fit_content()
-            self.assertLessEqual(app.root.winfo_reqheight(), 400)
-            self.assertEqual(app._saved_pos, (50, 50))
-            self.assertTrue(app._content_overflow)
+            self.assertEqual((app.root.winfo_reqwidth(), app.root.winfo_reqheight()), before)
+            self.assertEqual((app.config["x"], app.config["y"]), (50, 50))
 
 
 if __name__ == "__main__":

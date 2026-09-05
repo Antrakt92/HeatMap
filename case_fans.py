@@ -15,6 +15,12 @@ from thermal_policy import FanRamp, case_fan_demand, finite
 
 PROFILE = "b550-aorus-pro-ac-case-124"
 TARGETS = ("System Fan #1", "System Fan #2", "System Fan #4")
+INDEPENDENT_TARGETS = TARGETS[:2]
+CHANNELS = {
+    TARGETS[0]: ("/lpc/it8688e/0", 1),
+    TARGETS[1]: ("/lpc/it8688e/0", 2),
+    TARGETS[2]: ("/lpc/it8792e/0", 2),
+}
 CONFLICTS = {"fancontrol.exe", "siv.exe", "gcc.exe", "easytune.exe"}
 
 
@@ -136,6 +142,15 @@ class FanWorkerClient:
                 return {"state": "error", "reason": "Invalid case fan controller status"}
             if status.get("state") == "active" and finite(status.get("command_pct"), 60, 100) is None:
                 return {"state": "error", "reason": "Invalid case fan controller command report"}
+            if "controlled_channels" in status or "firmware_channels" in status:
+                controlled, firmware = status.get("controlled_channels"), status.get("firmware_channels")
+                if (not isinstance(controlled, list) or not isinstance(firmware, list)
+                        or any(not isinstance(name, str) for name in controlled + firmware)
+                        or controlled not in (list(INDEPENDENT_TARGETS), list(TARGETS), [])
+                        or firmware != ([name for name in TARGETS if name not in controlled] if controlled else [])):
+                    return {"state": "error", "reason": "Invalid case fan controller channel report"}
+                if status.get("state") in ("active", "checking") and not controlled:
+                    return {"state": "error", "reason": "Missing case fan controller channels"}
             exited = self.process.poll() is not None
             terminal = status.get("state") in ("error", "stopped")
             pid = status.get("pid")
@@ -199,14 +214,27 @@ def select_controls(computer):
     board = getattr(boards[0], "__implementation__", boards[0]) if len(boards) == 1 else None
     if board is None or str(getattr(board, "Model", "")) != "B550_AORUS_PRO_AC":
         raise RuntimeError("Case fan profile supports only Gigabyte B550 AORUS PRO AC")
-    sensors = [sensor for sub in boards[0].SubHardware for sensor in sub.Sensors]
-    verify_shared_controller(sensors)
+    sources = [(sub, sensor) for sub in boards[0].SubHardware for sensor in sub.Sensors]
+    sensors = [sensor for _sub, sensor in sources]
+    try:
+        verify_shared_controller(sensors)
+        targets = TARGETS
+    except RuntimeError:
+        # SYS1/2 have a separate chip. Do not acquire SYS4's shared controller
+        # when firmware is running a pump curve or its baseline is unavailable.
+        targets = INDEPENDENT_TARGETS
     selected = []
-    for name in TARGETS:
+    for name in targets:
         control = [s for s in sensors if str(s.SensorType) == "Control" and str(s.Name) == name]
         tach = [s for s in sensors if str(s.SensorType) == "Fan" and str(s.Name) == name]
         if len(control) != 1 or len(tach) != 1 or control[0].Control is None:
             raise RuntimeError(f"Missing or ambiguous case fan channel: {name}")
+        chip, index = CHANNELS[name]
+        for sensor, kind in ((control[0], "control"), (tach[0], "fan")):
+            owners = [sub for sub, candidate in sources if candidate is sensor]
+            if (str(getattr(sensor, "Identifier", "")) != f"{chip}/{kind}/{index}"
+                    or len(owners) != 1 or str(getattr(owners[0], "Identifier", "")) != chip):
+                raise RuntimeError(f"Unexpected controller identity: {name}")
         if finite(float(tach[0].Value) if tach[0].Value is not None else None, 1, 10000) is None:
             raise RuntimeError(f"Cannot take control without a running tachometer: {name}")
         c = control[0].Control
@@ -214,6 +242,12 @@ def select_controls(computer):
             raise RuntimeError(f"Unsupported control range: {name}")
         selected.append((name, c, control[0], tach[0]))
     return selected
+
+
+def verify_selected_shared_controller(computer, controls):
+    if any(item[0] == TARGETS[2] for item in controls):
+        verify_shared_controller([s for hw in computer.Hardware if str(hw.HardwareType) == "Motherboard"
+                                  for sub in hw.SubHardware for s in sub.Sensors])
 
 
 def verify_shared_controller(sensors):
@@ -226,7 +260,7 @@ def verify_shared_controller(sensors):
 
 
 def full_rpm_reference(value):
-    if not isinstance(value, dict) or set(value) != set(TARGETS):
+    if not isinstance(value, dict) or set(value) not in (set(INDEPENDENT_TARGETS), set(TARGETS)):
         return None
     if any(finite(rpm, 200, 10000) is None for rpm in value.values()):
         return None
@@ -244,7 +278,8 @@ def verify_full_airflow(baseline, readings, full_rpm=None):
             raise RuntimeError(f"{after['name']}: full-speed command was not confirmed")
         if finite(after["rpm"], 200, 10000) is None or finite(before["rpm"], 1, 10000) is None:
             raise RuntimeError(f"{after['name']}: no reliable running tachometer")
-        previously_verified_full = reference and after["rpm"] >= 0.9 * reference[after["name"]]
+        reference_rpm = reference.get(after["name"]) if reference else None
+        previously_verified_full = reference_rpm is not None and after["rpm"] >= 0.9 * reference_rpm
         if (before["control_pct"] or 0) < 95 and after["rpm"] < before["rpm"] * 1.08 and not previously_verified_full:
             raise RuntimeError(f"{after['name']}: RPM did not confirm a speed increase; wiring/mode needs checking")
 
@@ -357,10 +392,14 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None):
         raise RuntimeError("Overlay owner process changed")
     error = None
     baseline = []
+    controlled_channels = []
+    firmware_channels = []
     try:
         computer.Open()
         data = overlay.read_sensors(computer)
         session = CaseFanSession(select_controls(computer))
+        controlled_channels = [item[0] for item in session.controls]
+        firmware_channels = [name for name in TARGETS if name not in controlled_channels]
         baseline = session.readings()
         if stop.is_set() or not owner.is_running() or time.monotonic() - heartbeat[0] > 15:
             raise RuntimeError("Overlay owner stopped before case fan activation")
@@ -379,8 +418,7 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None):
             now = time.monotonic()
             if stop.is_set() or not owner.is_running() or now - heartbeat[0] > 15:
                 break
-            verify_shared_controller([s for hw in computer.Hardware if str(hw.HardwareType) == "Motherboard"
-                                      for sub in hw.SubHardware for s in sub.Sensors])
+            verify_selected_shared_controller(computer, session.controls)
             demand, reason = case_fan_demand(data)
             readings = session.readings()
             for fan in readings:
@@ -405,7 +443,8 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None):
             if command != session.last_command:
                 session.apply(command)
             write_status(status_path, "active" if commissioned else "checking",
-                         command_pct=command, reason=reason, fans=readings, baseline=baseline,
+                         command_pct=command, demand_pct=demand, reason=reason, fans=readings, baseline=baseline,
+                         controlled_channels=controlled_channels, firmware_channels=firmware_channels,
                          verified_full_rpm=verified_full_rpm,
                          temperatures={key: data.get(key) for key in (
                              "cpu_temp", "gpu_core_temp", "gpu_hotspot_temp", "gpu_memory_temp")})
@@ -437,6 +476,7 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None):
         write_status(status_path, "error" if error or restore_errors else "stopped",
                      reason=error or ("Restore unconfirmed: restart Windows" if restore_errors else "Returned to firmware control"),
                      restore_errors=restore_errors, baseline=baseline,
+                     controlled_channels=controlled_channels, firmware_channels=firmware_channels,
                      restore_confirmed=bool(session and baseline and not restore_errors))
     return 1 if error or restore_errors else 0
 

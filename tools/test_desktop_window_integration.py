@@ -56,10 +56,9 @@ def main():
 
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
         app.running = True
-        app.topmost = app.embedded = app.peek_visible = app._peek_animating = False
+        app.topmost = app.peek_visible = False
         app.root = SimpleNamespace(after=lambda *_args: None)
         app._get_hwnd = lambda: widget
-        app._desktop_foreground = lambda: False
         # Model a normal app ahead of a raised shell, with our widget buried below.
         assert user32.SetWindowPos(desktop, overlay.HWND_BOTTOM, 0, 0, 0, 0, flags)
         assert user32.SetWindowPos(widget, overlay.HWND_BOTTOM, 0, 0, 0, 0, flags)

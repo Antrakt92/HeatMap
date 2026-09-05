@@ -12,17 +12,24 @@ import case_fans as fans
 def fixture():
     sensors = []
     controls = []
+    chip_sensors = {"/lpc/it8688e/0": [], "/lpc/it8792e/0": []}
     for name in (*fans.TARGETS, "CPU Fan", "System Fan #5 / Pump", "System Fan #6 / Pump"):
+        chip, index = fans.CHANNELS.get(name, ("/lpc/it8792e/0", 0 if "#5" in name else 1))
+        if name == "CPU Fan":
+            chip, index = "/lpc/it8688e/0", 0
         sensor = NS(Name=name, SensorType="Control", Value=100 if "Pump" in name else None)
+        sensor.Identifier = f"{chip}/control/{index}"
         control = mock.Mock(MinSoftwareValue=0, MaxSoftwareValue=100)
         control.SetSoftware.side_effect = lambda value, s=sensor: setattr(s, "Value", value)
         original = sensor.Value
         control.SetDefault.side_effect = lambda s=sensor, v=original: setattr(s, "Value", v)
         sensor.Control = control
         controls.append(control)
-        sensors.extend([sensor, NS(Name=name, SensorType="Fan", Value=800)])
-    sub = NS(Sensors=sensors, Close=mock.Mock(), Update=mock.Mock())
-    board = NS(HardwareType="Motherboard", Model="B550_AORUS_PRO_AC", SubHardware=[sub])
+        chip_sensors[chip].extend([sensor, NS(Name=name, SensorType="Fan", Value=800,
+                                            Identifier=f"{chip}/fan/{index}")])
+    subs = [NS(Identifier=chip, Sensors=items, Close=mock.Mock(), Update=mock.Mock())
+            for chip, items in chip_sensors.items()]
+    board = NS(HardwareType="Motherboard", Model="B550_AORUS_PRO_AC", SubHardware=subs)
     return NS(Hardware=[board], Open=mock.Mock(), Close=mock.Mock()), controls
 
 
@@ -40,8 +47,8 @@ class CaseFanTests(unittest.TestCase):
         self.assertEqual(fans.verify_restore(before, session.readings()), [])
         self.assertEqual(session.restore(), [])
 
-    def test_wrong_board_missing_duplicate_stopped_and_shared_curve_rejected(self):
-        for fault in ("model", "missing", "duplicate", "stopped", "shared"):
+    def test_wrong_board_missing_duplicate_and_stopped_rejected(self):
+        for fault in ("model", "missing", "duplicate", "stopped"):
             computer, _ = fixture()
             board = computer.Hardware[0]
             sensors = board.SubHardware[0].Sensors
@@ -53,8 +60,6 @@ class CaseFanTests(unittest.TestCase):
                 sensors.append(sensors[0])
             elif fault == "stopped":
                 sensors[1].Value = 0
-            else:
-                sensors[-2].Value = None
             with self.subTest(fault=fault), self.assertRaises(RuntimeError):
                 fans.select_controls(computer)
 

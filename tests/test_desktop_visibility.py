@@ -7,41 +7,22 @@ from test_overlay_helpers import _FakeRoot
 
 
 class DesktopVisibilityTests(unittest.TestCase):
-    def test_full_coverage_ignores_shell_hidden_minimized_and_own_windows(self):
-        scenarios = (
-            ("full", (0, 0, 1920, 1080), True, False, 0, False, False, True),
-            ("rounded edge", (0, 0, 1920, 1080), True, False, 0, False, False, True),
-            ("partial", (0, 0, 1650, 1080), True, False, 0, False, False, False),
-            ("hidden", (0, 0, 1920, 1080), False, False, 0, False, False, False),
-            ("minimized", (0, 0, 1920, 1080), True, True, 0, False, False, False),
-            ("other desktop", (0, 0, 1920, 1080), True, False, 2, False, False, False),
-            ("shell", (0, 0, 1920, 1080), True, False, 0, True, False, False),
-            ("own dialog", (0, 0, 1920, 1080), True, False, 0, False, True, False),
-        )
-        for name, bounds, visible, iconic, cloak, shell, own, expected in scenarios:
-            with self.subTest(name=name):
-                def rectangle(hwnd, pointer):
-                    values = (1620, 200, 1921 if name == "rounded edge" else 1920, 800) if hwnd == 100 else bounds
-                    pointer._obj.left, pointer._obj.top, pointer._obj.right, pointer._obj.bottom = values
-                    return True
-                def process(_hwnd, pointer):
-                    pointer._obj.value = overlay._MY_PID if own else overlay._MY_PID + 1
-                    return 1
-                def cloaking(_hwnd, _attribute, pointer, _size):
-                    pointer._obj.value = cloak
-                    return 0
-                with (
-                    mock.patch.object(overlay.user32, "EnumWindows", side_effect=lambda callback, _: callback(200, 0)),
-                    mock.patch.object(overlay.user32, "GetWindowRect", side_effect=rectangle),
-                    mock.patch.object(overlay.user32, "IsWindowVisible", return_value=visible),
-                    mock.patch.object(overlay.user32, "IsIconic", return_value=iconic),
-                    mock.patch.object(overlay.user32, "GetWindowThreadProcessId", side_effect=process),
-                    mock.patch.object(overlay, "_window_has_class", return_value=shell),
-                    mock.patch.object(overlay.dwmapi, "DwmGetWindowAttribute", side_effect=cloaking),
-                ):
-                    self.assertEqual(overlay._covered_by_application(100), expected)
+    def test_application_foreground_keeps_desktop_window_mapped(self):
+        app = self.make_app()
+        with (
+            mock.patch.object(overlay.user32, "IsIconic", return_value=False),
+            mock.patch.object(overlay.user32, "IsWindowVisible", return_value=True),
+            mock.patch.object(overlay.user32, "ShowWindow") as show,
+            mock.patch.object(app, "_set_window_layer", return_value=True) as layer,
+            mock.patch.object(overlay, "_set_window_cloaked") as cloak,
+        ):
+            app._poll_desktop_visibility()
+        show.assert_not_called()
+        cloak.assert_not_called()
+        layer.assert_called_once_with(False)
+        self.assertEqual(app.root.geometry_calls, [])
 
-    def test_peek_does_not_slide_away_while_its_menu_or_settings_are_open(self):
+    def test_preview_stays_raised_while_its_menu_or_settings_are_open(self):
         for dialog in (True, False):
             app = self.make_app()
             app.peek_visible = True
@@ -70,9 +51,6 @@ class DesktopVisibilityTests(unittest.TestCase):
         app.embedded = False
         app.peek_visible = False
         app.peek_enabled = True
-        app._peek_animating = False
-        app._saved_pos = None
-        app._peek_monitor_area = None
         app._embed_after_id = None
         app._window_transition_generation = 0
         app._cursor_was_at_peek_edge = False
@@ -95,7 +73,6 @@ class DesktopVisibilityTests(unittest.TestCase):
 
     def test_shell_taskbar_is_ignored_even_with_auto_hide_work_area(self):
         app = self.make_app()
-        app._is_desktop_hwnd = mock.Mock(return_value=False)
 
         def cursor(ptr):
             ptr._obj.x, ptr._obj.y = 1919, 1079
@@ -111,34 +88,35 @@ class DesktopVisibilityTests(unittest.TestCase):
             mock.patch.object(overlay.user32, "GetClassName", side_effect=class_name),
             mock.patch.object(overlay.user32, "GetAncestor", side_effect=lambda hwnd, _: 2 if hwnd == 1 else 0),
         ):
-            self.assertTrue(app._is_desktop_at_cursor())
+            self.assertTrue(app._is_taskbar_at_cursor())
 
-    def test_show_desktop_recovers_minimized_fallback_without_activation(self):
+    def test_show_desktop_recovers_minimized_window_without_activation(self):
         app = self.make_app()
         app.peek_enabled = False
         with (
-            mock.patch.object(app, "_desktop_foreground", return_value=True),
             mock.patch.object(overlay.user32, "IsIconic", return_value=True),
             mock.patch.object(overlay.user32, "IsWindowVisible", return_value=False),
             mock.patch.object(overlay.user32, "ShowWindow") as show,
-            mock.patch.object(overlay, "_position_above_desktop", return_value=True) as position,
+            mock.patch.object(app, "_set_window_layer", return_value=True) as layer,
         ):
             app._poll_desktop_visibility()
         show.assert_called_once_with(100, overlay.SW_SHOWNOACTIVATE)
-        position.assert_called_once_with(100)
+        layer.assert_called_once_with(False)
         self.assertEqual(app.root.after_calls[-1][0], 250)
 
-    def test_desktop_recovery_leaves_embedded_and_topmost_modes_alone(self):
-        for mode in ("embedded", "topmost"):
+    def test_visible_preview_and_always_on_top_do_not_reorder_repeatedly(self):
+        for mode in ("peek_visible", "topmost"):
             app = self.make_app()
             setattr(app, mode, True)
             with (
-                mock.patch.object(app, "_desktop_foreground", return_value=True),
-                mock.patch.object(overlay.user32, "SetWindowPos") as position,
+                mock.patch.object(overlay.user32, "IsIconic", return_value=False),
+                mock.patch.object(overlay.user32, "IsWindowVisible", return_value=True),
+                mock.patch.object(overlay.user32, "GetWindowLongW", return_value=overlay.WS_EX_TOPMOST),
+                mock.patch.object(app, "_set_window_layer") as layer,
                 mock.patch.object(overlay.user32, "ShowWindow") as show,
             ):
                 app._poll_desktop_visibility()
-            position.assert_not_called()
+            layer.assert_not_called()
             show.assert_not_called()
 
     def test_fallback_remains_below_inactive_application_on_another_monitor(self):
@@ -173,17 +151,25 @@ class DesktopVisibilityTests(unittest.TestCase):
             self.assertTrue(overlay._position_above_desktop(100))
         self.assertEqual(position.call_args.args[1], overlay.HWND_TOP)
 
-    def test_taskbar_focus_uses_saved_desktop_location(self):
-        app = self.make_app()
-        app._saved_pos = (320, 240)
-        with (
-            mock.patch.object(overlay.user32, "GetForegroundWindow", return_value=10),
-            mock.patch.object(overlay, "_window_has_class", side_effect=[True, True]),
-            mock.patch.object(overlay.user32, "WindowFromPoint", return_value=20) as at_point,
-        ):
-            self.assertTrue(app._desktop_foreground())
-        point = at_point.call_args.args[0]
-        self.assertEqual((point.x, point.y), (320, 240))
+    def test_bare_desktop_edge_is_allowed_to_raise_widget(self):
+        for desktop_class in ("Progman", "WorkerW"):
+            app = self.make_app()
+            def cursor(pointer):
+                pointer._obj.x, pointer._obj.y = 1919, 500
+                return True
+            def class_name(_hwnd, buffer, _length):
+                buffer.value = desktop_class
+                return len(buffer.value)
+            with (
+                mock.patch.object(overlay.user32, "GetCursorPos", side_effect=cursor),
+                mock.patch.object(overlay.user32, "WindowFromPoint", return_value=20),
+                mock.patch.object(overlay.user32, "GetClassName", side_effect=class_name),
+                mock.patch.object(overlay.user32, "GetAncestor", return_value=0),
+                mock.patch.object(app, "_peek_show") as raise_widget,
+            ):
+                self.assertFalse(app._is_taskbar_at_cursor())
+                app._poll_peek_edge()
+            raise_widget.assert_called_once_with(app._monitor_areas[0])
 
     def test_missing_explorer_does_not_raise_fallback_above_applications(self):
         with (
@@ -193,21 +179,28 @@ class DesktopVisibilityTests(unittest.TestCase):
             self.assertFalse(overlay._position_above_desktop(100))
         position.assert_not_called()
 
-    def test_show_desktop_cancels_peek_and_preserves_saved_position(self):
+    def test_foreground_desktop_does_not_demote_preview_before_cursor_leaves(self):
         app = self.make_app()
         app.peek_visible = True
-        app._saved_pos = (320, 240)
+        position = dict(app.config)
         with (
-            mock.patch.object(app, "_desktop_foreground", return_value=True),
+            mock.patch.object(overlay.user32, "GetForegroundWindow", return_value=10),
+            mock.patch.object(overlay, "_window_has_class", return_value=True),
+            mock.patch.object(overlay.user32, "WindowFromPoint", return_value=20),
             mock.patch.object(overlay.user32, "IsIconic", return_value=False),
             mock.patch.object(overlay.user32, "IsWindowVisible", return_value=True),
-            mock.patch.object(overlay, "_position_above_desktop", return_value=True),
+            mock.patch.object(overlay.user32, "GetWindowLongW", return_value=overlay.WS_EX_TOPMOST),
+            mock.patch.object(app, "_set_window_layer", return_value=True) as layer,
+            mock.patch.object(overlay.user32, "ShowWindow") as show,
+            mock.patch.object(overlay, "_set_window_cloaked") as cloak,
         ):
             app._poll_desktop_visibility()
-        self.assertFalse(app.peek_visible)
-        self.assertFalse(app._peek_animating)
-        self.assertIsNone(app._saved_pos)
-        self.assertEqual((app.config["x"], app.config["y"]), (320, 240))
+        self.assertTrue(app.peek_visible)
+        self.assertEqual(app.config, position)
+        self.assertEqual(app.root.geometry_calls, [])
+        layer.assert_not_called()
+        show.assert_not_called()
+        cloak.assert_not_called()
 
     def test_shutdown_does_not_reschedule_visibility_poll(self):
         app = self.make_app()
@@ -215,15 +208,56 @@ class DesktopVisibilityTests(unittest.TestCase):
         app._poll_desktop_visibility()
         self.assertEqual(app.root.after_calls, [])
 
-    def test_cancelled_animation_cannot_move_a_new_peek_session(self):
+    def test_raising_layer_preserves_position_size_visibility_and_focus(self):
         app = self.make_app()
-        app._peek_animating = True
-        app._animate_slide(1920, 1720, 120, -20, mock.Mock())
+        with mock.patch.object(overlay.user32, "SetWindowPos", return_value=True) as position:
+            self.assertTrue(app._set_window_layer(True))
+        position.assert_called_once_with(
+            100, overlay.HWND_TOPMOST, 0, 0, 0, 0,
+            overlay.SWP_NOMOVE | overlay.SWP_NOSIZE | overlay.SWP_NOACTIVATE,
+        )
+        self.assertEqual(app.root.geometry_calls, [])
+        self.assertEqual(app.root.withdraw_count, 0)
+
+    def test_lowering_layer_drops_topmost_before_desktop_placement(self):
+        app = self.make_app()
+        sequence = []
+        with (
+            mock.patch.object(overlay.user32, "GetWindowLongW", return_value=overlay.WS_EX_TOPMOST),
+            mock.patch.object(overlay.user32, "SetWindowPos", side_effect=lambda *args: sequence.append(args) or True),
+            mock.patch.object(overlay, "_position_above_desktop", side_effect=lambda hwnd: sequence.append(("desktop", hwnd)) or True),
+        ):
+            self.assertTrue(app._set_window_layer(False))
+        self.assertEqual(sequence, [
+            (100, overlay.HWND_NOTOPMOST, 0, 0, 0, 0,
+             overlay.SWP_NOMOVE | overlay.SWP_NOSIZE | overlay.SWP_NOACTIVATE),
+            ("desktop", 100),
+        ])
+
+    def test_missing_shell_lowers_window_to_bottom_without_hiding_it(self):
+        app = self.make_app()
+        with (
+            mock.patch.object(overlay.user32, "GetWindowLongW", return_value=0),
+            mock.patch.object(overlay, "_position_above_desktop", return_value=False),
+            mock.patch.object(overlay.user32, "SetWindowPos", return_value=True) as position,
+            mock.patch.object(overlay.user32, "ShowWindow") as show,
+        ):
+            self.assertTrue(app._set_window_layer(False))
+        position.assert_called_once_with(
+            100, overlay.HWND_BOTTOM, 0, 0, 0, 0,
+            overlay.SWP_NOMOVE | overlay.SWP_NOSIZE | overlay.SWP_NOACTIVATE,
+        )
+        show.assert_not_called()
+
+    def test_cancelled_desktop_placement_cannot_lower_new_preview(self):
+        app = self.make_app()
+        app._schedule_embed()
         stale = app.root.after_calls[-1][1]
         app._cancel_scheduled_embed()
-        app._peek_animating = True
-        app.root.geometry_calls.clear()
-        stale()
+        app.peek_visible = True
+        with mock.patch.object(app, "_set_window_layer") as layer:
+            stale()
+        layer.assert_not_called()
         self.assertEqual(app.root.geometry_calls, [])
 
     def test_tool_window_opts_out_of_windows_peek_fading(self):

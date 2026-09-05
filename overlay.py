@@ -32,7 +32,7 @@ import psutil
 from thermal_policy import ThermalAdvisor, gpu_delta, delta_severity, finite
 from case_fans import FanWorkerClient, full_rpm_reference
 
-VERSION = "1.2.0-rc.1"
+VERSION = "1.2.0-rc.2"
 
 
 # --- Paths ---
@@ -132,6 +132,8 @@ SWP_FRAMECHANGED = 0x0020
 SWP_SHOWWINDOW = 0x0040
 HWND_BOTTOM = 1
 HWND_TOP = 0
+HWND_TOPMOST = -1
+HWND_NOTOPMOST = -2
 SW_HIDE = 0
 SW_SHOWNOACTIVATE = 4
 GW_HWNDPREV = 3
@@ -139,7 +141,6 @@ WS_EX_TOPMOST = 0x00000008
 DWMWA_EXCLUDED_FROM_PEEK = 12
 DWMWA_TRANSITIONS_FORCEDISABLED = 3
 DWMWA_CLOAK = 13
-PEEK_EDGE_GAP = 6  # Leave the application's scrollbar/resize edge reachable.
 user32 = ctypes.windll.user32
 user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
 user32.GetAsyncKeyState.restype = ctypes.c_short
@@ -414,102 +415,7 @@ def release_single_instance():
     kernel32.ReleaseMutex(handle)
     kernel32.CloseHandle(handle)
 
-# --- Desktop widget: embed window into the desktop layer ---
-def find_desktop_worker_w():
-    """Find a dedicated WorkerW wallpaper host behind desktop icons."""
-    progman = user32.FindWindowW("Progman", None)
-    if not progman:
-        return None
-
-    # Send Progman a 0x052C message to spawn a WorkerW behind the icons
-    result = ctypes.c_size_t(0)
-    user32.SendMessageTimeoutW(progman, 0x052C, 0, 0, 0x0000, 1000, ctypes.byref(result))
-
-    worker_w = None
-
-    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
-    def enum_callback(hwnd, lparam):
-        nonlocal worker_w
-        shell_view = user32.FindWindowExW(hwnd, 0, "SHELLDLL_DefView", None)
-        if shell_view:
-            if hwnd == progman:
-                # Parenting an external Tk window directly to Progman makes
-                # Explorer destroy it during shell restart. Keep searching and
-                # let the caller use its independent HWND_BOTTOM fallback.
-                return True
-            # Older Explorer layouts place the icon view under a WorkerW; the
-            # following WorkerW is the dedicated wallpaper host behind it.
-            worker_w = user32.FindWindowExW(0, hwnd, "WorkerW", None)
-            if worker_w:
-                return False
-        return True
-
-    user32.EnumWindows(enum_callback, 0)
-    return worker_w
-
-
-def embed_in_desktop(hwnd):
-    """Make the tkinter window a child of the desktop WorkerW layer."""
-    worker_w = find_desktop_worker_w()
-    if not worker_w or not _set_parent_verified(hwnd, worker_w):
-        return False
-    # When Progman owns SHELLDLL_DefView, a newly parented child otherwise may
-    # sit above desktop icons. Keep the overlay at the bottom of the host's
-    # child z-order; a dedicated wallpaper WorkerW is safe with the same rule.
-    if not user32.SetWindowPos(
-        hwnd,
-        HWND_BOTTOM,
-        0,
-        0,
-        0,
-        0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-    ):
-        # A failed z-order change does not undo SetParent. Keep tracking a
-        # retained host so Peek/Topmost still detach the window before moving it.
-        log.warning("Failed to lower overlay within its desktop host")
-        return bool(user32.IsWindow(worker_w) and user32.GetParent(hwnd) == worker_w)
-    return True
-
-
-def _set_parent_verified(hwnd, expected_parent):
-    """Set a native parent and verify the postcondition; SetParent's NULL is ambiguous."""
-    if not hwnd or not user32.IsWindow(hwnd):
-        return False
-    if expected_parent and not user32.IsWindow(expected_parent):
-        return False
-    original_style = user32.GetWindowLongW(hwnd, GWL_STYLE) & 0xFFFFFFFF
-    if expected_parent:
-        child_style = (original_style | WS_CHILD) & ~WS_POPUP
-        user32.SetWindowLongW(hwnd, GWL_STYLE, ctypes.c_long(child_style).value)
-    user32.SetParent(hwnd, expected_parent)
-    actual_parent = int(user32.GetParent(hwnd) or 0)
-    expected_parent = int(expected_parent or 0)
-    if actual_parent != expected_parent:
-        if expected_parent:
-            user32.SetWindowLongW(hwnd, GWL_STYLE, ctypes.c_long(original_style).value)
-        log.warning(
-            "SetParent postcondition failed for hwnd=%s: expected=%s actual=%s",
-            hwnd,
-            expected_parent,
-            actual_parent,
-        )
-        return False
-    if not expected_parent:
-        popup_style = (original_style | WS_POPUP) & ~WS_CHILD
-        user32.SetWindowLongW(hwnd, GWL_STYLE, ctypes.c_long(popup_style).value)
-    user32.SetWindowPos(
-        hwnd,
-        0,
-        0,
-        0,
-        0,
-        0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-    )
-    return True
-
-
+# --- Persistent desktop window ---
 def set_tool_window(hwnd):
     """Remove from taskbar and alt-tab, make non-activating."""
     style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
@@ -517,8 +423,8 @@ def set_tool_window(hwnd):
     user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
     if not comctl32.SetWindowSubclass(hwnd, _overlay_mouse_activation, 1, 0):
         log.debug("Mouse activation guard could not be installed on hwnd=%s", hwnd)
-    # Our slide is the only animation; shell transitions must not replay a
-    # disappearing surface after its HWND has moved to the saved desktop point.
+    # Keep the persistent widget visible through Windows desktop Peek without
+    # replaying shell transitions when its z-order changes.
     enabled = ctypes.wintypes.BOOL(True)
     for attribute in (DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_EXCLUDED_FROM_PEEK):
         result = dwmapi.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(enabled), ctypes.sizeof(enabled))
@@ -597,55 +503,6 @@ def _show_without_reordering(hwnd):
     ))
     _set_window_cloaked(hwnd, False)
     return shown
-
-
-def _covered_by_application(hwnd):
-    """Detect full coverage even when a game is behind another active app."""
-    widget = ctypes.wintypes.RECT()
-    if not user32.GetWindowRect(hwnd, ctypes.byref(widget)):
-        return False
-    if widget.right <= widget.left or widget.bottom <= widget.top:
-        return False
-    covered = False
-
-    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
-    def inspect(candidate, _lparam):
-        nonlocal covered
-        if candidate == hwnd or not user32.IsWindowVisible(candidate) or user32.IsIconic(candidate):
-            return True
-        rect = ctypes.wintypes.RECT()
-        if not user32.GetWindowRect(candidate, ctypes.byref(rect)):
-            return True
-        # Native/Tk rectangles can differ by a rounded pixel at fractional DPI.
-        if not (rect.left <= widget.left + 2 and rect.top <= widget.top + 2
-                and rect.right >= widget.right - 2 and rect.bottom >= widget.bottom - 2):
-            return True
-        pid = ctypes.wintypes.DWORD()
-        user32.GetWindowThreadProcessId(candidate, ctypes.byref(pid))
-        if pid.value == _MY_PID or _window_has_class(candidate, {
-            "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",
-        }):
-            return True
-        cloak = ctypes.wintypes.DWORD()
-        result = dwmapi.DwmGetWindowAttribute(ctypes.wintypes.HWND(candidate), 14,
-                                            ctypes.byref(cloak), ctypes.sizeof(cloak))
-        if result == 0 and cloak.value:
-            return True
-        covered = True
-        return False
-
-    user32.EnumWindows(inspect, 0)
-    return covered
-
-
-def _hide_covered_desktop_window(hwnd, desktop_foreground):
-    if not desktop_foreground and _covered_by_application(hwnd):
-        # Independent fallback is still an ordinary window. A z-order request
-        # alone must not redisplay it over a game after the Peek slide has ended.
-        _set_window_cloaked(hwnd, True)
-        user32.ShowWindow(hwnd, SW_HIDE)
-        return True
-    return False
 
 
 def _show_error_message(title, message):
@@ -2136,7 +1993,20 @@ def _case_fan_advice(status):
         return "Case fans: restore unconfirmed; restart Windows. Copy diagnostics for details."
     if status.get("restore_confirmed"):
         return "Case fans: automatic control stopped; firmware restored. Copy diagnostics for details."
+    if status.get("reason", "").startswith("Shared controller requires"):
+        return "Case fans: pump controller baseline unsupported; firmware control retained."
     return "Case fans: controller status error. Check Copy diagnostics before retrying."
+
+
+def _case_fan_mode(status):
+    state = status.get("state", "off")
+    if state == "active":
+        channels = status.get("controlled_channels", [])
+        if not isinstance(channels, list) or any(not isinstance(name, str) for name in channels):
+            return "ERROR"
+        scope = "/".join(str(_fan_number(name.lower())) for name in channels)
+        return f"AUTO {status.get('command_pct')}%" + (f" · SYS {scope}" if scope else "")
+    return {"off": "Firmware", "stopped": "Firmware", "checking": "Checking..."}.get(state, "ERROR")
 
 
 def _health_summary(messages):
@@ -2522,7 +2392,6 @@ class OverlayApp:
         self.sensor_data = {}
         self._sensor_sample_time = None
         self.lock = threading.Lock()
-        self.embedded = False
         self._desktop_fallback_ready = False
         self._embed_after_id = None
         self._window_transition_generation = 0
@@ -2546,7 +2415,7 @@ class OverlayApp:
         self.root.wm_attributes("-alpha", 0.88)
         self.root.configure(bg="#1a1a2e")
 
-        # Hide until embedded in desktop to prevent blink
+        # Keep startup transparent until placed below application windows
         # Use alpha=0 instead of withdraw() — withdraw/deiconify cycle resets
         # z-order on Windows, causing the window to appear above app windows.
         self.root.wm_attributes("-alpha", 0)
@@ -2559,7 +2428,6 @@ class OverlayApp:
         self._drag_y = 0
         self._dragged = False
         self._drag_active = False
-        self._drag_interrupted_peek = False
 
         # --- Header ---
         header = tk.Frame(self.root, bg="#16213e", cursor="fleur")
@@ -2685,7 +2553,7 @@ class OverlayApp:
             menus[title] = self._new_menu(self.menu)
             self.menu.add_cascade(label=title, menu=menus[title])
         self._add_menu_item("topmost", "Always on top: OFF", self.toggle_topmost, menus["Display"])
-        self._add_menu_item("peek", "Peek from edge: " + ("ON" if self.peek_enabled else "OFF"), self.toggle_peek, menus["Display"])
+        self._add_menu_item("peek", "Raise on edge: " + ("ON" if self.peek_enabled else "OFF"), self.toggle_peek, menus["Display"])
         self._add_menu_item("details", "Details: " + ("ON" if self.details_enabled else "OFF"), self.toggle_details, menus["Display"])
         autostart_enabled = is_autostart_enabled() if autostart_result is None else autostart_result.enabled
         self._add_menu_item("autostart", "Autostart: ERROR" if autostart_enabled is None else
@@ -2697,6 +2565,7 @@ class OverlayApp:
         self._add_menu_item("case_fans", "Automatic case fans: " + ("ON" if self.config.get("case_fans_enabled", False) else "OFF"),
                             self.toggle_case_fans, menus["Cooling"])
         self._add_menu_item("cpu_reference", self._cpu_reference_label(), self.configure_cpu_reference, menus["Cooling"])
+        menus["Cooling"].add_command(label="Cooling status and policy...", command=self.show_cooling_status)
         self._add_menu_item("diagnostics", "Copy diagnostics", self.copy_diagnostics, menus["Diagnostics"])
         menus["Diagnostics"].add_command(label="Open log file", command=self.open_log_file)
         menus["Diagnostics"].add_command(label="Copy log path", command=self.copy_log_path)
@@ -2706,10 +2575,8 @@ class OverlayApp:
         self.menu.add_command(label="Close HeatMap", command=self.quit)
         self.root.bind("<Button-3>", self.show_menu)
 
-        # --- Peek from edge ---
+        # --- Temporary raise from the edge ---
         self.peek_visible = False
-        self._peek_animating = False
-        self._saved_pos = None  # saved desktop position before peek
         self._peek_monitor_area = None
         self._cursor_was_at_peek_edge = False
         self._peek_poll_after_id = None
@@ -2718,7 +2585,7 @@ class OverlayApp:
         self._poll_peek_edge()
         self.root.after(250, self._poll_desktop_visibility)
 
-        # --- Embed into desktop after window is drawn ---
+        # --- Place on the desktop after window is drawn ---
         self._schedule_embed(100)
 
         # --- Start sensor thread ---
@@ -2787,8 +2654,7 @@ class OverlayApp:
     def _clamp_saved_position_to_visible_screen(self, persist=False):
         if not hasattr(self, "root"):
             return False
-        if (getattr(self, "peek_visible", False) or getattr(self, "_peek_animating", False)
-                or getattr(self, "_drag_active", False)):
+        if getattr(self, "_drag_active", False):
             return False
         self._fit_content()
         self.root.update_idletasks()
@@ -2921,6 +2787,56 @@ class OverlayApp:
             results.put_nowait((False, str(e)))
         self.root.after(100, self._poll_diagnostics)
 
+    def show_cooling_status(self):
+        if not self.running:
+            return
+        existing = getattr(self, "_cooling_dialog", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            return
+        dialog = tk.Toplevel(self.root)
+        self._cooling_dialog = dialog
+        dialog.title("HeatMap cooling")
+        dialog.configure(bg="#1a1a2e")
+        dialog.transient(self.root)
+        label = tk.Label(dialog, bg="#1a1a2e", fg="#e2e8f0", justify="left",
+                         anchor="w", font=("Segoe UI", 10), wraplength=460, padx=16, pady=16)
+        label.pack(fill="both", expand=True)
+        callback = None
+
+        def close():
+            if callback is not None:
+                try:
+                    self.root.after_cancel(callback)
+                except tk.TclError:
+                    pass
+            self._cooling_dialog = None
+            dialog.destroy()
+
+        def refresh():
+            nonlocal callback
+            if not self.running or not dialog.winfo_exists():
+                return
+            status = getattr(self, "_case_fan_status", {})
+            label.configure(text=(
+                f"Mode: {_case_fan_mode(status)}\n"
+                f"Target: {status.get('demand_pct', '--')}%   Command: {status.get('command_pct', '--')}%\n"
+                f"Reason: {status.get('reason', 'Automatic control is off')}\n"
+                f"Selected channels: {', '.join(status.get('controlled_channels', [])) or 'None'}\n"
+                f"Firmware: {', '.join(status.get('firmware_channels', [])) or 'Other headers'}\n\n"
+                "The highest CPU / GPU Core / Hotspot / memory demand wins.\n"
+                "Minimum: 60%. Increases apply on the next sample.\n"
+                "Decreases wait 15 seconds, then up to 2 percentage points/second, with a 3-point deadband.\n"
+                "Missing temperatures or a large hot Hotspot gap require 100%.\n"
+                "Startup verifies full airflow for 15 seconds.\n\n"
+                "CPU, GPU and pump fan settings remain with firmware or their driver."
+            ))
+            callback = self.root.after(1000, refresh)
+
+        dialog.protocol("WM_DELETE_WINDOW", close)
+        tk.Button(dialog, text="Close", command=close).pack(pady=(0, 12))
+        refresh()
+
     def show_sensor_guide(self):
         meanings = (
             "Core: ordinary GPU temperature. Hotspot: hottest measured GPU point.\n"
@@ -3036,14 +2952,13 @@ class OverlayApp:
             self.footer.pack_forget()
         self.root.update_idletasks()
         areas = _get_monitor_areas()
-        area = getattr(self, "_peek_monitor_area", None) or _select_monitor_for_window(
+        area = _select_monitor_for_window(
             self.config.get("x", 50), self.config.get("y", 50),
             self.root.winfo_width(), self.root.winfo_height(), areas)
         if area is None:
             return
         _monitor, work = area
         work_width, work_height = work[2] - work[0], work[3] - work[1]
-        peek_gap = PEEK_EDGE_GAP if getattr(self, "_peek_monitor_area", None) else 0
         if hasattr(self, "health_label"):
             self.health_label.configure(wraplength=max(100, min(310, work_width - 24)))
         self.root.update_idletasks()
@@ -3059,7 +2974,7 @@ class OverlayApp:
         overflow = self.content.winfo_reqheight() > available
         for _ in range(2):
             gutter = self.scrollbar.winfo_reqwidth() if overflow else 0
-            width = max(100, min(preferred_width, work_width - 12 - gutter - peek_gap))
+            width = max(100, min(preferred_width, work_width - 12 - gutter))
             for value in detail_values:
                 label_width = sum(child.winfo_reqwidth() for child in value.master.winfo_children() if child is not value)
                 value.configure(wraplength=max(20, min(260, width - label_width - 20)))
@@ -3076,11 +2991,6 @@ class OverlayApp:
         self._content_overflow = overflow
         self.root.update_idletasks()
         size = (self.root.winfo_reqwidth(), self.root.winfo_reqheight())
-        if (getattr(self, "peek_visible", False) and not getattr(self, "_peek_animating", False)
-                and not getattr(self, "_drag_active", False)
-                and size != getattr(self, "_content_layout_size", None)):
-            y = min(max(self.root.winfo_rooty(), work[1]), max(work[1], work[3] - size[1]))
-            self.root.geometry(f"+{work[2] - size[0] - peek_gap}+{y}")
         self._content_layout_size = size
 
     def _scroll_content(self, event):
@@ -3107,7 +3017,6 @@ class OverlayApp:
             self.running
             and not self.topmost
             and not self.peek_visible
-            and not self._peek_animating
             and not getattr(self, "_drag_active", False)
         )
 
@@ -3121,8 +3030,21 @@ class OverlayApp:
             except Exception:
                 log.debug("Failed to cancel scheduled desktop embed", exc_info=True)
 
+    def _set_window_layer(self, raised):
+        """Change only z-order; the desktop widget keeps one permanent HWND."""
+        hwnd = self._get_hwnd()
+        flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+        if raised:
+            return bool(user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags))
+        if user32.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST:
+            if not user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags):
+                return False
+        if _position_above_desktop(hwnd):
+            return True
+        return bool(user32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, flags))
+
     def _embed_into_desktop(self, expected_generation=None):
-        """Embed the window into the desktop layer (above wallpaper, below icons and apps)."""
+        """Place the independent window above wallpaper, below application windows."""
         if (
             expected_generation is not None
             and expected_generation != self._window_transition_generation
@@ -3132,26 +3054,12 @@ class OverlayApp:
         if not self._can_embed_now():
             return
         hwnd = self._get_hwnd()
-        # Keep the HWND unmapped while Tk flushes geometry/style changes. Alpha
-        # alone leaves a composed surface alive during the topmost transition.
-        _set_window_cloaked(hwnd, True)
-        user32.ShowWindow(hwnd, SW_HIDE)
+        set_tool_window(hwnd)
+        self._desktop_fallback_ready = self._set_window_layer(False)
         self.root.wm_attributes("-alpha", 0.88)
         self.root.update_idletasks()
-        set_tool_window(hwnd)
-        if embed_in_desktop(hwnd):
-            self.embedded = True
-            self._desktop_fallback_ready = False
-        else:
-            self.embedded = False
-            # Show Desktop may raise the shell over independent bottom windows.
-            self._desktop_fallback_ready = _position_above_desktop(hwnd)
-            if not self._desktop_fallback_ready:
-                self._desktop_fallback_ready = bool(user32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0,
-                                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE))
-        # No Tk attribute/geometry changes after placement: show in that layer.
-        if self.embedded or not _hide_covered_desktop_window(hwnd, self._desktop_foreground()):
-            _show_without_reordering(hwnd)
+        self._desktop_fallback_ready = self._set_window_layer(False)
+        _show_without_reordering(hwnd)
 
     def _schedule_embed(self, delay=50):
         """Schedule a generation-guarded embed; stale callbacks become no-ops."""
@@ -3161,26 +3069,6 @@ class OverlayApp:
             delay,
             lambda: self._embed_into_desktop(generation),
         )
-
-    def _detach_from_desktop(self):
-        if not self.embedded:
-            return True
-        hwnd = self._get_hwnd()
-        if not _set_parent_verified(hwnd, 0):
-            return False
-        self.embedded = False
-        return True
-
-    def _has_valid_desktop_parent(self):
-        if not self.embedded:
-            return False
-        hwnd = self._get_hwnd()
-        parent = user32.GetParent(hwnd)
-        if not parent or not user32.IsWindow(parent):
-            return False
-        class_name = ctypes.create_unicode_buffer(256)
-        user32.GetClassNameW(parent, class_name, 256)
-        return class_name.value == "WorkerW"
 
     def _make_row(self, key, label_text, parent=None, label_fg=None):
         parent = parent or self.content
@@ -3234,13 +3122,11 @@ class OverlayApp:
             self._desktop_fallback_ready = False
             self._monitor_areas = monitor_areas
             self._cursor_was_at_peek_edge = False
-            if self.peek_visible or self._peek_animating:
+            if self.peek_visible:
                 self._restore_desktop_mode()
             self._clamp_saved_position_to_visible_screen(persist=True)
         if self._can_embed_now():
-            if self.embedded and not self._has_valid_desktop_parent():
-                self.embedded = False
-            if (not self.embedded and not getattr(self, "_desktop_fallback_ready", False)
+            if (not getattr(self, "_desktop_fallback_ready", False)
                     and self._embed_after_id is None):
                 self._schedule_embed(50)
         self.root.after(5000, self._poll_screen_change)
@@ -3253,17 +3139,6 @@ class OverlayApp:
         if self.running and self.peek_enabled and not self.topmost:
             self._peek_poll_after_id = self.root.after(100, self._poll_peek_edge)
 
-    def _desktop_foreground(self):
-        hwnd = user32.GetForegroundWindow()
-        if not hwnd:
-            return False
-        if _window_has_class(hwnd, {"Shell_TrayWnd", "Shell_SecondaryTrayWnd"}):
-            # Show Desktop can leave focus in the tray. Inspect the saved widget
-            # location, so the button does not require an extra desktop click.
-            x, y = self._saved_pos or (self.config.get("x", 50), self.config.get("y", 50))
-            hwnd = user32.WindowFromPoint(POINT(x, y))
-        return _window_has_class(hwnd, {"Progman", "WorkerW"})
-
     def _poll_desktop_visibility(self):
         """Recover Show Desktop independently of the optional edge polling."""
         if not self.running:
@@ -3275,21 +3150,14 @@ class OverlayApp:
                 if user32.GetAsyncKeyState(0x01) & 0x8000:
                     return
                 self.end_drag(None)
-            if self.topmost:
-                return
-            desktop = self._desktop_foreground()
-            if desktop and (self.peek_visible or self._peek_animating):
-                self._restore_desktop_mode()
-            if (self.embedded or self.peek_visible or self._peek_animating
-                    or getattr(self, "_embed_after_id", None) is not None):
+            if getattr(self, "_embed_after_id", None) is not None:
                 return
             hwnd = self._get_hwnd()
-            if _hide_covered_desktop_window(hwnd, desktop):
-                return
             if user32.IsIconic(hwnd) or not user32.IsWindowVisible(hwnd):
                 user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
-            _position_above_desktop(hwnd)
-            _set_window_cloaked(hwnd, False)
+            raised = self.topmost or self.peek_visible
+            if not raised or not user32.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST:
+                self._set_window_layer(raised)
         except tk.TclError:
             log.debug("Desktop visibility changed during window transition", exc_info=True)
         finally:
@@ -3313,164 +3181,66 @@ class OverlayApp:
             and self.peek_enabled
             and not self.topmost
             and not self.peek_visible
-            and not self._peek_animating
             and not getattr(self, "_drag_active", False)
-            and not self._is_desktop_at_cursor()
+            and not self._is_taskbar_at_cursor()
         ):
             self._peek_show(edge_monitor)
+            if not self.peek_visible:
+                self._cursor_was_at_peek_edge = False
+                self._schedule_peek_poll()
+                return
         self._cursor_was_at_peek_edge = at_edge
         self._schedule_peek_poll()
 
-    def _is_desktop_at_cursor(self):
-        """Check whether the desktop, rather than an application, is under the cursor."""
-        pt = POINT()
-        if not user32.GetCursorPos(ctypes.byref(pt)):
-            return False
-        hwnd = user32.WindowFromPoint(pt)
-        return self._is_desktop_hwnd(hwnd) or _window_has_class(
-            hwnd, {"Shell_TrayWnd", "Shell_SecondaryTrayWnd"},
-        )
-
-    def _is_desktop_hwnd(self, hwnd):
-        """Check if the given HWND belongs to a desktop-layer window."""
-        if not hwnd:
+    def _is_taskbar_at_cursor(self):
+        """Exclude the real taskbar, including its auto-hide/Show Desktop strip."""
+        point = POINT()
+        if not user32.GetCursorPos(ctypes.byref(point)):
             return True
-        # Any window from our own process is the overlay widget; treat it as desktop.
-        pid = ctypes.wintypes.DWORD()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        if pid.value == _MY_PID:
-            return True
-        return _window_has_class(hwnd, {"Progman", "WorkerW"})
+        return _window_has_class(user32.WindowFromPoint(point), {"Shell_TrayWnd", "Shell_SecondaryTrayWnd"})
 
     def _restore_desktop_mode(self, delay=50):
+        """Lower the same visible window; no relocation or desktop parenting."""
+        if not self._set_window_layer(False):
+            return False
+        self._cancel_scheduled_embed()
         self._drag_active = False
         self._cursor_was_at_peek_edge = False
-        _set_window_cloaked(self._get_hwnd(), True)
-        self._peek_animating = False
         self.peek_visible = False
-        self.root.wm_attributes("-alpha", 0)
-        user32.ShowWindow(self._get_hwnd(), SW_HIDE)
-        self.root.wm_attributes("-topmost", False)
-        if self._saved_pos:
-            x, y = self._saved_pos
-            self.root.geometry(f"+{x}+{y}")
-            self.config["x"] = x
-            self.config["y"] = y
-            self._saved_pos = None
         self._peek_monitor_area = None
-        self._schedule_embed(delay)
+        return True
 
     def _peek_show(self, monitor_area=None):
-        """Slide the overlay in from the right edge."""
-        if (not self.running or not self.peek_enabled or self.peek_visible or self._peek_animating
+        """Temporarily raise the desktop widget at its existing coordinates."""
+        if (not self.running or not self.peek_enabled or self.peek_visible
                 or self.topmost or getattr(self, "_drag_active", False)):
             return
-        # If the desktop is under the cursor, the embedded widget is already visible.
-        if self._is_desktop_at_cursor():
+        if not getattr(self, "_desktop_fallback_ready", True):
+            return
+        if self._is_taskbar_at_cursor():
             return
         if monitor_area is None:
             point = POINT()
             if user32.GetCursorPos(ctypes.byref(point)):
-                monitor_area = _exposed_right_edge_monitor(
-                    point.x, point.y, self._monitor_areas
-                )
+                monitor_area = _exposed_right_edge_monitor(point.x, point.y, self._monitor_areas)
         if monitor_area is None:
-            selected = _select_monitor_for_window(
-                self.config.get("x", 50),
-                self.config.get("y", 50),
-                max(1, self.root.winfo_width()),
-                max(1, self.root.winfo_height()),
-                self._monitor_areas,
-            )
-            monitor_area = selected
-        if monitor_area is None:
+            return
+        self._cancel_scheduled_embed()
+        if not self._set_window_layer(True):
+            log.warning("Could not raise the desktop widget")
             return
         self._peek_monitor_area = monitor_area
-
-        # Save current desktop position
-        self._saved_pos = (self.config.get("x", 50), self.config.get("y", 50))
-
-        self._cancel_scheduled_embed()
-        self.root.wm_attributes("-alpha", 0)
-        _set_window_cloaked(self._get_hwnd(), True)
-        user32.ShowWindow(self._get_hwnd(), SW_HIDE)
-        if not self._detach_from_desktop():
-            self.root.wm_attributes("-alpha", 0.88)
-            _show_without_reordering(self._get_hwnd())
-            self._saved_pos = None
-            self._peek_monitor_area = None
-            log.warning("Cannot enter peek mode because desktop detach failed")
-            return
-
-        self._peek_animating = True
-
-        # Prepare the topmost layer while transparent, at the off-screen origin.
-        self.root.wm_attributes("-topmost", True)
-
-        monitor_rect, work_rect = monitor_area
-        screen_right = monitor_rect[2]
-        try:
-            self._fit_content()
-            self.root.update_idletasks()
-            overlay_w = self.root.winfo_width()
-            overlay_h = self.root.winfo_height()
-        except tk.TclError:
-            self._restore_desktop_mode()
-            return
-
-        # Keep the same Y position as on the desktop
-        target_x = work_rect[2] - overlay_w - PEEK_EDGE_GAP
-        saved_y = self._saved_pos[1] if self._saved_pos else self.config.get("y", 50)
-        target_y = min(max(saved_y, work_rect[1]), max(work_rect[1], work_rect[3] - overlay_h))
-
-        # Start off-screen
-        self.root.geometry(f"+{screen_right}+{target_y}")
-        self.root.update_idletasks()
-        self.root.wm_attributes("-alpha", 0.88)
-        _show_without_reordering(self._get_hwnd())
-
-        # Animate slide-in
-        self._animate_slide(screen_right, target_x, target_y, step=-20, callback=self._peek_shown)
-
-    def _animate_slide(self, current_x, target_x, y, step, callback, expected_generation=None):
-        """Animate horizontal slide."""
-        if expected_generation is None:
-            expected_generation = self._window_transition_generation
-        if (not self.running or not self._peek_animating
-                or expected_generation != self._window_transition_generation):
-            return
-        try:
-            if step < 0 and current_x <= target_x:
-                self.root.geometry(f"+{target_x}+{y}")
-                callback()
-                return
-            if step > 0 and current_x >= target_x:
-                self.root.geometry(f"+{target_x}+{y}")
-                callback()
-                return
-            self.root.geometry(f"+{current_x}+{y}")
-            self.root.after(10, lambda: self._animate_slide(
-                current_x + step, target_x, y, step, callback, expected_generation,
-            ))
-        except tk.TclError:
-            try:
-                self._restore_desktop_mode()
-            except tk.TclError:
-                pass
-
-    def _peek_shown(self):
-        """Called when slide-in animation finishes."""
-        self._peek_animating = False
         self.peek_visible = True
-        self._peek_check_mouse()
+        generation = self._window_transition_generation
+        self.root.after(200, lambda: self._peek_check_mouse(generation))
 
     def _peek_check_mouse(self, expected_generation=None):
-        """Poll mouse position — hide when cursor leaves overlay and trigger."""
+        """Lower when the cursor leaves the widget and its active edge trigger."""
         if expected_generation is None:
             expected_generation = self._window_transition_generation
         if expected_generation != self._window_transition_generation:
             return
-        if not self.running or not self.peek_visible or self._peek_animating:
+        if not self.running or not self.peek_visible:
             return
 
         def retry():
@@ -3478,7 +3248,9 @@ class OverlayApp:
 
         # Menus extend beyond the widget; hold the anchor while choosing settings.
         menu = getattr(self, "menu", None)
+        cooling_dialog = getattr(self, "_cooling_dialog", None)
         if (getattr(self, "_drag_active", False) or getattr(self, "_settings_dialog_open", False)
+                or (cooling_dialog is not None and cooling_dialog.winfo_exists())
                 or (menu is not None and menu.winfo_ismapped())):
             retry()
             return
@@ -3508,69 +3280,35 @@ class OverlayApp:
             self._peek_hide()
 
     def _peek_hide(self):
-        """Slide the overlay back off-screen and re-embed in desktop."""
-        if not self.peek_visible or self._peek_animating:
+        """Return to the desktop layer while remaining mapped in the same place."""
+        if not self.running or not self.peek_visible:
             return
-
-        self._peek_animating = True
-        # peek_visible stays True until animation finishes (in _peek_hidden)
-
-        if self._peek_monitor_area is None:
-            self._restore_desktop_mode()
-            return
-        screen_right = self._peek_monitor_area[0][2]
-        current_x = self.root.winfo_rootx()
-        current_y = self.root.winfo_rooty()
-
-        self._animate_slide(current_x, screen_right, current_y, step=20, callback=self._peek_hidden)
-
-    def _peek_hidden(self):
-        """Called when slide-out animation finishes."""
-        self._restore_desktop_mode()
+        if not self._restore_desktop_mode():
+            generation = self._window_transition_generation
+            self.root.after(200, lambda: self._peek_check_mouse(generation))
 
     def toggle_peek(self):
         self.peek_enabled = not self.peek_enabled
         self.config["peek_enabled"] = self.peek_enabled
         self._cursor_was_at_peek_edge = False
-        if not self.peek_enabled and (self.peek_visible or self._peek_animating):
+        if not self.peek_enabled and self.peek_visible:
             self._restore_desktop_mode()
         self._save_config()
         self._set_menu_label("peek",
-            "Peek from edge: ON" if self.peek_enabled else "Peek from edge: OFF"
+            "Raise on edge: ON" if self.peek_enabled else "Raise on edge: OFF"
         )
         self._schedule_peek_poll()
 
     def toggle_topmost(self):
         target_topmost = not self.topmost
-        if target_topmost:
-            self._cancel_scheduled_embed()
-            if self.peek_visible or self._peek_animating:
-                self._restore_desktop_mode()
-                self._cancel_scheduled_embed()
-            if not self._detach_from_desktop():
-                log.warning("Cannot enable always-on-top because desktop detach failed")
-                _show_error_message(
-                    "HeatMap window",
-                    "Could not detach the overlay from the desktop. Always on top remains off.",
-                )
-                return
-            self.topmost = True
-            # Restore saved position if we were peeking
-            if self._saved_pos:
-                x, y = self._saved_pos
-                self.root.geometry(f"+{x}+{y}")
-                self._saved_pos = None
-            self.root.deiconify()
-            self.root.wm_attributes("-alpha", 0.88)
-            self.root.wm_attributes("-topmost", True)
-            _show_without_reordering(self._get_hwnd())
-        else:
-            self.topmost = False
-            self.root.wm_attributes("-topmost", False)
-            self._schedule_embed(100)
-        self._set_menu_label("topmost",
-            "Always on top: ON" if self.topmost else "Always on top: OFF"
-        )
+        if not self._set_window_layer(target_topmost):
+            _show_error_message("HeatMap window", "Could not change the window layer. Please try again.")
+            return
+        self._cancel_scheduled_embed()
+        self.topmost = target_topmost
+        self.peek_visible = False
+        self._peek_monitor_area = None
+        self._set_menu_label("topmost", "Always on top: ON" if self.topmost else "Always on top: OFF")
         self._cursor_was_at_peek_edge = False
         self._schedule_peek_poll()
 
@@ -3715,26 +3453,19 @@ class OverlayApp:
 
     def start_drag(self, event):
         self._drag_active = True
-        self._drag_interrupted_peek = self._peek_animating
         self._cancel_scheduled_embed()
-        if self._peek_animating:
-            self._peek_animating = False
-            self.peek_visible = True
         self._drag_x = event.x
         self._drag_y = event.y
         self._dragged = False
 
     def on_drag(self, event):
+        if not getattr(self, "_drag_active", False):
+            return
         self._dragged = True
-        # Use winfo_rootx/rooty for screen-absolute coords (correct when embedded in WorkerW)
         x = self.root.winfo_rootx() + event.x - self._drag_x
         y = self.root.winfo_rooty() + event.y - self._drag_y
         self.root.geometry(f"+{x}+{y}")
-        if self.peek_visible or self._peek_animating:
-            self._saved_pos = (x, y)
-        else:
-            self.config["x"] = x
-            self.config["y"] = y
+        self.config["x"], self.config["y"] = x, y
 
     def end_drag(self, _event):
         if not getattr(self, "_drag_active", False):
@@ -3746,24 +3477,14 @@ class OverlayApp:
                 self.root.winfo_width(), self.root.winfo_height(), _get_monitor_areas())
             self.root.geometry(f"+{x}+{y}")
             self.config["x"], self.config["y"] = x, y
-            if self.peek_visible:
-                self._saved_pos = (x, y)
             self._save_config()
-        elif getattr(self, "_drag_interrupted_peek", False) and self.peek_visible and self._peek_monitor_area:
-            # A click can stop the slide while most of the window is offscreen.
-            # Settle the preview without replacing the saved desktop location.
-            work = self._peek_monitor_area[1]
-            x = max(work[0], work[2] - self.root.winfo_width() - PEEK_EDGE_GAP)
-            y = min(max(self.root.winfo_rooty(), work[1]), max(work[1], work[3] - self.root.winfo_height()))
-            self.root.geometry(f"+{x}+{y}")
-        self._drag_interrupted_peek = False
         self._dragged = False
-        # Cancel any held-drag poll before starting exactly one new chain.
         self._cancel_scheduled_embed()
+        self._cursor_was_at_peek_edge = False
         if self.peek_visible:
             self._peek_check_mouse()
         elif self._can_embed_now():
-            self._schedule_embed()
+            self._set_window_layer(False)
 
     def show_menu(self, event):
         self.menu.tk_popup(event.x_root, event.y_root)
@@ -3864,14 +3585,17 @@ class OverlayApp:
             status = self._case_fan_status
             state = status.get("state", "off")
             reference = full_rpm_reference(status.get("verified_full_rpm"))
-            if state == "active" and reference and full_rpm_reference(self.config.get("case_fan_full_rpm")) is None:
-                self.config["case_fan_full_rpm"] = reference
-                self.fan_worker.full_rpm = reference
-                self._save_config()
-            command = status.get("command_pct")
+            if state == "active" and reference:
+                previous = full_rpm_reference(self.config.get("case_fan_full_rpm")) or {}
+                # Preserve earlier SYS4 calibration during a two-channel session;
+                # add newly commissioned channels when the full profile returns.
+                merged = dict(previous, **reference)
+                if merged != previous:
+                    self.config["case_fan_full_rpm"] = merged
+                    self.fan_worker.full_rpm = merged
+                    self._save_config()
             self.rows["case_fan_control"].config(
-                text=f"AUTO {command}%" if state == "active" else
-                     {"off": "Firmware", "stopped": "Firmware", "checking": "Checking..."}.get(state, "ERROR"),
+                text=_case_fan_mode(status),
                 fg="#f87171" if state == "error" else "#facc15" if state == "checking" else "#4ade80",
             )
 
@@ -3985,7 +3709,9 @@ class OverlayApp:
                 self._seen_case_fans.add(number)
                 self.rows[key].master.pack(fill="x", pady=1, before=self.rows["case_fan_control"].master)
             self.rows[key].config(
-                text=_format_rpm(rpm), fg="#f87171" if fan and fan.get("id") in stalled_ids else "#4ade80" if rpm else "#888888"
+                text=_format_rpm(rpm) + (" · Firmware" if fan and fan.get("name") in
+                     getattr(self, "_case_fan_status", {}).get("firmware_channels", []) else ""),
+                fg="#f87171" if fan and fan.get("id") in stalled_ids else "#4ade80" if rpm else "#888888"
             )
 
         # RAM: used/total GB + %
@@ -4122,18 +3848,13 @@ class OverlayApp:
                     log.debug("Failed to cancel after callback", exc_info=True)
         except Exception:
             log.debug("Failed to enumerate after callbacks", exc_info=True)
-        # Save desktop position (not peek/animation position)
-        if self._saved_pos:
-            self.config["x"], self.config["y"] = self._saved_pos
-        elif not self.peek_visible and not self._peek_animating and not self.embedded:
-            # Only read winfo coordinates when NOT embedded (they are screen-relative)
-            # When embedded, config["x"]/["y"] already track position via on_drag
-            try:
-                position = (self.root.winfo_rootx(), self.root.winfo_rooty())
-            except tk.TclError:
-                log.debug("Window already gone; keeping saved position", exc_info=True)
-            else:
-                self.config["x"], self.config["y"] = position
+        # The stationary widget uses one screen-relative position in every mode.
+        try:
+            position = (self.root.winfo_rootx(), self.root.winfo_rooty())
+        except tk.TclError:
+            log.debug("Window already gone; keeping saved position", exc_info=True)
+        else:
+            self.config["x"], self.config["y"] = position
         self.config["peek_enabled"] = self.peek_enabled
         self.config["alerts_enabled"] = self.alerts_enabled
         self.config["details_enabled"] = self.details_enabled

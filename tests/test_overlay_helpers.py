@@ -1649,153 +1649,6 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(app.root.geometry_calls, ["+1700+920"])
         self.assertEqual(save_calls, [False])
 
-    def test_set_parent_verified_checks_native_postcondition(self):
-        with (
-            mock.patch.object(overlay.user32, "IsWindow", return_value=True),
-            mock.patch.object(overlay.user32, "GetWindowLongW", return_value=overlay.WS_POPUP),
-            mock.patch.object(overlay.user32, "SetWindowLongW") as set_style,
-            mock.patch.object(overlay.user32, "SetParent") as set_parent,
-            mock.patch.object(overlay.user32, "GetParent", return_value=0),
-        ):
-            self.assertFalse(overlay._set_parent_verified(100, 200))
-
-        set_parent.assert_called_once_with(100, 200)
-        self.assertEqual(
-            set_style.call_args_list,
-            [
-                mock.call(100, overlay.GWL_STYLE, overlay.WS_CHILD),
-                mock.call(100, overlay.GWL_STYLE, ctypes.c_long(overlay.WS_POPUP).value),
-            ],
-        )
-
-    def test_set_parent_verified_accepts_native_null_as_detached_parent(self):
-        with (
-            mock.patch.object(overlay.user32, "IsWindow", return_value=True),
-            mock.patch.object(overlay.user32, "GetWindowLongW", return_value=overlay.WS_CHILD),
-            mock.patch.object(overlay.user32, "SetWindowLongW") as set_style,
-            mock.patch.object(overlay.user32, "SetParent") as set_parent,
-            mock.patch.object(overlay.user32, "GetParent", return_value=None),
-            mock.patch.object(overlay.user32, "SetWindowPos") as set_window_pos,
-        ):
-            self.assertTrue(overlay._set_parent_verified(100, 0))
-
-        set_parent.assert_called_once_with(100, 0)
-        set_style.assert_called_once_with(
-            100,
-            overlay.GWL_STYLE,
-            ctypes.c_long(overlay.WS_POPUP).value,
-        )
-        set_window_pos.assert_called_once()
-
-    def test_set_parent_verified_sets_child_style_before_embedding(self):
-        with (
-            mock.patch.object(overlay.user32, "IsWindow", return_value=True),
-            mock.patch.object(overlay.user32, "GetWindowLongW", return_value=overlay.WS_POPUP),
-            mock.patch.object(overlay.user32, "SetWindowLongW") as set_style,
-            mock.patch.object(overlay.user32, "SetParent") as set_parent,
-            mock.patch.object(overlay.user32, "GetParent", return_value=200),
-            mock.patch.object(overlay.user32, "SetWindowPos") as set_window_pos,
-        ):
-            self.assertTrue(overlay._set_parent_verified(100, 200))
-
-        set_style.assert_called_once_with(100, overlay.GWL_STYLE, overlay.WS_CHILD)
-        set_parent.assert_called_once_with(100, 200)
-        set_window_pos.assert_called_once()
-
-    def test_find_desktop_host_rejects_progman_parent_that_dies_with_explorer(self):
-        progman = 100
-
-        def find_window_ex(parent, after, class_name, _title):
-            if (parent, class_name) == (progman, "SHELLDLL_DefView"):
-                return 200
-            return 0
-
-        def enum_windows(callback, _lparam):
-            callback(progman, 0)
-            return True
-
-        with (
-            mock.patch.object(overlay.user32, "FindWindowW", return_value=progman),
-            mock.patch.object(overlay.user32, "SendMessageTimeoutW", return_value=1),
-            mock.patch.object(overlay.user32, "FindWindowExW", side_effect=find_window_ex),
-            mock.patch.object(overlay.user32, "EnumWindows", side_effect=enum_windows),
-        ):
-            self.assertIsNone(overlay.find_desktop_worker_w())
-
-    def test_find_desktop_host_uses_worker_behind_defview_worker(self):
-        progman = 100
-        icons_worker = 300
-        wallpaper_worker = 400
-
-        def find_window_ex(parent, after, class_name, _title):
-            if (parent, class_name) == (icons_worker, "SHELLDLL_DefView"):
-                return 301
-            if (parent, after, class_name) == (0, icons_worker, "WorkerW"):
-                return wallpaper_worker
-            return 0
-
-        def enum_windows(callback, _lparam):
-            callback(progman, 0)
-            callback(icons_worker, 0)
-            return True
-
-        with (
-            mock.patch.object(overlay.user32, "FindWindowW", return_value=progman),
-            mock.patch.object(overlay.user32, "SendMessageTimeoutW", return_value=1),
-            mock.patch.object(overlay.user32, "FindWindowExW", side_effect=find_window_ex),
-            mock.patch.object(overlay.user32, "EnumWindows", side_effect=enum_windows),
-        ):
-            self.assertEqual(overlay.find_desktop_worker_w(), wallpaper_worker)
-
-    def test_embed_in_desktop_keeps_overlay_behind_host_children(self):
-        expected_flags = overlay.SWP_NOMOVE | overlay.SWP_NOSIZE | overlay.SWP_NOACTIVATE
-        with (
-            mock.patch.object(overlay, "find_desktop_worker_w", return_value=200),
-            mock.patch.object(overlay, "_set_parent_verified", return_value=True) as set_parent,
-            mock.patch.object(overlay.user32, "SetWindowPos", return_value=True) as set_window_pos,
-        ):
-            self.assertTrue(overlay.embed_in_desktop(100))
-
-        set_parent.assert_called_once_with(100, 200)
-        set_window_pos.assert_called_once_with(100, overlay.HWND_BOTTOM, 0, 0, 0, 0, expected_flags)
-
-    def test_failed_lowering_keeps_native_parent_tracked_for_later_detach(self):
-        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
-        app.running = True
-        app.topmost = False
-        app.peek_visible = False
-        app._peek_animating = False
-        app.embedded = False
-        app.root = _FakeRoot()
-        app._embed_after_id = None
-        app._get_hwnd = lambda: 100
-        with (
-            mock.patch.object(overlay, "find_desktop_worker_w", return_value=200),
-            mock.patch.object(overlay, "_set_parent_verified", return_value=True) as set_parent,
-            mock.patch.object(overlay, "set_tool_window"),
-            mock.patch.object(overlay.user32, "SetWindowPos", return_value=False),
-            mock.patch.object(overlay.user32, "GetParent", return_value=200),
-            mock.patch.object(overlay.user32, "IsWindow", return_value=True),
-            mock.patch.object(overlay.log, "warning"),
-        ):
-            app._embed_into_desktop()
-            self.assertTrue(app.embedded)
-            self.assertTrue(app._detach_from_desktop())
-
-        self.assertFalse(app.embedded)
-        self.assertEqual(set_parent.call_args_list, [mock.call(100, 200), mock.call(100, 0)])
-
-    def test_failed_lowering_does_not_claim_a_lost_desktop_parent(self):
-        with (
-            mock.patch.object(overlay, "find_desktop_worker_w", return_value=200),
-            mock.patch.object(overlay, "_set_parent_verified", return_value=True),
-            mock.patch.object(overlay.user32, "SetWindowPos", return_value=False),
-            mock.patch.object(overlay.user32, "GetParent", return_value=0),
-            mock.patch.object(overlay.user32, "IsWindow", return_value=False),
-            mock.patch.object(overlay.log, "warning"),
-        ):
-            self.assertFalse(overlay.embed_in_desktop(100))
-
     def test_stale_embed_callback_is_ignored_after_transition_cancel(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
         app.running = True
@@ -1808,36 +1661,33 @@ class OverlayHelperTests(unittest.TestCase):
         app._window_transition_generation = 0
         app._get_hwnd = lambda: 123
 
-        with mock.patch.object(overlay, "embed_in_desktop", return_value=True) as embed:
+        with mock.patch.object(app, "_set_window_layer", return_value=True) as embed:
             app._schedule_embed(100)
             stale_callback = app.root.after_calls[-1][1]
             app._cancel_scheduled_embed()
             stale_callback()
 
         embed.assert_not_called()
-        self.assertFalse(app.embedded)
 
-    def test_screen_poll_reembeds_after_explorer_replaces_desktop_parent(self):
+    def test_screen_poll_retries_incomplete_desktop_placement(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
         app.running = True
         app.topmost = False
         app.peek_visible = False
         app._peek_animating = False
-        app.embedded = True
+        app._desktop_fallback_ready = False
         app._embed_after_id = None
         app._monitor_areas = [((0, 0, 1920, 1080), (0, 0, 1920, 1040))]
         app.root = _FakeRoot()
-        app._has_valid_desktop_parent = lambda: False
         app._schedule_embed = mock.Mock()
 
         with mock.patch.object(overlay, "_get_monitor_areas", return_value=app._monitor_areas):
             app._poll_screen_change()
 
-        self.assertFalse(app.embedded)
         app._schedule_embed.assert_called_once_with(50)
         self.assertEqual(app.root.after_calls[-1][0], 5000)
 
-    def test_toggle_topmost_stays_off_when_detach_fails(self):
+    def test_toggle_topmost_stays_off_when_layer_change_fails(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
         app.topmost = False
         app.peek_visible = False
@@ -1847,7 +1697,7 @@ class OverlayHelperTests(unittest.TestCase):
         app.root = _FakeRoot()
         app._embed_after_id = None
         app._window_transition_generation = 0
-        app._detach_from_desktop = lambda: False
+        app._set_window_layer = lambda raised: False
 
         with mock.patch.object(overlay, "_show_error_message") as show_error:
             app.toggle_topmost()
@@ -1855,7 +1705,7 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertFalse(app.topmost)
         show_error.assert_called_once()
 
-    def test_toggle_topmost_from_peek_restores_visible_alpha(self):
+    def test_toggle_topmost_from_peek_keeps_position_and_opacity(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
         app.running = True
         app.peek_enabled = True
@@ -1869,70 +1719,36 @@ class OverlayHelperTests(unittest.TestCase):
         app.root = _FakeRoot()
         app._embed_after_id = None
         app._window_transition_generation = 0
-        app._detach_from_desktop = lambda: True
+        app._set_window_layer = mock.Mock(return_value=True)
         app._set_menu_label = lambda *_args: None
 
         app.toggle_topmost()
 
         self.assertTrue(app.topmost)
-        self.assertIn(("-alpha", 0.88), app.root.attribute_calls)
-        self.assertEqual(app.root.attribute_calls[-1], ("-topmost", True))
+        app._set_window_layer.assert_called_once_with(True)
+        self.assertEqual(app.root.attribute_calls, [])
+        self.assertEqual(app.root.geometry_calls, [])
 
-    def test_peek_uses_work_area_right_edge_and_restores_alpha(self):
+    def test_toggle_peek_off_lowers_without_moving_and_persists_setting(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
-        app.running = True
-        app.peek_enabled = True
-        app.peek_visible = False
-        app._peek_animating = False
+        app.running = app.peek_enabled = app.peek_visible = True
         app.topmost = False
-        app.embedded = False
-        app.config = {"x": 100, "y": 120}
-        app.root = _FakeRoot(width=200, height=120)
+        app.config = {"peek_enabled": True, "x": 50, "y": 60}
+        app.root = _FakeRoot()
         app._embed_after_id = None
         app._window_transition_generation = 0
-        app._monitor_areas = (((0, 0, 1920, 1080), (0, 0, 1880, 1040)),)
-        app._is_desktop_at_cursor = lambda: False
-        app._detach_from_desktop = lambda: True
-        animation = []
-        app._animate_slide = lambda *args, **kwargs: animation.append((args, kwargs))
-
-        app._peek_show(app._monitor_areas[0])
-
-        # The last six work-area pixels stay available to the application edge.
-        self.assertEqual(animation[0][0][:3], (1920, 1674, 120))
-        self.assertIn(("-alpha", 0.88), app.root.attribute_calls)
-
-    def test_toggle_peek_off_restores_saved_position_and_persists_it(self):
-        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
-        app.running = True
-        app.config = {"peek_enabled": True, "x": 50, "y": 60}
-        app.peek_enabled = True
-        app.peek_visible = True
-        app._peek_animating = False
-        app._saved_pos = (320, 240)
-        app._peek_monitor_area = ((0, 0, 1920, 1080), (0, 0, 1920, 1040))
-        app.topmost = False
-        app.root = _FakeRoot()
-        app._cursor_was_at_peek_edge = True
-        app.menu_labels = []
-        schedule_calls = []
-        save_snapshots = []
-        app._set_menu_label = lambda key, label: app.menu_labels.append((key, label))
-        app._schedule_embed = lambda delay: schedule_calls.append(delay)
-        app._save_config = lambda: save_snapshots.append(dict(app.config))
-
+        app._set_window_layer = mock.Mock(return_value=True)
+        app._set_menu_label = mock.Mock()
+        app._save_config = mock.Mock()
         app.toggle_peek()
-
         self.assertFalse(app.peek_enabled)
         self.assertFalse(app.peek_visible)
-        self.assertFalse(app._peek_animating)
-        self.assertIsNone(app._saved_pos)
-        self.assertEqual(app.config, {"peek_enabled": False, "x": 320, "y": 240})
-        self.assertEqual(app.root.geometry_calls, ["+320+240"])
-        self.assertEqual(app.root.attribute_calls, [("-alpha", 0), ("-topmost", False)])
-        self.assertEqual(schedule_calls, [50])
-        self.assertEqual(app.menu_labels, [("peek", "Peek from edge: OFF")])
-        self.assertEqual(save_snapshots[-1], {"peek_enabled": False, "x": 320, "y": 240})
+        self.assertEqual(app.config, {"peek_enabled": False, "x": 50, "y": 60})
+        self.assertEqual(app.root.geometry_calls, [])
+        self.assertEqual(app.root.attribute_calls, [])
+        app._set_window_layer.assert_called_once_with(False)
+        app._set_menu_label.assert_called_once_with("peek", "Raise on edge: OFF")
+        app._save_config.assert_called_once()
 
     def test_toggle_peek_on_rearms_cursor_edge(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
@@ -1955,7 +1771,7 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertTrue(app.peek_enabled)
         self.assertEqual(app.config["peek_enabled"], True)
         self.assertFalse(app._cursor_was_at_peek_edge)
-        self.assertEqual(app.menu_labels, [("peek", "Peek from edge: ON")])
+        self.assertEqual(app.menu_labels, [("peek", "Raise on edge: ON")])
         self.assertEqual(save_snapshots, [{"peek_enabled": True, "x": 50, "y": 60}])
 
     def test_reset_peaks_clears_peak_state_and_rows(self):

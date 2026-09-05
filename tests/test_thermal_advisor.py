@@ -1,7 +1,7 @@
 import unittest
 
 import overlay
-from thermal_policy import FanRamp, ThermalAdvisor, case_fan_demand, delta_severity, gpu_delta
+from thermal_policy import FanRamp, ThermalAdvisor, case_fan_demand, delta_severity, finite, gpu_delta
 
 
 def sample(**changes):
@@ -50,11 +50,92 @@ class ThermalPolicyTests(unittest.TestCase):
         ramp = FanRamp()
         self.assertEqual(ramp.update(60, 0), 100)
         self.assertEqual(ramp.update(60, 14), 100)
-        self.assertEqual(ramp.update(60, 16), 96)
-        self.assertEqual(ramp.update(95, 18), 96)
+        self.assertEqual(ramp.update(60, 16), 98)
+        self.assertEqual(ramp.update(97, 18), 98)
         self.assertEqual(ramp.update(100, 20), 100)
         self.assertEqual(ramp.update(60, 21), 100)
         self.assertEqual(ramp.update(60, 35), 100)
+
+    def test_ramp_duplicate_and_backward_timestamps_cannot_accelerate_cooling(self):
+        ramp = FanRamp()
+        ramp.update(60, 0)
+        ramp.update(60, 14)
+        self.assertEqual(ramp.update(60, 16), 98)
+        for now in (16, 15, 16):
+            self.assertEqual(ramp.update(60, now), 98)
+        self.assertEqual(ramp.update(60, 16.25), 98)
+        self.assertEqual(ramp.update(60, 16.5), 97)
+
+    def test_cooling_hold_time_is_not_banked_as_a_decrease_budget(self):
+        ramp = FanRamp()
+        self.assertEqual(ramp.update(60, 0), 100)
+        self.assertEqual(ramp.update(60, 15), 100)
+        self.assertEqual(ramp.update(60, 15.25), 100)
+        self.assertEqual(ramp.update(60, 15.5), 99)
+
+    def test_ramp_subsecond_updates_share_the_two_points_per_second_budget(self):
+        ramp = FanRamp(cool_since=0, last_time=15)
+        values = [ramp.update(60, 15 + step / 8) for step in range(1, 9)]
+        self.assertEqual(values, [100, 100, 100, 99, 99, 99, 99, 98])
+        self.assertEqual(ramp.update(60, 1000), 88, "A long pause must retain the five-second cap")
+
+    def test_ramp_restarts_cooling_delay_after_an_emergency_rise(self):
+        ramp = FanRamp(cool_since=0, last_time=15)
+        ramp.update(60, 15.25)
+        self.assertEqual(ramp.update(100, 15.25), 100)
+        self.assertEqual(ramp.update(60, 16), 100)
+        self.assertEqual(ramp.update(60, 30.75), 100)
+        self.assertEqual(ramp.update(60, 31), 100)
+        self.assertEqual(ramp.update(60, 31.25), 100)
+        self.assertEqual(ramp.update(60, 31.5), 99)
+
+    def test_ramp_invalid_demands_request_full_airflow(self):
+        for demand in (None, True, "60", float("nan"), float("inf"), -float("inf"), 10 ** 1000):
+            with self.subTest(demand_type=type(demand).__name__):
+                self.assertEqual(FanRamp(value=60).update(demand, 10), 100)
+
+    def test_extreme_temperature_integer_is_invalid_instead_of_overflowing(self):
+        for value in (10 ** 1000, -(10 ** 1000)):
+            self.assertIsNone(finite(value))
+            demand, reason = case_fan_demand(sample(cpu_temp=value))
+            self.assertEqual(demand, 100)
+            self.assertIn("CPU", reason)
+
+    def test_curve_knots_midpoints_and_labels_for_each_limiting_component(self):
+        cool = sample(cpu_temp=30, gpu_core_temp=30, gpu_hotspot_temp=40, gpu_memory_temp=40)
+        scenarios = (
+            ("cpu_temp", "CPU curve", ((40, 60), (50, 65), (60, 70), (67.5, 80), (75, 90), (77.5, 95), (80, 100))),
+            ("gpu_core_temp", "GPU Core curve", ((50, 70), (60, 80), (67.5, 90), (75, 100))),
+            ("gpu_hotspot_temp", "GPU Hotspot curve", ((70, 70), (80, 80), (87.5, 90), (95, 100))),
+            ("gpu_memory_temp", "GPU Memory curve", ((70, 70), (80, 80), (87.5, 90), (95, 100))),
+        )
+        for key, label, pairs in scenarios:
+            for temperature, expected in pairs:
+                with self.subTest(key=key, temperature=temperature):
+                    data = dict(cool, **{key: temperature})
+                    # Avoid the independent gap override while testing this curve.
+                    if key == "gpu_hotspot_temp":
+                        data["gpu_core_temp"] = temperature - 25
+                    demand, reason = case_fan_demand(data)
+                    self.assertEqual(demand, expected)
+                    self.assertEqual(reason, label)
+        self.assertEqual(case_fan_demand(dict(cool, cpu_temp=60.1)), (71, "CPU curve"))
+
+    def test_missing_temperature_reason_names_every_missing_source(self):
+        demand, reason = case_fan_demand(sample(cpu_temp=None, gpu_memory_temp=None))
+        self.assertEqual(demand, 100)
+        self.assertIn("CPU", reason)
+        self.assertIn("GPU Memory", reason)
+
+    def test_gpu_change_starts_a_new_gap_persistence_window(self):
+        advisor = ThermalAdvisor()
+        hot = sample(gpu_core_temp=50, gpu_hotspot_temp=90)
+        for now in (0, 9):
+            self.findings(advisor, dict(hot, gpu_id="gpu-a"), now)
+        result = self.findings(advisor, dict(hot, gpu_id="gpu-b"), 10)
+        self.assertFalse(any(item.key == "gpu_gap" for item in result))
+        result = self.findings(advisor, dict(hot, gpu_id="gpu-b"), 20)
+        self.assertTrue(any(item.key == "gpu_gap" for item in result))
 
     def test_gap_requires_heat_and_continuous_ten_seconds(self):
         advisor = ThermalAdvisor()

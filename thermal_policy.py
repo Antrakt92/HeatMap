@@ -3,10 +3,23 @@ import math
 from dataclasses import dataclass
 
 
+CASE_FAN_CURVES = {
+    "cpu_temp": ((40, 60), (60, 70), (75, 90), (80, 100)),
+    "gpu_core_temp": ((40, 60), (60, 80), (75, 100)),
+    "gpu_hotspot_temp": ((60, 60), (80, 80), (95, 100)),
+    "gpu_memory_temp": ((60, 60), (80, 80), (95, 100)),
+}
+CASE_FAN_LABELS = {
+    "cpu_temp": "CPU", "gpu_core_temp": "GPU Core",
+    "gpu_hotspot_temp": "GPU Hotspot", "gpu_memory_temp": "GPU Memory",
+}
+
+
 def finite(value, minimum=0, maximum=150):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return value if math.isfinite(value) and minimum <= value <= maximum else None
+    # Check bounds before float conversion inside isfinite, including huge ints.
+    return value if minimum <= value <= maximum and math.isfinite(value) else None
 
 
 def gpu_delta(data):
@@ -35,20 +48,16 @@ def interpolate(value, points):
 
 def case_fan_demand(data):
     """Use the hottest normalized demand, never average away a hot component."""
-    curves = {
-        "cpu_temp": ((40, 60), (60, 70), (75, 90), (80, 100)),
-        "gpu_core_temp": ((40, 60), (60, 80), (75, 100)),
-        "gpu_hotspot_temp": ((60, 60), (80, 80), (95, 100)),
-        "gpu_memory_temp": ((60, 60), (80, 80), (95, 100)),
-    }
     # This explicit desktop profile requires CPU + all three AMD GPU readings.
     # Unknown/failed input must increase cooling, not look like a cool machine.
-    if any(finite(data.get(key), 1) is None for key in curves):
-        return 100, "Missing temperature: full airflow"
+    missing = [CASE_FAN_LABELS[key] for key in CASE_FAN_CURVES if finite(data.get(key), 1) is None]
+    if missing:
+        return 100, "Missing temperature: " + ", ".join(missing) + "; full airflow"
     if delta_severity(data) == 2:
         return 100, "Large GPU hotspot gap: full airflow"
-    demand = math.ceil(max(interpolate(data[key], points) for key, points in curves.items()))
-    return demand, "Temperature curve"
+    demands = {key: interpolate(data[key], points) for key, points in CASE_FAN_CURVES.items()}
+    limiting = max(demands, key=demands.__getitem__)
+    return math.ceil(demands[limiting]), CASE_FAN_LABELS[limiting] + " curve"
 
 
 @dataclass
@@ -56,21 +65,35 @@ class FanRamp:
     value: int = 100
     cool_since: float | None = None
     last_time: float | None = None
+    _fall_fraction: float = 0.0
 
     def update(self, demand, now):
-        demand = max(60, min(100, math.ceil(demand)))
-        elapsed = 0 if self.last_time is None else max(0, min(5, now - self.last_time))
+        valid_demand = finite(demand, 0, 100)
+        demand = 100 if valid_demand is None else max(60, math.ceil(valid_demand))
+        if self.last_time is not None:
+            now = max(now, self.last_time)
+        elapsed = 0 if self.last_time is None else min(5, now - self.last_time)
         self.last_time = now
         if demand >= self.value:
             self.value = demand
             self.cool_since = None
+            self._fall_fraction = 0.0
         elif self.value - demand >= 3:
             if self.cool_since is None:
                 self.cool_since = now
+                self._fall_fraction = 0.0
             if now - self.cool_since >= 15:
-                self.value = max(demand, self.value - max(1, int(2 * elapsed)))
+                # Fractional intervals share one budget; repeated calls cannot
+                # turn a two-point-per-second fall into one point per call.
+                # The hold interval contributes no credit to the later fall.
+                eligible_elapsed = min(elapsed, max(0, now - (self.cool_since + 15)))
+                budget = self._fall_fraction + 2 * eligible_elapsed
+                decrease = int(budget)
+                self._fall_fraction = budget - decrease
+                self.value = max(demand, self.value - decrease)
         else:
             self.cool_since = None
+            self._fall_fraction = 0.0
         return self.value
 
 
@@ -95,7 +118,10 @@ class ThermalAdvisor:
     def evaluate(self, data, now, temperature_thresholds, disk_thresholds):
         findings = []
         active = set()
-        self.gpu_id = data.get("gpu_id") or self.gpu_id
+        gpu_id = data.get("gpu_id") or self.gpu_id
+        if gpu_id != self.gpu_id:
+            self.since.pop("gpu_gap", None)
+        self.gpu_id = gpu_id
         seen = self.seen_gpu_temperatures.setdefault(self.gpu_id, set())
         for key, label in (("gpu_hotspot_temp", "GPU Hotspot"), ("gpu_memory_temp", "VRAM temp")):
             if finite(data.get(key), 1) is not None:

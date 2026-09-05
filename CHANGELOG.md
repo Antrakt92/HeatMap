@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.2.0-rc.2 — 2026-09-06
+
+- Keep SYS1/SYS2 automatic cooling available when the separate pump controller
+  prevents SYS4 ownership. Verify exact chip/channel identities and retain pump
+  guards, full-speed verification, heartbeat and firmware restoration.
+- Show selected automatic channels and SYS4 firmware mode. Add a live, nonmodal
+  Cooling status and policy window with requested/commanded airflow and its cause.
+- Support verified RPM references for both approved channel sets and preserve
+  existing channel calibration when moving between two and three channels.
+- Make fan slowdown depend on elapsed time after the cooling delay, including
+  fractional intervals and duplicate timestamps. Report the limiting temperature,
+  fail to full airflow on malformed demands and reset gap warnings on GPU changes.
+
+- Keep one persistent desktop window. Hovering an exposed right edge temporarily
+  raises that same window above applications; leaving lowers it without moving,
+  hiding, cloaking or reparenting it. Remove slide animations and coverage hiding.
+- Preserve the widget's monitor and coordinates across edge hover and topmost
+  toggles. Fit content at its existing position, clamping only when necessary.
+- Rename the existing edge setting to Raise on edge while retaining its saved
+  preference. Menus, settings dialogs and dragging keep the temporary raise active.
+
 ## 1.2.0-rc.1 — 2026-09-05
 
 - Fix stale Peek timers, quick re-entry during slide-out, monitor-specific hover,

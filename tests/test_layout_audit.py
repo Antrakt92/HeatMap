@@ -43,19 +43,50 @@ class LayoutAuditTests(TkTestCase):
             self.assertLessEqual(app.config["y"] + app.root.winfo_height(), bottom)
 
     def test_details_toggle_in_peek_refits_canvas_immediately(self):
-        with mapped_layout_app(height=700) as (app, area):
+        with mapped_layout_app(height=700) as (app, _area):
             app.peek_visible = True
-            app._peek_monitor_area = area
-            app._saved_pos = (50, 50)
+            old_position = (app.root.winfo_rootx(), app.root.winfo_rooty())
             old_region = app.canvas.cget("scrollregion")
 
             app.toggle_details()
             app.root.update_idletasks()
 
             self.assertNotEqual(app.canvas.cget("scrollregion"), old_region)
-            self.assertEqual(app._saved_pos, (50, 50))
-            self.assertEqual(app.root.winfo_rootx() + app.root.winfo_width(), area[1][2] - 6)
+            self.assertEqual((app.root.winfo_rootx(), app.root.winfo_rooty()), old_position)
+            self.assertEqual((app.config["x"], app.config["y"]), old_position)
             self.assertLessEqual(app.root.winfo_height(), 700)
+
+    def test_details_growth_in_peek_moves_only_as_needed_to_fit_work_area(self):
+        with mapped_layout_app(height=700) as (app, area):
+            left, _top, _right, bottom = area[1]
+            app.peek_visible = True
+            app.config["y"] = bottom - app.root.winfo_height()
+            app.root.geometry(f"+{app.config['x']}+{app.config['y']}")
+            app.root.update_idletasks()
+
+            app.toggle_details()
+            app.root.update_idletasks()
+
+            self.assertEqual(app.root.winfo_rootx(), left)
+            self.assertEqual(app.root.winfo_rooty() + app.root.winfo_height(), bottom)
+            self.assertEqual((app.config["x"], app.config["y"]),
+                             (app.root.winfo_rootx(), app.root.winfo_rooty()))
+
+    def test_hover_trigger_on_other_monitor_does_not_change_layout(self):
+        with mapped_layout_app() as (app, area):
+            original = (app.root.winfo_rootx(), app.root.winfo_rooty(),
+                        app.root.winfo_width(), app.root.winfo_height())
+            right, top = area[1][2], area[1][1]
+            trigger = ((right, top, right + 1280, top + 250),) * 2
+            app.peek_visible = True
+            app._peek_monitor_area = trigger
+
+            with mock.patch.object(overlay, "_get_monitor_areas", return_value=(area, trigger)):
+                app._fit_content()
+                app.root.update_idletasks()
+
+            self.assertEqual((app.root.winfo_rootx(), app.root.winfo_rooty(),
+                              app.root.winfo_width(), app.root.winfo_height()), original)
 
     def test_narrow_work_area_wraps_detail_value_instead_of_clipping(self):
         with mapped_layout_app(width=300) as (app, _area):
