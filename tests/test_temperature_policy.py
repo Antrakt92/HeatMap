@@ -52,6 +52,14 @@ class TemperaturePresentationTests(unittest.TestCase):
         app.sensor_data.update(values)
         return app
 
+    def test_alerts_off_prevents_sound_even_for_critical_readings_and_controller_error(self):
+        app = self.app(cpu_temp=95, gpu_hotspot_temp=110, ram_pct=99)
+        app.alerts_enabled = False
+        app._case_fan_status = {"state": "error"}
+        with mock.patch.object(overlay.threading, "Thread") as worker:
+            overlay.OverlayApp._check_alerts(app, app.sensor_data)
+        worker.assert_not_called()
+
     def test_main_memory_rows_show_capacity_and_usage_without_details(self):
         app = self.app(gpu_vram_used_gb=5.6, gpu_vram_total_gb=20.0, gpu_vram_pct=28,
                        ram_used_gb=25.6, ram_total_gb=31.9, ram_pct=80)

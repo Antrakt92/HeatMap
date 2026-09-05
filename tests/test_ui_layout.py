@@ -1,4 +1,4 @@
-"""Real Tk geometry without hardware access, visible windows or user settings writes."""
+"""Real Tk geometry without hardware access, audio, visible windows or settings writes."""
 from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
 import unittest
@@ -17,7 +17,9 @@ def layout_app(scaling=1.333, height=720):
         return root
     areas = (((0, 0, 1280, height), (0, 0, 1280, height)),)
     with ExitStack() as stack:
-        for name in ("sensor_loop", "_schedule_embed", "_poll_screen_change", "_poll_peek_edge", "_poll_desktop_visibility"):
+        # Suppress dispatch, not just winsound.Beep: a delayed second beep could
+        # otherwise outlive the fixture and run after the sound mock is removed.
+        for name in ("sensor_loop", "_check_alerts", "_schedule_embed", "_poll_screen_change", "_poll_peek_edge", "_poll_desktop_visibility"):
             stack.enter_context(mock.patch.object(overlay.OverlayApp, name))
         stack.enter_context(mock.patch.object(overlay.tk, "Tk", side_effect=hidden_root))
         stack.enter_context(mock.patch.object(overlay, "_get_monitor_areas", return_value=areas))
@@ -35,6 +37,18 @@ def layout_app(scaling=1.333, height=720):
 
 
 class LayoutTests(unittest.TestCase):
+    def test_critical_preview_updates_visuals_without_starting_audio_thread(self):
+        with layout_app() as app:
+            app.alerts_enabled = True
+            app.sensor_data = overlay._empty_sensor_data()
+            app.sensor_data.update(cpu_temp=95, gpu_core_temp=50, gpu_temp=50,
+                                   gpu_hotspot_temp=110, ram_pct=99)
+            with mock.patch.object(overlay.threading, "Thread") as worker:
+                app.update_ui()
+            worker.assert_not_called()
+            self.assertEqual(app.rows["gpu_hotspot_temp"].cget("fg"), "#f87171")
+            self.assertIn("GPU Hotspot", app.health_label.cget("text"))
+
     def test_empty_warning_panel_reclaims_space_and_reappears_for_a_problem(self):
         with layout_app() as app:
             app._set_sensor_status(None)
