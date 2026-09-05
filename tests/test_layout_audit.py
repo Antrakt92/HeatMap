@@ -4,7 +4,7 @@ import unittest
 from unittest import mock
 
 import overlay
-from test_ui_layout import layout_app
+from test_ui_layout import TkTestCase, layout_app
 
 
 @contextmanager
@@ -27,7 +27,7 @@ def mapped_layout_app(scaling=1.333, width=1280, height=900):
             yield app, area
 
 
-class LayoutAuditTests(unittest.TestCase):
+class LayoutAuditTests(TkTestCase):
     def test_sensor_error_growth_keeps_footer_inside_work_area(self):
         with mapped_layout_app() as (app, area):
             bottom = area[1][3]

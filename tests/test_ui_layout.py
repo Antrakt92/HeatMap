@@ -1,8 +1,11 @@
 """Real Tk geometry without hardware access, audio, visible windows or settings writes."""
 from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
+import gc
+import threading
 import unittest
 from unittest import mock
+import weakref
 
 import overlay
 
@@ -36,7 +39,42 @@ def layout_app(scaling=1.333, height=720):
             app.root.destroy()
 
 
-class LayoutTests(unittest.TestCase):
+class TkTestCase(unittest.TestCase):
+    def tearDown(self):
+        super().tearDown()
+        # Mock call records can retain destroyed Tk roots in unreachable cycles.
+        # Collect after test-method locals have gone, on the interpreter's owner
+        # thread, before a later worker happens to trigger cyclic collection.
+        gc.collect()
+
+
+class LayoutTests(TkTestCase):
+    def test_destroyed_fixture_interpreter_is_released_before_later_worker_tests(self):
+        roots = []
+        finalizer_threads = []
+
+        class FixtureTest(TkTestCase):
+            def runTest(self):
+                with layout_app() as app:
+                    roots.append(weakref.ref(app.root))
+                    weakref.finalize(app.root, lambda: finalizer_threads.append(threading.get_ident()))
+                    with mock.patch.object(overlay.simpledialog, "askinteger", return_value=2000):
+                        app.configure_cpu_reference()
+
+        was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            result = FixtureTest().run()
+            self.assertTrue(result.wasSuccessful(), result.errors or result.failures)
+            self.assertEqual(len(roots), 1)
+            self.assertIsNone(roots[0]())
+            self.assertEqual(finalizer_threads, [threading.get_ident()])
+        finally:
+            # Also clean safely if the regression intentionally fails.
+            gc.collect()
+            if was_enabled:
+                gc.enable()
+
     def test_critical_preview_updates_visuals_without_starting_audio_thread(self):
         with layout_app() as app:
             app.alerts_enabled = True

@@ -3,11 +3,11 @@ from unittest import mock
 
 import overlay
 from test_overlay_helpers import _update_ui_app, _FakeLabel
-from test_ui_layout import layout_app
+from test_ui_layout import TkTestCase, layout_app
 import test_sensor_validation as sensor_fakes
 
 
-class DisplayAuditTests(unittest.TestCase):
+class DisplayAuditTests(TkTestCase):
     def test_all_color_boundaries_and_invalid_readings(self):
         for metric, (warning, critical) in overlay._METRIC_THRESHOLDS.items():
             for value, expected in ((warning - 1, "#4ade80"), (warning, "#facc15"),
