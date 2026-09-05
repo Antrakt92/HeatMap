@@ -35,6 +35,28 @@ def layout_app(scaling=1.333, height=720):
 
 
 class LayoutTests(unittest.TestCase):
+    def test_empty_warning_panel_reclaims_space_and_reappears_for_a_problem(self):
+        with layout_app() as app:
+            app._set_sensor_status(None)
+            app._set_health_panel(["RAM: 95%"], 2)
+            app._fit_content()
+            with_warning = app.root.winfo_reqheight()
+            app._set_health_panel([], 0)
+            app._fit_content()
+            self.assertEqual(app.health_label.winfo_manager(), "")
+            self.assertEqual(app.footer.winfo_manager(), "")
+            self.assertLess(app.root.winfo_reqheight(), with_warning)
+            app._set_health_panel(["Unavailable: CPU"], 1)
+            app._fit_content()
+            self.assertEqual(app.health_label.winfo_manager(), "pack")
+            self.assertEqual(app.footer.winfo_manager(), "pack")
+            self.assertEqual(app.health_label.cget("text"), "Unavailable: CPU")
+            app._set_health_panel([], 0)
+            app._set_sensor_status(overlay.SENSOR_STATUS_STALE)
+            app._fit_content()
+            self.assertEqual(app.footer.winfo_manager(), "pack")
+            self.assertEqual(app.status_label.winfo_manager(), "pack")
+
     def test_expanded_metrics_scroll_without_hiding_warnings_or_close_button(self):
         for scaling in (1.333, 2.0, 2.666):
             with self.subTest(scaling=scaling), layout_app(scaling, height=640) as app:

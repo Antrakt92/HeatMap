@@ -129,13 +129,14 @@ class AuditRegressionTests(unittest.TestCase):
             self.assertIn(message, text)
         self.assertIn("complete original error", text)
 
-    def test_hidden_findings_and_muted_sound_remain_discoverable(self):
+    def test_quiet_panel_is_empty_but_critical_findings_remain_discoverable(self):
         app = _update_ui_app()
         app.health_label = _FakeLabel()
-        app._update_thermal_advice(sample())
-        self.assertIn("Sound: OFF", app.health_label.options["text"])
+        app._update_thermal_advice(sample(ram_pct=80, gpu_vram_pct=90))
+        self.assertEqual(app.health_label.options["text"], "")
         app._update_thermal_advice(sample(cpu_temp=95, gpu_temp=95, gpu_hotspot_temp=110, gpu_memory_temp=110, ram_pct=99))
         self.assertIn("2 more", app.health_label.options["text"])
+        self.assertNotIn("Sound: OFF", app.health_label.options["text"])
 
     def test_required_airflow_input_loss_is_visible_on_first_sample(self):
         app = _update_ui_app()

@@ -1503,7 +1503,7 @@ class OverlayHelperTests(unittest.TestCase):
 
         self.assertEqual(values["detail_cpu_fan_rpm"], "1800 RPM")
         self.assertEqual(values["detail_gpu_fan_rpm"], "0 RPM")
-        self.assertEqual(values["detail_vram_gb"], "0.6/20.0G")
+        self.assertEqual(values["detail_vram_gb"], "0.6/20.0 GB")
         self.assertEqual(values["detail_board_temps"], "VRM 34°C  CHIP 30°C  SYS 27°C")
         self.assertEqual(values["detail_disk_life"], "980 77%  860 97%")
 

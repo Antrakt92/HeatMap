@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Show used/total GB beside VRAM percentage in the main view and label RAM
+  capacity explicitly as GB. Collapse the warning panel when empty; keep sound
+  state in the menu and reserve RAM/VRAM panel warnings for critical usage.
+
 - Hide the native Peek window during its return to the saved desktop position;
   finish Tk geometry and opacity changes before desktop placement, then show it
   without raising it. Prevent visibility recovery from showing a pending return.

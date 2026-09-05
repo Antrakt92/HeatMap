@@ -2033,24 +2033,20 @@ def _case_fan_advice(status):
     return "Case fans: controller status error. Check Copy diagnostics before retrying."
 
 
-def _health_summary(messages, muted):
+def _health_summary(messages):
     lines = []
     for message in messages[:3]:
         text = " ".join(str(message).split())
         lines.append(text if len(text) <= 130 else text[:85] + "…" + text[-40:])
     if len(messages) > 3:
         lines.append(f"+{len(messages) - 3} more — Copy diagnostics")
-    if not lines:
-        lines.append("No thermal warnings")
-    if muted:
-        lines.append("Sound: OFF")
     return "\n".join(lines)
 
 
 def _format_vram_gb(used_gb, total_gb):
     if used_gb is None or total_gb is None:
         return "--"
-    return f"{used_gb:.1f}/{total_gb:.1f}G"
+    return f"{used_gb:.1f}/{total_gb:.1f} GB"
 
 
 def _short_board_temp_name(name):
@@ -2821,7 +2817,8 @@ class OverlayApp:
             "G.CORE: ordinary GPU core temperature.\n"
             "HOTSPOT: hottest measured point on the GPU die.\n"
             "HOT−CORE: temperature difference; a persistent large gap needs checking.\n"
-            "V.TEMP: video memory temperature. VRAM %: memory capacity in use.\n"
+            "V.TEMP: video memory temperature. VRAM: used/total GB and percent in use.\n"
+            "RAM: system memory used/total GB and percent in use.\n"
             "C.FAN / C.OPT: CPU cooler headers. G.FAN: measured GPU fan RPM.\n"
             "Multiple GPU fans are numbered separately. 0 RPM is a measured stop; -- is unavailable.\n"
             "% ctl: controller duty. SYS numbers identify motherboard headers.\n"
@@ -2832,7 +2829,7 @@ class OverlayApp:
             ("cpu_temp", "CPU"), ("gpu_temp", "GPU Core"), ("gpu_hotspot_temp", "Hotspot"), ("gpu_memory_temp", "VRAM temp")
         ))
         _show_info_message("HeatMap sensor guide", meanings + limits +
-                           "\n\nClick the warning panel to copy full diagnostics. Sound: OFF means audible alerts are muted.")
+                           "\n\nClick the warning panel to copy full diagnostics. Control sound with Alerts in the right-click menu.")
 
     def _poll_diagnostics(self):
         if not self.running or not getattr(self, "_diagnostics_running", False):
@@ -2911,6 +2908,12 @@ class OverlayApp:
         """Keep the header and health panel visible when metrics exceed the work area."""
         if not hasattr(self, "canvas"):
             return
+        # An empty Tk Frame retains its last requested height; unmap the frame
+        # too, otherwise a dismissed warning leaves a blank strip below the rows.
+        if self.footer.pack_slaves():
+            self.footer.pack(fill="x", padx=6, pady=(0, 4))
+        else:
+            self.footer.pack_forget()
         self.root.update_idletasks()
         areas = _get_monitor_areas()
         area = getattr(self, "_peek_monitor_area", None) or _select_monitor_for_window(
@@ -2923,7 +2926,8 @@ class OverlayApp:
         if hasattr(self, "health_label"):
             self.health_label.configure(wraplength=max(100, min(310, work_width - 24)))
         self.root.update_idletasks()
-        available = max(40, work_height - self.header.winfo_reqheight() - self.footer.winfo_reqheight() - 12)
+        footer_height = self.footer.winfo_reqheight() if self.footer.winfo_manager() else 0
+        available = max(40, work_height - self.header.winfo_reqheight() - footer_height - 12)
         height = self.content.winfo_reqheight()
         overflow = height > available
         if overflow:
@@ -3433,7 +3437,7 @@ class OverlayApp:
         if enabled:
             process = self.fan_worker.process
             if process is not None and process.poll() is None and process.stdin.closed:
-                self.health_label.config(text="Case fans: waiting for firmware restore", fg="#facc15")
+                self._set_health_panel(["Case fans: waiting for firmware restore"], 1)
                 return
             self.fan_worker.start()
         else:
@@ -3469,9 +3473,13 @@ class OverlayApp:
         self.health_messages = messages
         if hasattr(self, "health_label"):
             self.health_label.config(
-                text=_health_summary(messages, not self.alerts_enabled),
+                text=_health_summary(messages),
                 fg=("#4ade80", "#facc15", "#f87171")[severity],
             )
+            if messages:
+                self.health_label.pack(fill="x", pady=(3, 2))
+            else:
+                self.health_label.pack_forget()
 
     def reset_peaks(self):
         self.peaks = _empty_peak_data()
@@ -3734,12 +3742,13 @@ class OverlayApp:
             fg=load_color(gpu_load)
         )
 
-        # VRAM: usage %
+        # VRAM capacity is useful in the primary view, independently of Details.
         vram_pct = data.get("gpu_vram_pct")
+        vram_gb = _format_vram_gb(data.get("gpu_vram_used_gb"), data.get("gpu_vram_total_gb"))
+        vram_text = vram_gb if vram_gb != "--" else ""
         if vram_pct is not None:
-            self.rows["vram"].config(text=f"{vram_pct}%", fg=_metric_color(vram_pct, (90, 98)))
-        else:
-            self.rows["vram"].config(text="--", fg="#888888")
+            vram_text = (vram_text + " · " if vram_text else "") + f"{vram_pct}%"
+        self.rows["vram"].config(text=vram_text or "--", fg=_metric_color(vram_pct, (90, 98)))
 
         stalled_ids = {finding.key for finding in self.thermal_findings if finding.severity == 2}
         for key in ("gpu_fan", "cpu_fan"):
@@ -3775,7 +3784,7 @@ class OverlayApp:
         ram_total = data.get("ram_total_gb")
         if ram_used is not None and ram_total is not None:
             self.rows["ram_gb"].config(
-                text=f"{ram_used}/{ram_total}G",
+                text=f"{ram_used}/{ram_total} GB",
                 fg=_metric_color(ram_pct, _METRIC_THRESHOLDS["ram_pct"])
             )
         else:

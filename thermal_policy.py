@@ -144,10 +144,10 @@ class ThermalAdvisor:
             if used is not None and used >= 80:
                 findings.append(Finding("space:" + disk["name"], 2 if used >= 90 else 1,
                                         f"{disk['name']}: {round(used)}% full"))
-        for key, label, warning, critical in (("ram_pct", "RAM", 80, 95),
-                                               ("gpu_vram_pct", "VRAM usage", 90, 98)):
+        # Elevated usage already colors its row; reserve panel space for critical pressure.
+        for key, label, critical in (("ram_pct", "RAM", 95), ("gpu_vram_pct", "VRAM usage", 98)):
             value = finite(data.get(key), 0, 100)
-            if value is not None and value >= warning:
-                findings.append(Finding(key, 2 if value >= critical else 1, f"{label}: {round(value)}%"))
+            if value is not None and value >= critical:
+                findings.append(Finding(key, 2, f"{label}: {round(value)}%"))
         self.since = {key: value for key, value in self.since.items() if key in active}
         return sorted(findings, key=lambda item: -item.severity)

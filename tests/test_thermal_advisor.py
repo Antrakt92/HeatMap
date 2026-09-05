@@ -14,6 +14,13 @@ class ThermalPolicyTests(unittest.TestCase):
     def findings(self, advisor, data, now):
         return advisor.evaluate(data, now, overlay._METRIC_THRESHOLDS, overlay._disk_temperature_thresholds)
 
+    def test_memory_panel_warnings_start_at_critical_pressure(self):
+        for key, threshold in (("ram_pct", 95), ("gpu_vram_pct", 98)):
+            with self.subTest(key=key):
+                self.assertFalse(self.findings(ThermalAdvisor(), sample(**{key: threshold - 1}), 0))
+                result = self.findings(ThermalAdvisor(), sample(**{key: threshold}), 0)
+                self.assertEqual([(item.key, item.severity) for item in result], [(key, 2)])
+
     def test_actual_report_demands_full_airflow(self):
         data = sample(cpu_temp=77, gpu_temp=53, gpu_core_temp=53, gpu_hotspot_temp=108, gpu_memory_temp=74)
         self.assertEqual(gpu_delta(data), 55)
