@@ -1,6 +1,19 @@
 # Changelog
 
-## Unreleased
+## 1.2.0-rc.1 — 2026-09-05
+
+- Fix stale Peek timers, quick re-entry during slide-out, monitor-specific hover,
+  and transient cursor-query failures. Leave six pixels of the application edge
+  reachable beside the preview.
+- Stop drag/animation conflicts, recover missing mouse-release events, ignore
+  duplicate releases, and keep released positions inside the monitor work area.
+- Refit Details immediately in Peek, retain error panels on-screen, and adapt
+  long detail lines to narrow and subsequently wider work areas.
+- Complete cleanup after destroyed windows or event-loop failures; hide the
+  overlay before waiting for workers. Ignore modal results after shutdown and
+  allow PawnIO preparation retries after a worker-launch failure.
+- Add 30 lifecycle/layout/shutdown regressions. Real Explorer, gaming and
+  physical multi-monitor/mixed-DPI acceptance remain open for this candidate.
 
 - Keep the independent desktop fallback hidden and DWM-cloaked when an application
   fully covers its location. Finishing a Peek slide no longer remaps that window

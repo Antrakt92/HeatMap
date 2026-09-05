@@ -1898,7 +1898,8 @@ class OverlayHelperTests(unittest.TestCase):
 
         app._peek_show(app._monitor_areas[0])
 
-        self.assertEqual(animation[0][0][:3], (1920, 1680, 120))
+        # The last six work-area pixels stay available to the application edge.
+        self.assertEqual(animation[0][0][:3], (1920, 1674, 120))
         self.assertIn(("-alpha", 0.88), app.root.attribute_calls)
 
     def test_toggle_peek_off_restores_saved_position_and_persists_it(self):

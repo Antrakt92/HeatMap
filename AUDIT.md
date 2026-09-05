@@ -55,6 +55,13 @@ tray-focused desktop и размещение ниже приложений. От
 сценария. Нужны наведение и повторные клики на кнопке возле часов, Win+D во время
 Peek, Peek OFF, auto-hide taskbar и возврат в приложение.
 
+Дополнить ручную проверку сценариями из `docs/lifecycle-audit-2026-09-05.md`:
+быстрый возврат на край во время ухода, клик/drag во время анимации, потеря
+ButtonRelease при переключении оболочки, Details/ошибка возле нижнего края,
+закрытие во время открытия датчиков и модального диалога. Для этих сценариев
+есть регрессии без live hardware; реальный Explorer и elevated acceptance
+по-прежнему обязательны перед заявлением о полной проверке.
+
 Возврат Peek теперь скрывает native HWND до завершения смены позиции/слоя;
 регрессии на настоящих off-screen Tk/Win32-окнах описаны в
 `docs/peek-transition-fix-2026-09-05.md`. Проверка кадров DWM на экране пользователя
@@ -113,7 +120,8 @@ WM_MOUSEACTIVATE оставляет приложение под ним акти�
 
 - Overlay всегда остаётся хотя бы частично в work area реального monitor и не
   перекрывает taskbar в Peek mode.
-- Последние pixels exposed edge остаются click-through для scrollbar/resize/taskbar.
+- Последние 6 pixels exposed edge свободны для scrollbar/resize/taskbar;
+  проверить переход курсора из этой полосы в Peek при текущем DPI.
 - Menu state совпадает с native parent/topmost state после каждого transition, а
   display removal не оставляет invisible live process или stale saved position.
 

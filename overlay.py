@@ -32,7 +32,7 @@ import psutil
 from thermal_policy import ThermalAdvisor, gpu_delta, delta_severity, finite
 from case_fans import FanWorkerClient, full_rpm_reference
 
-VERSION = "1.1.0"
+VERSION = "1.2.0-rc.1"
 
 
 # --- Paths ---
@@ -139,7 +139,10 @@ WS_EX_TOPMOST = 0x00000008
 DWMWA_EXCLUDED_FROM_PEEK = 12
 DWMWA_TRANSITIONS_FORCEDISABLED = 3
 DWMWA_CLOAK = 13
+PEEK_EDGE_GAP = 6  # Leave the application's scrollbar/resize edge reachable.
 user32 = ctypes.windll.user32
+user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+user32.GetAsyncKeyState.restype = ctypes.c_short
 user32.SetWindowLongW.argtypes = [ctypes.wintypes.HWND, ctypes.c_int, ctypes.c_long]
 user32.SetWindowLongW.restype = ctypes.c_long
 user32.GetWindowLongW.argtypes = [ctypes.wintypes.HWND, ctypes.c_int]
@@ -2555,6 +2558,8 @@ class OverlayApp:
         self._drag_x = 0
         self._drag_y = 0
         self._dragged = False
+        self._drag_active = False
+        self._drag_interrupted_peek = False
 
         # --- Header ---
         header = tk.Frame(self.root, bg="#16213e", cursor="fleur")
@@ -2752,9 +2757,13 @@ class OverlayApp:
                 "NH-U12A standard: 2000 RPM; with low-noise adapter: 1700 RPM.\n"
                 "0 disables the estimate. This changes display only, not fan speed.",
                 initialvalue=self.config.get("cpu_fan_reference_rpm", 0), minvalue=0, maxvalue=10000, parent=self.root)
+        except tk.TclError:
+            if self.running:
+                raise
+            return
         finally:
             self._settings_dialog_open = False
-        if value is not None:
+        if self.running and value is not None:
             self.config["cpu_fan_reference_rpm"] = value
             self._save_config()
             self._set_menu_label("cpu_reference", self._cpu_reference_label())
@@ -2778,7 +2787,8 @@ class OverlayApp:
     def _clamp_saved_position_to_visible_screen(self, persist=False):
         if not hasattr(self, "root"):
             return False
-        if getattr(self, "peek_visible", False) or getattr(self, "_peek_animating", False):
+        if (getattr(self, "peek_visible", False) or getattr(self, "_peek_animating", False)
+                or getattr(self, "_drag_active", False)):
             return False
         self._fit_content()
         self.root.update_idletasks()
@@ -2959,7 +2969,7 @@ class OverlayApp:
         _show_error_message("HeatMap Diagnostics", f"Failed to copy diagnostics:\n{detail}")
 
     def prepare_pawnio_repair(self):
-        if getattr(self, "_pawnio_repair_running", False):
+        if not self.running or getattr(self, "_pawnio_repair_running", False):
             return
         self._pawnio_repair_running = True
         self._set_menu_label("pawnio", "Preparing PawnIO repair...")
@@ -2968,7 +2978,10 @@ class OverlayApp:
         def worker():
             self._pawnio_repair_results.put(prepare_verified_pawnio_installer())
 
-        threading.Thread(target=worker, daemon=True).start()
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except RuntimeError as exc:
+            self._pawnio_repair_results.put_nowait((False, str(exc)))
         self.root.after(100, self._poll_pawnio_repair)
 
     def _poll_pawnio_repair(self):
@@ -3030,29 +3043,44 @@ class OverlayApp:
             return
         _monitor, work = area
         work_width, work_height = work[2] - work[0], work[3] - work[1]
+        peek_gap = PEEK_EDGE_GAP if getattr(self, "_peek_monitor_area", None) else 0
         if hasattr(self, "health_label"):
             self.health_label.configure(wraplength=max(100, min(310, work_width - 24)))
         self.root.update_idletasks()
         footer_height = self.footer.winfo_reqheight() if self.footer.winfo_manager() else 0
         available = max(40, work_height - self.header.winfo_reqheight() - footer_height - 12)
-        height = self.content.winfo_reqheight()
-        overflow = height > available
+        detail_values = [value for key, value in self.rows.items() if key.startswith("detail_")]
+        for value in detail_values:
+            value.configure(wraplength=260)
+        self.root.update_idletasks()
+        preferred_width = max(280, self.content.winfo_reqwidth())
+        # Wrapping can introduce overflow; the scrollbar then reduces row width.
+        # Reserve that gutter on the second pass before measuring final height.
+        overflow = self.content.winfo_reqheight() > available
+        for _ in range(2):
+            gutter = self.scrollbar.winfo_reqwidth() if overflow else 0
+            width = max(100, min(preferred_width, work_width - 12 - gutter - peek_gap))
+            for value in detail_values:
+                label_width = sum(child.winfo_reqwidth() for child in value.master.winfo_children() if child is not value)
+                value.configure(wraplength=max(20, min(260, width - label_width - 20)))
+            self.canvas.itemconfigure(self._content_window, width=width)
+            self.root.update_idletasks()
+            height = self.content.winfo_reqheight()
+            overflow = height > available
         if overflow:
             self.scrollbar.pack(side="right", fill="y")
         else:
             self.scrollbar.pack_forget()
             self.canvas.yview_moveto(0)
-        gutter = self.scrollbar.winfo_reqwidth() if overflow else 0
-        width = max(100, min(max(280, self.content.winfo_reqwidth()), work_width - 12 - gutter))
-        self.canvas.itemconfigure(self._content_window, width=width)
         self.canvas.configure(width=width, height=min(height, available), scrollregion=(0, 0, width, height))
         self._content_overflow = overflow
         self.root.update_idletasks()
         size = (self.root.winfo_reqwidth(), self.root.winfo_reqheight())
         if (getattr(self, "peek_visible", False) and not getattr(self, "_peek_animating", False)
+                and not getattr(self, "_drag_active", False)
                 and size != getattr(self, "_content_layout_size", None)):
             y = min(max(self.root.winfo_rooty(), work[1]), max(work[1], work[3] - size[1]))
-            self.root.geometry(f"+{work[2] - size[0]}+{y}")
+            self.root.geometry(f"+{work[2] - size[0] - peek_gap}+{y}")
         self._content_layout_size = size
 
     def _scroll_content(self, event):
@@ -3080,6 +3108,7 @@ class OverlayApp:
             and not self.topmost
             and not self.peek_visible
             and not self._peek_animating
+            and not getattr(self, "_drag_active", False)
         )
 
     def _cancel_scheduled_embed(self):
@@ -3201,6 +3230,7 @@ class OverlayApp:
             return
         monitor_areas = _get_monitor_areas()
         if monitor_areas != self._monitor_areas:
+            self._drag_active = False
             self._desktop_fallback_ready = False
             self._monitor_areas = monitor_areas
             self._cursor_was_at_peek_edge = False
@@ -3239,6 +3269,12 @@ class OverlayApp:
         if not self.running:
             return
         try:
+            if getattr(self, "_drag_active", False):
+                # Capture can be lost to a shell transition before Tk receives
+                # ButtonRelease. Do not leave drag/Peek suspended indefinitely.
+                if user32.GetAsyncKeyState(0x01) & 0x8000:
+                    return
+                self.end_drag(None)
             if self.topmost:
                 return
             desktop = self._desktop_foreground()
@@ -3278,6 +3314,7 @@ class OverlayApp:
             and not self.topmost
             and not self.peek_visible
             and not self._peek_animating
+            and not getattr(self, "_drag_active", False)
             and not self._is_desktop_at_cursor()
         ):
             self._peek_show(edge_monitor)
@@ -3306,6 +3343,8 @@ class OverlayApp:
         return _window_has_class(hwnd, {"Progman", "WorkerW"})
 
     def _restore_desktop_mode(self, delay=50):
+        self._drag_active = False
+        self._cursor_was_at_peek_edge = False
         _set_window_cloaked(self._get_hwnd(), True)
         self._peek_animating = False
         self.peek_visible = False
@@ -3323,7 +3362,8 @@ class OverlayApp:
 
     def _peek_show(self, monitor_area=None):
         """Slide the overlay in from the right edge."""
-        if not self.running or not self.peek_enabled or self.peek_visible or self._peek_animating or self.topmost:
+        if (not self.running or not self.peek_enabled or self.peek_visible or self._peek_animating
+                or self.topmost or getattr(self, "_drag_active", False)):
             return
         # If the desktop is under the cursor, the embedded widget is already visible.
         if self._is_desktop_at_cursor():
@@ -3379,7 +3419,7 @@ class OverlayApp:
             return
 
         # Keep the same Y position as on the desktop
-        target_x = work_rect[2] - overlay_w
+        target_x = work_rect[2] - overlay_w - PEEK_EDGE_GAP
         saved_y = self._saved_pos[1] if self._saved_pos else self.config.get("y", 50)
         target_y = min(max(saved_y, work_rect[1]), max(work_rect[1], work_rect[3] - overlay_h))
 
@@ -3424,19 +3464,29 @@ class OverlayApp:
         self.peek_visible = True
         self._peek_check_mouse()
 
-    def _peek_check_mouse(self):
+    def _peek_check_mouse(self, expected_generation=None):
         """Poll mouse position — hide when cursor leaves overlay and trigger."""
+        if expected_generation is None:
+            expected_generation = self._window_transition_generation
+        if expected_generation != self._window_transition_generation:
+            return
         if not self.running or not self.peek_visible or self._peek_animating:
             return
 
+        def retry():
+            self.root.after(200, lambda: self._peek_check_mouse(expected_generation))
+
         # Menus extend beyond the widget; hold the anchor while choosing settings.
         menu = getattr(self, "menu", None)
-        if getattr(self, "_settings_dialog_open", False) or (menu is not None and menu.winfo_ismapped()):
-            self.root.after(200, self._peek_check_mouse)
+        if (getattr(self, "_drag_active", False) or getattr(self, "_settings_dialog_open", False)
+                or (menu is not None and menu.winfo_ismapped())):
+            retry()
             return
 
         pt = POINT()
-        user32.GetCursorPos(ctypes.byref(pt))
+        if not user32.GetCursorPos(ctypes.byref(pt)):
+            retry()
+            return
         mx, my = pt.x, pt.y
 
         # Check if mouse is over the overlay
@@ -3450,10 +3500,10 @@ class OverlayApp:
         over_overlay = ox <= mx <= ox + ow and oy <= my <= oy + oh
 
         edge_monitor = _exposed_right_edge_monitor(mx, my, self._monitor_areas, width=10)
-        over_trigger = edge_monitor is not None
+        over_trigger = edge_monitor is not None and edge_monitor == self._peek_monitor_area
 
         if over_overlay or over_trigger:
-            self.root.after(200, self._peek_check_mouse)
+            retry()
         else:
             self._peek_hide()
 
@@ -3554,6 +3604,7 @@ class OverlayApp:
         self.config["details_enabled"] = self.details_enabled
         self._save_config()
         self._apply_details_visibility()
+        self._fit_content()
         self._clamp_saved_position_to_visible_screen(persist=True)
         self._set_menu_label("details",
             "Details: ON" if self.details_enabled else "Details: OFF"
@@ -3663,6 +3714,12 @@ class OverlayApp:
             threading.Thread(target=_alert_beep, daemon=True).start()
 
     def start_drag(self, event):
+        self._drag_active = True
+        self._drag_interrupted_peek = self._peek_animating
+        self._cancel_scheduled_embed()
+        if self._peek_animating:
+            self._peek_animating = False
+            self.peek_visible = True
         self._drag_x = event.x
         self._drag_y = event.y
         self._dragged = False
@@ -3680,12 +3737,33 @@ class OverlayApp:
             self.config["y"] = y
 
     def end_drag(self, _event):
-        if not self._dragged:
+        if not getattr(self, "_drag_active", False):
             return
-        # If dragged during peek, persist the new position into config
-        if self._saved_pos:
-            self.config["x"], self.config["y"] = self._saved_pos
-        self._save_config()
+        self._drag_active = False
+        if self._dragged:
+            x, y = _clamp_overlay_to_monitor_areas(
+                self.root.winfo_rootx(), self.root.winfo_rooty(),
+                self.root.winfo_width(), self.root.winfo_height(), _get_monitor_areas())
+            self.root.geometry(f"+{x}+{y}")
+            self.config["x"], self.config["y"] = x, y
+            if self.peek_visible:
+                self._saved_pos = (x, y)
+            self._save_config()
+        elif getattr(self, "_drag_interrupted_peek", False) and self.peek_visible and self._peek_monitor_area:
+            # A click can stop the slide while most of the window is offscreen.
+            # Settle the preview without replacing the saved desktop location.
+            work = self._peek_monitor_area[1]
+            x = max(work[0], work[2] - self.root.winfo_width() - PEEK_EDGE_GAP)
+            y = min(max(self.root.winfo_rooty(), work[1]), max(work[1], work[3] - self.root.winfo_height()))
+            self.root.geometry(f"+{x}+{y}")
+        self._drag_interrupted_peek = False
+        self._dragged = False
+        # Cancel any held-drag poll before starting exactly one new chain.
+        self._cancel_scheduled_embed()
+        if self.peek_visible:
+            self._peek_check_mouse()
+        elif self._can_embed_now():
+            self._schedule_embed()
 
     def show_menu(self, event):
         self.menu.tk_popup(event.x_root, event.y_root)
@@ -4019,15 +4097,22 @@ class OverlayApp:
             if key != "case_fan_control":
                 label.config(text=text, fg=color)
         self._fit_content()
+        if hasattr(self, "canvas"):
+            self._clamp_saved_position_to_visible_screen(persist=True)
 
     def quit(self):
         if not self.running:
             return
-        self._cancel_scheduled_embed()
-        if hasattr(self, "fan_worker"):
-            self.fan_worker.stop()
         self.running = False
         self._stop_event.set()
+        self._cancel_scheduled_embed()
+        if hasattr(self, "fan_worker"):
+            try:
+                self.fan_worker.stop()
+            except (OSError, ValueError):
+                # The child also watches owner lifetime and heartbeat expiry.
+                # Never kill it: its finally block owns firmware restoration.
+                log.exception("Failed to close controller heartbeat pipe")
         # Cancel all pending after() callbacks to prevent TclError on destroy
         try:
             for after_id in list(self.root.tk.call('after', 'info') or ()):
@@ -4043,12 +4128,20 @@ class OverlayApp:
         elif not self.peek_visible and not self._peek_animating and not self.embedded:
             # Only read winfo coordinates when NOT embedded (they are screen-relative)
             # When embedded, config["x"]/["y"] already track position via on_drag
-            self.config["x"] = self.root.winfo_rootx()
-            self.config["y"] = self.root.winfo_rooty()
+            try:
+                position = (self.root.winfo_rootx(), self.root.winfo_rooty())
+            except tk.TclError:
+                log.debug("Window already gone; keeping saved position", exc_info=True)
+            else:
+                self.config["x"], self.config["y"] = position
         self.config["peek_enabled"] = self.peek_enabled
         self.config["alerts_enabled"] = self.alerts_enabled
         self.config["details_enabled"] = self.details_enabled
         self._save_config(update_status=False)
+        try:
+            self.root.withdraw()
+        except tk.TclError:
+            log.debug("Window already gone before worker cleanup", exc_info=True)
         # Both workers own their monitors; share one deadline for their cleanup.
         deadline = time.monotonic() + 5
         for name, worker in (
@@ -4066,8 +4159,12 @@ class OverlayApp:
                     "%s thread did not stop in time; hardware cleanup remains with the worker",
                     name,
                 )
-        self.root.destroy()
-        release_single_instance()
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            log.debug("Window already destroyed during shutdown", exc_info=True)
+        finally:
+            release_single_instance()
 
     def run(self):
         self.root.mainloop()
@@ -4121,6 +4218,8 @@ def main():
         try:
             app.run()
         except KeyboardInterrupt:
+            pass
+        finally:
             app.quit()
     finally:
         release_single_instance()
