@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Group the dashboard into CPU, GPU, case cooling and memory/storage; expose
+  grouped settings through a header button. Keep Peek open while using menus.
+- Show CPU fan duty when available, otherwise an explicitly configured approximate
+  RPM/reference percentage. Match CPU Optional control to its own header.
+- Make activity and unrated auxiliary readings neutral; share capacity alarm
+  thresholds with row colors. Cancel queued/second beeps after sound is muted.
+- Stop periodic re-embedding of an already positioned desktop fallback. Disable
+  DWM shell transitions and cloak the composed surface while changing position
+  and window layer; add native DWM and fallback timer regressions.
+
 - Show used/total GB beside VRAM percentage in the main view and label RAM
   capacity explicitly as GB. Collapse the warning panel when empty; keep sound
   state in the menu and reserve RAM/VRAM panel warnings for critical usage.

@@ -52,7 +52,7 @@ def main():
         # querying it through DwmGetWindowAttribute (which returns E_INVALIDARG).
         with mock.patch.object(overlay.dwmapi, "DwmSetWindowAttribute", side_effect=set_attribute):
             overlay.set_tool_window(widget)
-        assert results == [0], "DWM rejected Peek exclusion"
+        assert results == [0, 0], "DWM rejected transition suppression or Peek exclusion"
 
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
         app.running = True

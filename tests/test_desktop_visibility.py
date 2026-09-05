@@ -7,6 +7,28 @@ from test_overlay_helpers import _FakeRoot
 
 
 class DesktopVisibilityTests(unittest.TestCase):
+    def test_peek_does_not_slide_away_while_its_menu_or_settings_are_open(self):
+        for dialog in (True, False):
+            app = self.make_app()
+            app.peek_visible = True
+            app.menu = mock.Mock()
+            app.menu.winfo_ismapped.return_value = not dialog
+            app._settings_dialog_open = dialog
+            with mock.patch.object(overlay.user32, "GetCursorPos") as cursor:
+                app._peek_check_mouse()
+            cursor.assert_not_called()
+            self.assertEqual(app.root.after_calls[-1][0], 200)
+
+    def test_stable_fallback_does_not_hide_and_reembed_every_five_seconds(self):
+        app = self.make_app()
+        app._desktop_fallback_ready = True
+        with (
+            mock.patch.object(overlay, "_get_monitor_areas", return_value=app._monitor_areas),
+            mock.patch.object(app, "_schedule_embed") as schedule,
+        ):
+            app._poll_screen_change()
+        schedule.assert_not_called()
+
     def make_app(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
         app.running = True
@@ -178,6 +200,7 @@ class DesktopVisibilityTests(unittest.TestCase):
         ):
             overlay.set_tool_window(100)
         self.assertEqual(dwm.call_args.args[:2], (100, 12))
+        self.assertEqual([call.args[1] for call in dwm.call_args_list], [3, 12])
         self.assertEqual(dwm.call_args.args[2]._obj.value, 1)
 
 

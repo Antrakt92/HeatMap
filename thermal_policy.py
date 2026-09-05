@@ -141,11 +141,13 @@ class ThermalAdvisor:
                 level = 2 if value >= disk_thresholds(disk["name"])[1] else 1
                 findings.append(Finding("disk:" + disk["name"], level, f"{disk['name']}: {round(value)}°C"))
             used = finite(disk.get("used_pct"), 0, 100)
-            if used is not None and used >= 80:
-                findings.append(Finding("space:" + disk["name"], 2 if used >= 90 else 1,
+            warning, critical = temperature_thresholds["disk_used"]
+            if used is not None and used >= warning:
+                findings.append(Finding("space:" + disk["name"], 2 if used >= critical else 1,
                                         f"{disk['name']}: {round(used)}% full"))
         # Elevated usage already colors its row; reserve panel space for critical pressure.
-        for key, label, critical in (("ram_pct", "RAM", 95), ("gpu_vram_pct", "VRAM usage", 98)):
+        for key, label in (("ram_pct", "RAM"), ("gpu_vram_pct", "VRAM usage")):
+            critical = temperature_thresholds[key][1]
             value = finite(data.get(key), 0, 100)
             if value is not None and value >= critical:
                 findings.append(Finding(key, 2, f"{label}: {round(value)}%"))

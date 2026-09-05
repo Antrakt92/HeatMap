@@ -22,14 +22,14 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, simpledialog
 import winreg
 import winsound
 import xml.etree.ElementTree as ET
 
 import psutil
 
-from thermal_policy import ThermalAdvisor, gpu_delta, delta_severity
+from thermal_policy import ThermalAdvisor, gpu_delta, delta_severity, finite
 from case_fans import FanWorkerClient, full_rpm_reference
 
 VERSION = "1.1.0"
@@ -137,6 +137,8 @@ SW_SHOWNOACTIVATE = 4
 GW_HWNDPREV = 3
 WS_EX_TOPMOST = 0x00000008
 DWMWA_EXCLUDED_FROM_PEEK = 12
+DWMWA_TRANSITIONS_FORCEDISABLED = 3
+DWMWA_CLOAK = 13
 user32 = ctypes.windll.user32
 user32.SetWindowLongW.argtypes = [ctypes.wintypes.HWND, ctypes.c_int, ctypes.c_long]
 user32.SetWindowLongW.restype = ctypes.c_long
@@ -484,13 +486,22 @@ def set_tool_window(hwnd):
     style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
     style |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
     user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
-    # Windows' desktop preview must not fade this desktop widget away.
+    # Our slide is the only animation; shell transitions must not replay a
+    # disappearing surface after its HWND has moved to the saved desktop point.
     enabled = ctypes.wintypes.BOOL(True)
-    result = dwmapi.DwmSetWindowAttribute(
-        hwnd, DWMWA_EXCLUDED_FROM_PEEK, ctypes.byref(enabled), ctypes.sizeof(enabled),
-    )
+    for attribute in (DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_EXCLUDED_FROM_PEEK):
+        result = dwmapi.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(enabled), ctypes.sizeof(enabled))
+        if result < 0:
+            log.debug("DWM window attribute %s unavailable: HRESULT=%s", attribute, result)
+
+
+def _set_window_cloaked(hwnd, cloaked):
+    """Keep DWM's composed surface hidden across native/Tk geometry changes."""
+    value = ctypes.wintypes.BOOL(cloaked)
+    result = dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, ctypes.byref(value), ctypes.sizeof(value))
     if result < 0:
-        log.debug("Desktop Peek exclusion unavailable: HRESULT=%s", result)
+        log.debug("DWM cloak unavailable: HRESULT=%s", result)
+    return result >= 0
 
 
 def _window_has_class(hwnd, classes):
@@ -549,10 +560,12 @@ def _position_above_desktop(hwnd):
 
 def _show_without_reordering(hwnd):
     """Map an already positioned HWND without raising it or taking focus."""
-    return bool(user32.SetWindowPos(
+    shown = bool(user32.SetWindowPos(
         hwnd, 0, 0, 0, 0, 0,
         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
     ))
+    _set_window_cloaked(hwnd, False)
+    return shown
 
 
 def _show_error_message(title, message):
@@ -1434,6 +1447,7 @@ def _empty_sensor_data():
         "cpu_fan": None,
         "cpu_fan_pct": None,
         "cpu_optional_fan": None,
+        "cpu_optional_fan_pct": None,
         "fans": [],
         "gpu_fan": None,
         "gpu_fan_pct": None,
@@ -1864,6 +1878,9 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
                 fan_name,
                 data["cpu_fan"] is not None,
             )
+        optional_name = next((name for name, _ in fan_sensors if "cpu" in name and "optional" in name), None)
+        if optional_name:
+            data["cpu_optional_fan_pct"] = next((value for name, value in control_sensors if name == optional_name), None)
 
     elif hw_type == HardwareType.Memory:
         for sensor in hw.Sensors:
@@ -1956,11 +1973,12 @@ _METRIC_THRESHOLDS = {
     "disk_temp": (45, 55),
     "disk_used": (80, 90),
     "ram_pct": (80, 95),
+    "gpu_vram_pct": (90, 98),
 }
 
 
 def _metric_color(value, thresholds):
-    if value is None:
+    if finite(value) is None:
         return "#888888"
     warning, critical = thresholds
     if value < warning:
@@ -1987,12 +2005,10 @@ def disk_temp_color(temp, name=""):
 
 
 def load_color(load):
-    if load is None:
+    if finite(load, 0, 100) is None:
         return "#888888"
-    if load < 80:
-        return "#4ade80"
-    # High utilization/fan speed is activity, not evidence of overheating.
-    return "#facc15"
+    # Utilization is activity, not a temperature or capacity warning.
+    return "#cbd5e1"
 
 
 def disk_usage_color(pct):
@@ -2013,6 +2029,16 @@ def _format_fan_reading(rpm, control_pct=None):
     if control_pct is not None:
         reading += f" | {control_pct}% ctl"
     return reading
+
+
+def _format_cpu_fan(rpm, control_pct, reference_rpm):
+    if control_pct is not None:
+        return _format_fan_reading(rpm, control_pct)
+    reference = finite(reference_rpm, 1, 10000)
+    speed = finite(rpm, 0, 10000)
+    if reference is not None and speed is not None:
+        return f"{_format_rpm(rpm)} · ~{round(speed / reference * 100)}% ref"
+    return _format_rpm(rpm)
 
 
 def _format_gpu_fans(data):
@@ -2204,7 +2230,7 @@ def build_sensor_diagnostics(computer, sensor_data=None, is_admin=None, pawnio_i
     if sensor_data:
         lines.append("Sensor data:")
         for key in (
-            "cpu_temp", "cpu_load", "cpu_clock", "cpu_fan", "cpu_fan_pct", "cpu_optional_fan", "fans",
+            "cpu_temp", "cpu_load", "cpu_clock", "cpu_fan", "cpu_fan_pct", "cpu_optional_fan", "cpu_optional_fan_pct", "fans",
             "gpu_temp", "gpu_temp_label", "gpu_core_temp", "gpu_hotspot_temp", "gpu_memory_temp",
             "gpu_load", "gpu_clock", "gpu_fan", "gpu_fan_pct",
             "gpu_vram_pct", "gpu_vram_used_gb", "gpu_vram_total_gb",
@@ -2289,6 +2315,13 @@ def _normalize_config(cfg, defaults):
     if "case_fan_full_rpm" in provided_keys and full_rpm_reference(normalized["case_fan_full_rpm"]) is None:
         normalized.pop("case_fan_full_rpm")
         invalid_keys.append("case_fan_full_rpm")
+    if "cpu_fan_reference_rpm" in provided_keys:
+        reference = finite(normalized["cpu_fan_reference_rpm"], 0, 10000)
+        if reference is None:
+            normalized["cpu_fan_reference_rpm"] = 0
+            invalid_keys.append("cpu_fan_reference_rpm")
+        else:
+            normalized["cpu_fan_reference_rpm"] = int(reference)
     return normalized, invalid_keys
 
 
@@ -2410,6 +2443,7 @@ class OverlayApp:
         self._sensor_sample_time = None
         self.lock = threading.Lock()
         self.embedded = False
+        self._desktop_fallback_ready = False
         self._embed_after_id = None
         self._window_transition_generation = 0
 
@@ -2451,7 +2485,7 @@ class OverlayApp:
         header.pack(fill="x", padx=2, pady=(2, 0))
 
         title_label = tk.Label(
-            header, text="  HW Monitor", font=("Segoe UI", 9, "bold"),
+            header, text="  HeatMap", font=("Segoe UI", 9, "bold"),
             fg="#7c83ff", bg="#16213e", anchor="w"
         )
         title_label.pack(side="left", fill="x", expand=True)
@@ -2462,6 +2496,10 @@ class OverlayApp:
         )
         close_btn.pack(side="right")
         close_btn.bind("<Button-1>", lambda e: self.quit())
+        settings_btn = tk.Label(header, text="  ⚙  ", font=("Segoe UI", 11),
+                                fg="#cbd5e1", bg="#16213e", cursor="hand2")
+        settings_btn.pack(side="right")
+        settings_btn.bind("<Button-1>", self.show_menu)
 
         header.bind("<Button-1>", self.start_drag)
         header.bind("<B1-Motion>", self.on_drag)
@@ -2490,88 +2528,44 @@ class OverlayApp:
         self.footer.pack(fill="x", padx=6, pady=(0, 4))
         self.root.bind("<MouseWheel>", self._scroll_content)
 
-        # Group colors
-        CPU_CLR = "#6ea8fe"
-        GPU_CLR = "#c084fc"
-        RAM_CLR = "#67e8f9"
-        self.DISK_CLR = "#fdba74"
-
-        # Create label rows in color-coded groups
         self.rows = {}
+        self.groups = {}
+        self.DISK_CLR = "#a8b8ca"
+        cpu = self._make_group("CPU")
+        self._make_summary_row(cpu, "Package", "cpu")
+        self._make_row("cpu_fan", "Fan 1", parent=cpu)
+        self._make_row("cpu_optional_fan", "Fan 2", parent=cpu)
 
-        # CPU group — temp + clock + load as three separate colored values
-        cpu_row = tk.Frame(self.content, bg="#1a1a2e")
-        cpu_row.pack(fill="x", pady=1)
-        tk.Label(cpu_row, text=" CPU", font=("Segoe UI", 10, "bold"),
-                 fg=CPU_CLR, bg="#1a1a2e", width=6, anchor="w").pack(side="left")
-        self.rows["cpu_load"] = tk.Label(cpu_row, text="", font=("Segoe UI", 10),
-                                         fg="#888888", bg="#1a1a2e", anchor="e")
-        self.rows["cpu_load"].pack(side="right")
-        self.rows["cpu_clock"] = tk.Label(cpu_row, text="", font=("Segoe UI", 10),
-                                          fg="#888888", bg="#1a1a2e", anchor="e")
-        self.rows["cpu_clock"].pack(side="right", padx=(0, 4))
-        self.rows["cpu_temp"] = tk.Label(cpu_row, text="--", font=("Segoe UI", 10),
-                                         fg="#888888", bg="#1a1a2e", anchor="e")
-        self.rows["cpu_temp"].pack(side="right", padx=(0, 4))
-
-        self._make_row("cpu_fan", "C.FAN", label_fg=CPU_CLR)
-        self._make_row("cpu_optional_fan", "C.OPT", label_fg=CPU_CLR)
-        tk.Frame(self.content, bg="#2a2a4e", height=1).pack(fill="x", pady=2)
-
-        # GPU group — temp + clock + load as three separate colored values
-        gpu_row = tk.Frame(self.content, bg="#1a1a2e")
-        gpu_row.pack(fill="x", pady=1)
-        tk.Label(gpu_row, text=" G.CORE", font=("Segoe UI", 10, "bold"),
-                 fg=GPU_CLR, bg="#1a1a2e", width=6, anchor="w").pack(side="left")
-        self.rows["gpu_load"] = tk.Label(gpu_row, text="", font=("Segoe UI", 10),
-                                         fg="#888888", bg="#1a1a2e", anchor="e")
-        self.rows["gpu_load"].pack(side="right")
-        self.rows["gpu_clock"] = tk.Label(gpu_row, text="", font=("Segoe UI", 10),
-                                          fg="#888888", bg="#1a1a2e", anchor="e")
-        self.rows["gpu_clock"].pack(side="right", padx=(0, 4))
-        self.rows["gpu_temp"] = tk.Label(gpu_row, text="--", font=("Segoe UI", 10),
-                                         fg="#888888", bg="#1a1a2e", anchor="e")
-        self.rows["gpu_temp"].pack(side="right", padx=(0, 4))
-
-        self._make_row("gpu_hotspot_temp", "HOTSPOT", label_fg=GPU_CLR)
-        self._make_row("gpu_delta", "HOT−CORE", label_fg=GPU_CLR)
-        self._make_row("gpu_memory_temp", "V.TEMP", label_fg=GPU_CLR)
-        self._make_row("vram", "VRAM", label_fg=GPU_CLR)
-        self._make_row("gpu_fan", "G.FAN", label_fg=GPU_CLR)
-        for number in (1, 2, 3, 4, 5, 6):
-            self._make_row(f"case_fan_{number}", f"SYS {number}" + ("/P" if number >= 5 else ""))
-            self.rows[f"case_fan_{number}"].master.pack_forget()
-        self._make_row("case_fan_control", "AIRFLOW")
-        tk.Frame(self.content, bg="#2a2a4e", height=1).pack(fill="x", pady=2)
-
-        # RAM — used/total + load% (like CPU row)
-        ram_row = tk.Frame(self.content, bg="#1a1a2e")
-        ram_row.pack(fill="x", pady=1)
-        tk.Label(ram_row, text=" RAM", font=("Segoe UI", 10, "bold"),
-                 fg=RAM_CLR, bg="#1a1a2e", width=6, anchor="w").pack(side="left")
-        self.rows["ram_pct"] = tk.Label(ram_row, text="", font=("Segoe UI", 10),
+        gpu = self._make_group("GPU")
+        self._make_summary_row(gpu, "Core", "gpu")
+        self._make_row("gpu_hotspot_temp", "Hotspot", parent=gpu)
+        hotspot = self.rows["gpu_hotspot_temp"]
+        self.rows["gpu_delta"] = tk.Label(hotspot.master, text="--", font=("Segoe UI", 9),
                                         fg="#888888", bg="#1a1a2e", anchor="e")
-        self.rows["ram_pct"].pack(side="right")
-        self.rows["ram_gb"] = tk.Label(ram_row, text="--", font=("Segoe UI", 10),
+        self.rows["gpu_delta"].pack(side="right", before=hotspot, padx=(8, 0))
+        self._make_row("gpu_memory_temp", "Memory temp", parent=gpu)
+        self._make_row("vram", "VRAM", parent=gpu)
+        self._make_row("gpu_fan", "Fans", parent=gpu)
+
+        cooling = self._make_group("CASE COOLING")
+        for number in range(1, 7):
+            self._make_row(f"case_fan_{number}", f"SYS {number}" + (" / Pump" if number >= 5 else ""), parent=cooling)
+            self.rows[f"case_fan_{number}"].master.pack_forget()
+        self._make_row("case_fan_control", "Mode", parent=cooling)
+
+        memory = self._make_group("MEMORY & STORAGE")
+        self._make_row("ram_gb", "RAM", parent=memory)
+        ram = self.rows["ram_gb"]
+        self.rows["ram_pct"] = tk.Label(ram.master, text="", font=("Segoe UI", 9),
                                        fg="#888888", bg="#1a1a2e", anchor="e")
-        self.rows["ram_gb"].pack(side="right", padx=(0, 4))
-        tk.Frame(self.content, bg="#2a2a4e", height=1).pack(fill="x", pady=2)
-
-        # Optional expanded detail rows.
-        self.details_frame = tk.Frame(self.content, bg="#1a1a2e")
+        self.rows["ram_pct"].pack(side="right", before=ram, padx=(8, 0))
+        self.details_frame = tk.Frame(memory, bg="#1a1a2e")
         self.details_frame.pack(fill="x")
-        self._make_row("detail_cpu_fan_rpm", "C.RPM", parent=self.details_frame, label_fg=CPU_CLR)
-        self._make_row("detail_gpu_fan_rpm", "G.RPM", parent=self.details_frame, label_fg=GPU_CLR)
-        self._make_row("detail_vram_gb", "V.GB", parent=self.details_frame, label_fg=GPU_CLR)
-        self._make_row("detail_gpu_temps", "G.TEMP", parent=self.details_frame, label_fg=GPU_CLR)
-        self._make_row("detail_board_temps", "BOARD", parent=self.details_frame, label_fg="#a7f3d0")
-        self._make_row("detail_disk_life", "D.LIFE", parent=self.details_frame, label_fg=self.DISK_CLR)
-        self._make_row("detail_disk_sensors", "D.SENSE", parent=self.details_frame, label_fg=self.DISK_CLR)
-        self._make_row("detail_peak_temps", "PEAK.T", parent=self.details_frame, label_fg="#facc15")
-        self._make_row("detail_peak_usage", "PEAK.%", parent=self.details_frame, label_fg="#facc15")
-
-        # Disk rows created dynamically
-        self.disk_frame = tk.Frame(self.content, bg="#1a1a2e")
+        for key, label in (("detail_board_temps", "Board"), ("detail_disk_life", "SSD life"),
+                           ("detail_disk_sensors", "Disk sensors"), ("detail_peak_temps", "Peak temp"),
+                           ("detail_peak_usage", "Peak usage")):
+            self._make_row(key, label, parent=self.details_frame)
+        self.disk_frame = tk.Frame(memory, bg="#1a1a2e")
         self.disk_frame.pack(fill="x")
         self.disk_labels = []
         self._last_disk_names = []
@@ -2598,48 +2592,35 @@ class OverlayApp:
         self.health_label.bind("<Button-1>", lambda _event: self.copy_diagnostics())
         self._fit_content()
 
-        # --- Right-click menu ---
+        # --- Grouped settings, also reachable from the header button ---
         self.topmost = False
-        self.menu = tk.Menu(self.root, tearoff=0, bg="#1a1a2e", fg="#a0a0c0",
-                           activebackground="#2a2a4e", activeforeground="white",
-                           font=("Segoe UI", 9))
-        self._menu_idx = {}  # label_key -> menu index
-        self._add_menu_item("topmost", "Always on top: OFF", self.toggle_topmost)
-        autostart_enabled = (
-            is_autostart_enabled() if autostart_result is None else autostart_result.enabled
-        )
-        self._add_menu_item("autostart",
-            "Autostart: ERROR" if autostart_enabled is None else (
-                "Autostart: ON (UAC)" if autostart_enabled else "Autostart: OFF"
-            ),
-            self.toggle_autostart)
-        self._add_menu_item("alerts",
-            "Alerts: ON" if self.alerts_enabled else "Alerts: OFF",
-            self.toggle_alerts)
         self.peek_enabled = self.config.get("peek_enabled", True)
-        self._add_menu_item("peek",
-            "Peek from edge: ON" if self.peek_enabled else "Peek from edge: OFF",
-            self.toggle_peek)
-        self._add_menu_item("details",
-            "Details: ON" if self.details_enabled else "Details: OFF",
-            self.toggle_details)
+        self.menu = self._new_menu(self.root)
+        self._menu_idx = {}
+        menus = {}
+        for title in ("Display", "Alerts & limits", "Cooling", "Diagnostics"):
+            menus[title] = self._new_menu(self.menu)
+            self.menu.add_cascade(label=title, menu=menus[title])
+        self._add_menu_item("topmost", "Always on top: OFF", self.toggle_topmost, menus["Display"])
+        self._add_menu_item("peek", "Peek from edge: " + ("ON" if self.peek_enabled else "OFF"), self.toggle_peek, menus["Display"])
+        self._add_menu_item("details", "Details: " + ("ON" if self.details_enabled else "OFF"), self.toggle_details, menus["Display"])
+        autostart_enabled = is_autostart_enabled() if autostart_result is None else autostart_result.enabled
+        self._add_menu_item("autostart", "Autostart: ERROR" if autostart_enabled is None else
+                            "Autostart: ON (UAC)" if autostart_enabled else "Autostart: OFF",
+                            self.toggle_autostart, menus["Display"])
+        self._add_menu_item("alerts", "Alerts: " + ("ON" if self.alerts_enabled else "OFF"), self.toggle_alerts, menus["Alerts & limits"])
+        menus["Alerts & limits"].add_command(label="Colors, thresholds and sensor guide...", command=self.show_sensor_guide)
+        menus["Alerts & limits"].add_command(label="Reset recorded peaks", command=self.reset_peaks)
+        self._add_menu_item("case_fans", "Automatic case fans: " + ("ON" if self.config.get("case_fans_enabled", False) else "OFF"),
+                            self.toggle_case_fans, menus["Cooling"])
+        self._add_menu_item("cpu_reference", self._cpu_reference_label(), self.configure_cpu_reference, menus["Cooling"])
+        self._add_menu_item("diagnostics", "Copy diagnostics", self.copy_diagnostics, menus["Diagnostics"])
+        menus["Diagnostics"].add_command(label="Open log file", command=self.open_log_file)
+        menus["Diagnostics"].add_command(label="Copy log path", command=self.copy_log_path)
         if self._driver_status == SENSOR_STATUS_DRIVER_MISSING:
-            self._add_menu_item(
-                "pawnio",
-                "Prepare verified PawnIO repair...",
-                self.prepare_pawnio_repair,
-            )
+            self._add_menu_item("pawnio", "Prepare verified PawnIO repair...", self.prepare_pawnio_repair, menus["Diagnostics"])
         self.menu.add_separator()
-        self.menu.add_command(label="Open log file", command=self.open_log_file)
-        self.menu.add_command(label="Copy log path", command=self.copy_log_path)
-        self._add_menu_item("diagnostics", "Copy diagnostics", self.copy_diagnostics)
-        self.menu.add_command(label="Sensor guide...", command=self.show_sensor_guide)
-        self._add_menu_item("case_fans", "Automatic case fans: " +
-                            ("ON" if self.config.get("case_fans_enabled", False) else "OFF"),
-                            self.toggle_case_fans)
-        self.menu.add_command(label="Reset peaks", command=self.reset_peaks)
-        self.menu.add_separator()
-        self.menu.add_command(label="Close", command=self.quit)
+        self.menu.add_command(label="Close HeatMap", command=self.quit)
         self.root.bind("<Button-3>", self.show_menu)
 
         # --- Peek from edge ---
@@ -2667,14 +2648,54 @@ class OverlayApp:
             self.fan_worker.start()
         self.update_ui()
 
-    def _add_menu_item(self, key, label, command):
+    def _new_menu(self, parent):
+        return tk.Menu(parent, tearoff=0, bg="#1a1a2e", fg="#cbd5e1", activebackground="#2a2a4e",
+                       activeforeground="white", font=("Segoe UI", 10))
+
+    def _add_menu_item(self, key, label, command, menu=None):
         """Add a menu command and track its index by key."""
-        self.menu.add_command(label=label, command=command)
-        self._menu_idx[key] = self.menu.index("end")
+        menu = menu if menu is not None else self.menu
+        menu.add_command(label=label, command=command)
+        self._menu_idx[key] = (menu, menu.index("end"))
 
     def _set_menu_label(self, key, label):
         """Update a menu item's label by its key."""
-        self.menu.entryconfig(self._menu_idx[key], label=label)
+        menu, index = self._menu_idx[key]
+        menu.entryconfig(index, label=label)
+
+    def _cpu_reference_label(self):
+        value = self.config.get("cpu_fan_reference_rpm", 0)
+        return f"CPU fan % reference: {value} RPM..." if value else "CPU fan % reference: not set..."
+
+    def configure_cpu_reference(self):
+        self._settings_dialog_open = True
+        try:
+            value = simpledialog.askinteger("CPU fan percentage", "Rated maximum RPM for the CPU cooler fans.\n"
+                "NH-U12A standard: 2000 RPM; with low-noise adapter: 1700 RPM.\n"
+                "0 disables the estimate. This changes display only, not fan speed.",
+                initialvalue=self.config.get("cpu_fan_reference_rpm", 0), minvalue=0, maxvalue=10000, parent=self.root)
+        finally:
+            self._settings_dialog_open = False
+        if value is not None:
+            self.config["cpu_fan_reference_rpm"] = value
+            self._save_config()
+            self._set_menu_label("cpu_reference", self._cpu_reference_label())
+
+    def _make_group(self, title):
+        group = tk.LabelFrame(self.content, text=title, bg="#1a1a2e", fg="#9baec4",
+                              font=("Segoe UI", 8, "bold"), relief="flat", bd=1, padx=4, pady=2)
+        group.pack(fill="x", pady=(0, 5))
+        self.groups[title] = group
+        return group
+
+    def _make_summary_row(self, parent, label, prefix):
+        row = tk.Frame(parent, bg="#1a1a2e")
+        row.pack(fill="x", pady=1)
+        tk.Label(row, text=label, font=("Segoe UI", 9), fg="#cbd5e1", bg="#1a1a2e", anchor="w").pack(side="left")
+        for metric in ("load", "clock", "temp"):
+            widget = tk.Label(row, text="--", font=("Segoe UI", 9), fg="#888888", bg="#1a1a2e", anchor="e")
+            widget.pack(side="right", padx=(6, 0))
+            self.rows[f"{prefix}_{metric}"] = widget
 
     def _clamp_saved_position_to_visible_screen(self, persist=False):
         if not hasattr(self, "root"):
@@ -2814,20 +2835,28 @@ class OverlayApp:
 
     def show_sensor_guide(self):
         meanings = (
-            "G.CORE: ordinary GPU core temperature.\n"
-            "HOTSPOT: hottest measured point on the GPU die.\n"
-            "HOT−CORE: temperature difference; a persistent large gap needs checking.\n"
-            "V.TEMP: video memory temperature. VRAM: used/total GB and percent in use.\n"
+            "Core: ordinary GPU temperature. Hotspot: hottest measured GPU point.\n"
+            "Δ: Hotspot minus Core; a persistent large gap needs checking.\n"
+            "Memory temp: video memory temperature. VRAM: capacity used.\n"
             "RAM: system memory used/total GB and percent in use.\n"
-            "C.FAN / C.OPT: CPU cooler headers. G.FAN: measured GPU fan RPM.\n"
-            "Multiple GPU fans are numbered separately. 0 RPM is a measured stop; -- is unavailable.\n"
-            "% ctl: controller duty. SYS numbers identify motherboard headers.\n"
-            "AIRFLOW AUTO: automatic case fan control has passed its startup check.\n\n"
+            "CPU Fan 1 / Fan 2: CPU and CPU Optional headers. SYS: case headers.\n"
+            "0 RPM is a measured stop; -- is unavailable. % ctl is actual controller duty.\n"
+            "~% ref estimates RPM / configured rated RPM; it can exceed 100%.\n"
+            "Set rated RPM under Cooling. This does not change fan speed.\n"
+            "AUTO: case fan control passed its startup check.\n\n"
+            "Green: below warning. Yellow: elevated. Red: action threshold.\n"
+            "Neutral: activity, historical peaks or sensors without a model-specific limit.\n"
+            "Gray / --: unavailable. High GPU/CPU load alone is not an alarm.\n\n"
             "Application thresholds (yellow / red):\n"
         )
         limits = "\n".join(f"{label}: {_METRIC_THRESHOLDS[key][0]} / {_METRIC_THRESHOLDS[key][1]}°C" for key, label in (
             ("cpu_temp", "CPU"), ("gpu_temp", "GPU Core"), ("gpu_hotspot_temp", "Hotspot"), ("gpu_memory_temp", "VRAM temp")
         ))
+        limits += "\n" + "\n".join(f"{label}: {_METRIC_THRESHOLDS[key][0]} / {_METRIC_THRESHOLDS[key][1]}%" for key, label in (
+            ("ram_pct", "RAM capacity"), ("gpu_vram_pct", "VRAM capacity"), ("disk_used", "Disk capacity")))
+        limits += "\n980 PRO / 860 EVO: 55 / 70°C; other disks: 45 / 55°C."
+        limits += "\nHotspot Δ: 25 / 35°C when Hotspot >=80°C; alarm after 10 seconds."
+        limits += "\nFan stall: previously running, then 0 RPM for 10 seconds under heat."
         _show_info_message("HeatMap sensor guide", meanings + limits +
                            "\n\nClick the warning panel to copy full diagnostics. Control sound with Alerts in the right-click menu.")
 
@@ -2998,18 +3027,21 @@ class OverlayApp:
         hwnd = self._get_hwnd()
         # Keep the HWND unmapped while Tk flushes geometry/style changes. Alpha
         # alone leaves a composed surface alive during the topmost transition.
+        _set_window_cloaked(hwnd, True)
         user32.ShowWindow(hwnd, SW_HIDE)
         self.root.wm_attributes("-alpha", 0.88)
         self.root.update_idletasks()
         set_tool_window(hwnd)
         if embed_in_desktop(hwnd):
             self.embedded = True
+            self._desktop_fallback_ready = False
         else:
             self.embedded = False
             # Show Desktop may raise the shell over independent bottom windows.
-            if not _position_above_desktop(hwnd):
-                user32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0,
-                                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+            self._desktop_fallback_ready = _position_above_desktop(hwnd)
+            if not self._desktop_fallback_ready:
+                self._desktop_fallback_ready = bool(user32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0,
+                                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE))
         # No Tk attribute/geometry changes after placement: show in that layer.
         _show_without_reordering(hwnd)
 
@@ -3042,16 +3074,16 @@ class OverlayApp:
         user32.GetClassNameW(parent, class_name, 256)
         return class_name.value == "WorkerW"
 
-    def _make_row(self, key, label_text, parent=None, label_fg="#a0a0c0"):
+    def _make_row(self, key, label_text, parent=None, label_fg="#cbd5e1"):
         parent = parent or self.content
         row = tk.Frame(parent, bg="#1a1a2e")
         row.pack(fill="x", pady=1)
         tk.Label(
-            row, text=f" {label_text}", font=("Segoe UI", 10, "bold"),
+            row, text=label_text, font=("Segoe UI", 9),
             fg=label_fg, bg="#1a1a2e", width=max(6, len(label_text) + 1), anchor="w"
         ).pack(side="left")
         val_lbl = tk.Label(
-            row, text="--", font=("Segoe UI", 10),
+            row, text="--", font=("Segoe UI", 9),
             fg="#888888", bg="#1a1a2e", anchor="e",
             wraplength=260 if key.startswith("detail_") else 0, justify="right",
         )
@@ -3088,6 +3120,7 @@ class OverlayApp:
             return
         monitor_areas = _get_monitor_areas()
         if monitor_areas != self._monitor_areas:
+            self._desktop_fallback_ready = False
             self._monitor_areas = monitor_areas
             self._cursor_was_at_peek_edge = False
             if self.peek_visible or self._peek_animating:
@@ -3096,7 +3129,8 @@ class OverlayApp:
         if self._can_embed_now():
             if self.embedded and not self._has_valid_desktop_parent():
                 self.embedded = False
-            if not self.embedded and self._embed_after_id is None:
+            if (not self.embedded and not getattr(self, "_desktop_fallback_ready", False)
+                    and self._embed_after_id is None):
                 self._schedule_embed(50)
         self.root.after(5000, self._poll_screen_change)
 
@@ -3188,6 +3222,7 @@ class OverlayApp:
         return _window_has_class(hwnd, {"Progman", "WorkerW"})
 
     def _restore_desktop_mode(self, delay=50):
+        _set_window_cloaked(self._get_hwnd(), True)
         self._peek_animating = False
         self.peek_visible = False
         self.root.wm_attributes("-alpha", 0)
@@ -3233,6 +3268,7 @@ class OverlayApp:
 
         self._cancel_scheduled_embed()
         self.root.wm_attributes("-alpha", 0)
+        _set_window_cloaked(self._get_hwnd(), True)
         user32.ShowWindow(self._get_hwnd(), SW_HIDE)
         if not self._detach_from_desktop():
             self.root.wm_attributes("-alpha", 0.88)
@@ -3307,6 +3343,12 @@ class OverlayApp:
     def _peek_check_mouse(self):
         """Poll mouse position — hide when cursor leaves overlay and trigger."""
         if not self.running or not self.peek_visible or self._peek_animating:
+            return
+
+        # Menus extend beyond the widget; hold the anchor while choosing settings.
+        menu = getattr(self, "menu", None)
+        if getattr(self, "_settings_dialog_open", False) or (menu is not None and menu.winfo_ismapped()):
+            self.root.after(200, self._peek_check_mouse)
             return
 
         pt = POINT()
@@ -3387,6 +3429,7 @@ class OverlayApp:
             self.root.deiconify()
             self.root.wm_attributes("-alpha", 0.88)
             self.root.wm_attributes("-topmost", True)
+            _show_without_reordering(self._get_hwnd())
         else:
             self.topmost = False
             self.root.wm_attributes("-topmost", False)
@@ -3524,9 +3567,13 @@ class OverlayApp:
             # Beep in a thread to avoid blocking UI
             def _alert_beep():
                 try:
+                    if not self.running or not self.alerts_enabled:
+                        return
+                    log.info("Audible alert: %s", "; ".join(alerts))
                     winsound.Beep(1000, 300)
                     time.sleep(0.15)
-                    winsound.Beep(1000, 300)
+                    if self.running and self.alerts_enabled:
+                        winsound.Beep(1000, 300)
                 except Exception:
                     pass  # No audio device or driver issue
             threading.Thread(target=_alert_beep, daemon=True).start()
@@ -3701,7 +3748,7 @@ class OverlayApp:
         )
         if cpu_clock is not None:
             ghz = cpu_clock / 1000
-            self.rows["cpu_clock"].config(text=f"{ghz:.2f}G", fg="#4ade80")
+            self.rows["cpu_clock"].config(text=f"{ghz:.2f} GHz", fg="#cbd5e1")
         else:
             self.rows["cpu_clock"].config(text="", fg="#888888")
         self.rows["cpu_load"].config(
@@ -3726,15 +3773,15 @@ class OverlayApp:
         if "gpu_delta" in self.rows:
             delta = gpu_delta(data)
             self.rows["gpu_delta"].config(
-                text=f"{delta:+}°C" if delta is not None else "--",
+                text=f"Δ {delta:+}°C" if delta is not None else "--",
                 fg=("#4ade80", "#facc15", "#f87171")[delta_severity(data)] if delta is not None else "#888888",
             )
         if gpu_clock is not None:
             if gpu_clock >= 1000:
                 ghz = gpu_clock / 1000
-                self.rows["gpu_clock"].config(text=f"{ghz:.2f}G", fg="#4ade80")
+                self.rows["gpu_clock"].config(text=f"{ghz:.2f} GHz", fg="#cbd5e1")
             else:
-                self.rows["gpu_clock"].config(text=f"{gpu_clock}M", fg="#4ade80")
+                self.rows["gpu_clock"].config(text=f"{gpu_clock} MHz", fg="#cbd5e1")
         else:
             self.rows["gpu_clock"].config(text="", fg="#888888")
         self.rows["gpu_load"].config(
@@ -3748,7 +3795,7 @@ class OverlayApp:
         vram_text = vram_gb if vram_gb != "--" else ""
         if vram_pct is not None:
             vram_text = (vram_text + " · " if vram_text else "") + f"{vram_pct}%"
-        self.rows["vram"].config(text=vram_text or "--", fg=_metric_color(vram_pct, (90, 98)))
+        self.rows["vram"].config(text=vram_text or "--", fg=_metric_color(vram_pct, _METRIC_THRESHOLDS["gpu_vram_pct"]))
 
         stalled_ids = {finding.key for finding in self.thermal_findings if finding.severity == 2}
         for key in ("gpu_fan", "cpu_fan"):
@@ -3756,13 +3803,14 @@ class OverlayApp:
             stalled = (any(fan["id"] in stalled_ids for fan in data.get("gpu_fans", []))
                        if key == "gpu_fan" else data.get("cpu_fan_id") in stalled_ids)
             self.rows[key].config(
-                text=_format_gpu_fans(data) if key == "gpu_fan" else _format_fan_reading(rpm, data.get(key + "_pct")),
+                text=_format_gpu_fans(data) if key == "gpu_fan" else _format_cpu_fan(rpm, data.get(key + "_pct"), self.config.get("cpu_fan_reference_rpm")),
                 fg="#f87171" if stalled else "#4ade80" if rpm else "#888888",
             )
         if "cpu_optional_fan" in self.rows:
             rpm = data.get("cpu_optional_fan")
             self.rows["cpu_optional_fan"].config(
-                text=_format_rpm(rpm), fg="#f87171" if data.get("cpu_optional_fan_id") in stalled_ids else "#4ade80" if rpm else "#888888"
+                text=_format_cpu_fan(rpm, data.get("cpu_optional_fan_pct"), self.config.get("cpu_fan_reference_rpm")),
+                fg="#f87171" if data.get("cpu_optional_fan_id") in stalled_ids else "#4ade80" if rpm else "#888888"
             )
         case_sensors = {fan["name"]: fan for fan in data.get("fans", [])}
         for number in range(1, 7):
@@ -3836,7 +3884,9 @@ class OverlayApp:
         _update_peak_values(self.peaks, data)
         for key, text in _detail_row_values(data, self.peaks).items():
             if key in self.rows:
-                color = "#4ade80" if text != "--" else "#888888"
+                # Unrated auxiliary sensors and historical peaks are information,
+                # not a green claim that the component is currently healthy.
+                color = "#cbd5e1" if text != "--" else "#888888"
                 if key == "detail_gpu_temps":
                     colors = [temp_color(data.get(sensor), metric) for sensor, metric in (
                         ("gpu_core_temp", "gpu_temp"),

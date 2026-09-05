@@ -38,6 +38,25 @@ def native_app():
 
 
 class NativePeekTests(unittest.TestCase):
+    def test_return_is_cloaked_in_the_compositor_until_show(self):
+        with native_app() as app:
+            hwnd = app._get_hwnd()
+            def cloaked():
+                flags = ctypes.wintypes.DWORD()
+                result = overlay.dwmapi.DwmGetWindowAttribute(
+                    ctypes.wintypes.HWND(hwnd), 14, ctypes.byref(flags), ctypes.sizeof(flags))
+                self.assertEqual(result, 0)
+                return bool(flags.value & 1)
+            app.peek_visible = True
+            app._saved_pos = (-30200, -30000)
+            app._restore_desktop_mode()
+            app.root.update_idletasks()
+            self.assertTrue(cloaked())
+            app._cancel_scheduled_embed()
+            with mock.patch.object(overlay, "find_desktop_worker_w", return_value=None):
+                app._embed_into_desktop()
+            self.assertFalse(cloaked())
+
     def test_scheduled_slide_in_and_out_returns_to_saved_position(self):
         with native_app() as app:
             app.root.geometry("200x120+-30200+-30000")
