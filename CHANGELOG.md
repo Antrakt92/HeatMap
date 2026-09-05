@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.1.0 — 2026-09-05
+
+- Keep expanded metrics reachable with scrolling while the header and warning
+  panel stay visible; wrap long disk names and fit the current/Peek work area.
+- Monitor every reported GPU fan, pair primary RPM with the correct fan control,
+  and ignore unrelated power controls. Detect persistent hot GPU fan stalls;
+  CPU-only heat does not turn normal GPU Zero RPM into an alarm.
+- Apply CPU fan stall warnings to CPU heat and color confirmed stalled fan rows
+  red. Report missing previously available GPU temperatures and required airflow inputs.
+- Show concise controller errors with restoration status, count omitted warnings,
+  and preserve complete details in click-to-copy diagnostics. Muted sound remains
+  labelled when temperatures are normal. Add a sensor guide to the menu.
+- Discard invalid saved fan calibration with a configuration warning, allowing
+  settings to remain saveable. Source ZIP tests explicitly skip the Git-index-only
+  check while retaining local artifact integrity tests.
+- Add native Tk layout tests and regressions for the verified findings. Hardware
+  curves, runtime dependencies, drivers and autostart security are unchanged.
+
 ## 1.0.2 — 2026-09-05
 
 - Fix intermittent Windows Access denied errors that stopped automatic case fan

@@ -51,6 +51,8 @@ class ThirdPartyLicenseTests(unittest.TestCase):
         self.assertIn("third_party_licenses/spdx/** -text", attributes)
 
     def test_hash_pinned_artifact_bytes_are_exact_in_git_index(self):
+        if not os.path.exists(os.path.join(REPO_ROOT, ".git")):
+            self.skipTest("Source archive has no Git index; local artifact hashes are checked separately")
         manifest, _packages = licenses.validate_local()
         artifacts = list(manifest["canonical_licenses"].values())
         for package in manifest["packages"]:

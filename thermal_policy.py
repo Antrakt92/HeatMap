@@ -86,6 +86,8 @@ class ThermalAdvisor:
     def __init__(self):
         self.since = {}
         self.seen_running_fans = set()
+        self.seen_gpu_temperatures = {}
+        self.gpu_id = None
 
     def reset(self):
         self.since.clear()
@@ -93,6 +95,13 @@ class ThermalAdvisor:
     def evaluate(self, data, now, temperature_thresholds, disk_thresholds):
         findings = []
         active = set()
+        self.gpu_id = data.get("gpu_id") or self.gpu_id
+        seen = self.seen_gpu_temperatures.setdefault(self.gpu_id, set())
+        for key, label in (("gpu_hotspot_temp", "GPU Hotspot"), ("gpu_memory_temp", "VRAM temp")):
+            if finite(data.get(key), 1) is not None:
+                seen.add(key)
+            elif key in seen:
+                findings.append(Finding("missing:" + key, 1, f"Unavailable: {label}"))
         for key, label in (("cpu_temp", "CPU"), ("gpu_temp", "GPU Core"),
                            ("gpu_hotspot_temp", "GPU Hotspot"), ("gpu_memory_temp", "VRAM temp")):
             value = finite(data.get(key), 1)
@@ -109,15 +118,19 @@ class ThermalAdvisor:
             if now - start >= 10:
                 findings.append(Finding("gpu_gap", gap_level,
                                         f"GPU hotspot gap +{gpu_delta(data)}°C: verify sensors / check cooling"))
-        for fan in data.get("fans", []):
+        cpu_hot = (finite(data.get("cpu_temp")) or 0) >= 70
+        gpu_hot = ((finite(data.get("gpu_hotspot_temp")) or 0) >= 85 or
+                   (finite(data.get("gpu_core_temp")) or 0) >= 80 or
+                   (finite(data.get("gpu_memory_temp")) or 0) >= 85)
+        fans = [(fan, cpu_hot if any(marker in fan.get("name", "").lower() for marker in ("cpu", "processor")) else cpu_hot or gpu_hot)
+                for fan in data.get("fans", [])]
+        fans.extend((fan, gpu_hot) for fan in data.get("gpu_fans", []))
+        for fan, hot in fans:
             key = str(fan.get("id") or fan.get("name"))
             rpm = finite(fan.get("rpm"), 0, 10000)
             if rpm is not None and rpm > 0:
                 self.seen_running_fans.add(key)
-            if rpm == 0 and key in self.seen_running_fans and (
-                (finite(data.get("cpu_temp")) or 0) >= 70 or
-                (finite(data.get("gpu_hotspot_temp")) or 0) >= 85
-            ):
+            if rpm == 0 and key in self.seen_running_fans and hot:
                 active.add(key)
                 start = self.since.setdefault(key, now)
                 if now - start >= 10:

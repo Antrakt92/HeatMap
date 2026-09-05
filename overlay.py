@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from tkinter import ttk
 import winreg
 import winsound
 import xml.etree.ElementTree as ET
@@ -31,7 +32,7 @@ import psutil
 from thermal_policy import ThermalAdvisor, gpu_delta, delta_severity
 from case_fans import FanWorkerClient, full_rpm_reference
 
-VERSION = "1.0.2"
+VERSION = "1.1.0"
 
 
 # --- Paths ---
@@ -1426,6 +1427,8 @@ def _empty_sensor_data():
         "fans": [],
         "gpu_fan": None,
         "gpu_fan_pct": None,
+        "gpu_fans": [],
+        "gpu_id": None,
         "gpu_vram_pct": None,
         "gpu_vram_used_gb": None,
         "gpu_vram_total_gb": None,
@@ -1519,6 +1522,10 @@ def _select_cpu_fan_control(control_sensors, fan_name, has_cpu_fan):
 
 def _normalized_sensor_name(name):
     return re.sub(r"\s+", " ", str(name).replace("_", " ").lower()).strip()
+
+
+def _gpu_fan_control_key(name):
+    return re.sub(r"\s*#\s*", " ", _normalized_sensor_name(name))
 
 
 def _is_gpu_load_sensor(name):
@@ -1664,6 +1671,9 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
             "gpu_vram_pct", "gpu_vram_used_gb", "gpu_vram_total_gb",
         )
         gpu_sample = {key: None for key in gpu_keys}
+        gpu_sample["gpu_id"] = str(getattr(hw, "Identifier", hw.Name))
+        gpu_sample["gpu_fans"] = []
+        gpu_controls = {}
         gpu_load_candidates = []
         gpu_mem_used = None
         gpu_mem_total = None
@@ -1689,12 +1699,14 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
                         )
             elif sensor.SensorType == SensorType.Fan:
                 val = _safe_round(sensor.Value, minimum=0)
-                if val is not None:
-                    gpu_sample["gpu_fan"] = val
+                gpu_sample["gpu_fans"].append({
+                    "name": str(sensor.Name), "rpm": val,
+                    "id": str(getattr(sensor, "Identifier", gpu_sample["gpu_id"] + "/" + str(sensor.Name))),
+                })
             elif sensor.SensorType == SensorType.Control:
                 val = _safe_percentage(sensor.Value)
-                if val is not None:
-                    gpu_sample["gpu_fan_pct"] = val
+                if val is not None and "fan" in _normalized_sensor_name(sensor.Name):
+                    gpu_controls[_gpu_fan_control_key(sensor.Name)] = val
             elif sensor.SensorType == SensorType.Clock:
                 if "core" in sensor.Name.lower():
                     val = _safe_round(sensor.Value, minimum=0)
@@ -1709,6 +1721,18 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
                     value = sensor.Value
                     if _safe_round(value, minimum=0) is not None:
                         gpu_mem_total = float(value)
+        gpu_sample["gpu_fans"].sort(key=lambda fan: (
+            int(_fan_number(fan["name"].lower()) or 0), _normalized_sensor_name(fan["name"]), fan["id"]))
+        if gpu_sample["gpu_fans"]:
+            primary = gpu_sample["gpu_fans"][0]
+            gpu_sample["gpu_fan"] = primary["rpm"]
+            gpu_sample["gpu_fan_pct"] = gpu_controls.get(_gpu_fan_control_key(primary["name"]))
+        # A single generic fan control is useful even without a tachometer.
+        # Never pair a different channel's duty with a multi-fan GPU's RPM.
+        if len(gpu_sample["gpu_fans"]) <= 1 and len(gpu_controls) == 1 and gpu_sample["gpu_fan_pct"] is None:
+            control_name, duty = next(iter(gpu_controls.items()))
+            if not gpu_sample["gpu_fans"] or control_name in ("gpu fan", "fan"):
+                gpu_sample["gpu_fan_pct"] = duty
         _select_gpu_display_temperature(gpu_sample)
         selected_load = max(gpu_load_candidates) if gpu_load_candidates else None
         if selected_load:
@@ -1803,6 +1827,7 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
                     })
                     if "cpu" in name and "optional" in name:
                         data["cpu_optional_fan"] = val
+                        data["cpu_optional_fan_id"] = data["fans"][-1]["id"]
             elif sensor.SensorType == SensorType.Control:
                 val = _safe_percentage(sensor.Value)
                 if val is not None:
@@ -1818,6 +1843,8 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
             selected_fan = _select_cpu_fan(fan_sensors)
             if selected_fan is not None:
                 _name, data["cpu_fan"] = selected_fan
+                data["cpu_fan_id"] = next((fan["id"] for fan in data["fans"]
+                                            if fan["name"].lower() == _name), None)
         else:
             selected_fan = None
         if data["cpu_fan_pct"] is None:
@@ -1978,6 +2005,38 @@ def _format_fan_reading(rpm, control_pct=None):
     return reading
 
 
+def _format_gpu_fans(data):
+    fans = data.get("gpu_fans", [])
+    if len(fans) <= 1:
+        return _format_fan_reading(data.get("gpu_fan"), data.get("gpu_fan_pct"))
+    return " | ".join(f"{_fan_number(fan['name'].lower()) or i}: {_format_rpm(fan['rpm'])}"
+                      for i, fan in enumerate(fans, 1))
+
+
+def _case_fan_advice(status):
+    if status.get("state") != "error":
+        return None
+    if status.get("restore_errors") or (status.get("baseline") and not status.get("restore_confirmed")):
+        return "Case fans: restore unconfirmed; restart Windows. Copy diagnostics for details."
+    if status.get("restore_confirmed"):
+        return "Case fans: automatic control stopped; firmware restored. Copy diagnostics for details."
+    return "Case fans: controller status error. Check Copy diagnostics before retrying."
+
+
+def _health_summary(messages, muted):
+    lines = []
+    for message in messages[:3]:
+        text = " ".join(str(message).split())
+        lines.append(text if len(text) <= 130 else text[:85] + "…" + text[-40:])
+    if len(messages) > 3:
+        lines.append(f"+{len(messages) - 3} more — Copy diagnostics")
+    if not lines:
+        lines.append("No thermal warnings")
+    if muted:
+        lines.append("Sound: OFF")
+    return "\n".join(lines)
+
+
 def _format_vram_gb(used_gb, total_gb):
     if used_gb is None or total_gb is None:
         return "--"
@@ -2098,7 +2157,7 @@ def _detail_row_values(data, peaks=None):
     peaks = _empty_peak_data() if peaks is None else peaks
     return {
         "detail_cpu_fan_rpm": _format_rpm(data.get("cpu_fan")),
-        "detail_gpu_fan_rpm": _format_rpm(data.get("gpu_fan")),
+        "detail_gpu_fan_rpm": _format_gpu_fans(dict(data, gpu_fan_pct=None)),
         "detail_vram_gb": _format_vram_gb(
             data.get("gpu_vram_used_gb"),
             data.get("gpu_vram_total_gb"),
@@ -2221,6 +2280,9 @@ def _normalize_config(cfg, defaults):
             invalid_keys.append(key)
         else:
             normalized[key] = int(value)
+    if "case_fan_full_rpm" in provided_keys and full_rpm_reference(normalized["case_fan_full_rpm"]) is None:
+        normalized.pop("case_fan_full_rpm")
+        invalid_keys.append("case_fan_full_rpm")
     return normalized, invalid_keys
 
 
@@ -2379,6 +2441,7 @@ class OverlayApp:
 
         # --- Header ---
         header = tk.Frame(self.root, bg="#16213e", cursor="fleur")
+        self.header = header
         header.pack(fill="x", padx=2, pady=(2, 0))
 
         title_label = tk.Label(
@@ -2402,8 +2465,24 @@ class OverlayApp:
         title_label.bind("<ButtonRelease-1>", self.end_drag)
 
         # --- Content frame ---
-        self.content = tk.Frame(self.root, bg="#1a1a2e")
-        self.content.pack(fill="both", padx=6, pady=4)
+        viewport = tk.Frame(self.root, bg="#1a1a2e")
+        viewport.pack(fill="both", padx=6, pady=(4, 0))
+        self.canvas = tk.Canvas(viewport, bg="#1a1a2e", highlightthickness=0, width=300, height=1)
+        self._scroll_style = ttk.Style(self.root)
+        self._scroll_style.theme_use("clam")
+        self._scroll_style.configure("HeatMap.Vertical.TScrollbar", background="#394062", troughcolor="#1a1a2e",
+                                     bordercolor="#1a1a2e", lightcolor="#394062", darkcolor="#394062",
+                                     arrowcolor="#a0a0c0", arrowsize=12)
+        self._scroll_style.map("HeatMap.Vertical.TScrollbar", background=[("active", "#56618c")])
+        self.scrollbar = ttk.Scrollbar(viewport, orient="vertical", command=self.canvas.yview,
+                                      style="HeatMap.Vertical.TScrollbar")
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.content = tk.Frame(self.canvas, bg="#1a1a2e")
+        self._content_window = self.canvas.create_window(0, 0, window=self.content, anchor="nw")
+        self.footer = tk.Frame(self.root, bg="#1a1a2e")
+        self.footer.pack(fill="x", padx=6, pady=(0, 4))
+        self.root.bind("<MouseWheel>", self._scroll_content)
 
         # Group colors
         CPU_CLR = "#6ea8fe"
@@ -2495,7 +2574,7 @@ class OverlayApp:
         # Bottom padding
         tk.Frame(self.content, bg="#1a1a2e", height=2).pack()
         self.status_label = tk.Label(
-            self.content, text="", font=("Segoe UI", 8),
+            self.footer, text="", font=("Segoe UI", 8),
             fg="#facc15", bg="#1a1a2e", anchor="w"
         )
         if self._driver_status == SENSOR_STATUS_DRIVER_MISSING:
@@ -2505,10 +2584,13 @@ class OverlayApp:
         self._refresh_runtime_status()
         self._clamp_saved_position_to_visible_screen(persist=True)
         self.health_label = tk.Label(
-            self.content, text="Sensors warming up", font=("Segoe UI", 9, "bold"),
+            self.footer, text="Sensors warming up", font=("Segoe UI", 9, "bold"),
             bg="#1a1a2e", fg="#facc15", anchor="w", justify="left", wraplength=310,
         )
         self.health_label.pack(fill="x", pady=(3, 2))
+        self.health_label.configure(cursor="hand2")
+        self.health_label.bind("<Button-1>", lambda _event: self.copy_diagnostics())
+        self._fit_content()
 
         # --- Right-click menu ---
         self.topmost = False
@@ -2545,6 +2627,7 @@ class OverlayApp:
         self.menu.add_command(label="Open log file", command=self.open_log_file)
         self.menu.add_command(label="Copy log path", command=self.copy_log_path)
         self._add_menu_item("diagnostics", "Copy diagnostics", self.copy_diagnostics)
+        self.menu.add_command(label="Sensor guide...", command=self.show_sensor_guide)
         self._add_menu_item("case_fans", "Automatic case fans: " +
                             ("ON" if self.config.get("case_fans_enabled", False) else "OFF"),
                             self.toggle_case_fans)
@@ -2592,6 +2675,7 @@ class OverlayApp:
             return False
         if getattr(self, "peek_visible", False) or getattr(self, "_peek_animating", False):
             return False
+        self._fit_content()
         self.root.update_idletasks()
         x, y = _clamp_overlay_to_monitor_areas(
             self.config.get("x", 50),
@@ -2689,6 +2773,10 @@ class OverlayApp:
         self._set_menu_label("diagnostics", "Collecting diagnostics...")
         results = queue.Queue(maxsize=1)
         self._diagnostics_results = results
+        messages = getattr(self, "health_messages", [])
+        health_context = "\nWarnings at request:\n" + "\n".join(messages) if messages else ""
+        health_context += "\nCase fan controller:\n" + json.dumps(
+            getattr(self, "_case_fan_status", {"state": "off"}), ensure_ascii=False)
 
         def worker():
             computer = None
@@ -2702,8 +2790,7 @@ class OverlayApp:
                 data = read_sensors(computer)
                 if not self._stop_event.is_set():
                     result = (True, build_sensor_diagnostics(computer, data))
-                    result = (True, result[1] + "\nCase fan controller:\n" +
-                              json.dumps(getattr(self, "_case_fan_status", {"state": "off"}), ensure_ascii=False))
+                    result = (True, result[1] + health_context)
             except Exception as e:
                 log.warning("Failed to collect diagnostics: %s", e, exc_info=True)
                 result = (False, str(e))
@@ -2718,6 +2805,24 @@ class OverlayApp:
         except Exception as e:
             results.put_nowait((False, str(e)))
         self.root.after(100, self._poll_diagnostics)
+
+    def show_sensor_guide(self):
+        meanings = (
+            "G.CORE: ordinary GPU core temperature.\n"
+            "HOTSPOT: hottest measured point on the GPU die.\n"
+            "HOT−CORE: temperature difference; a persistent large gap needs checking.\n"
+            "V.TEMP: video memory temperature. VRAM %: memory capacity in use.\n"
+            "C.FAN / C.OPT: CPU cooler headers. G.FAN: measured GPU fan RPM.\n"
+            "Multiple GPU fans are numbered separately. 0 RPM is a measured stop; -- is unavailable.\n"
+            "% ctl: controller duty. SYS numbers identify motherboard headers.\n"
+            "AIRFLOW AUTO: automatic case fan control has passed its startup check.\n\n"
+            "Application thresholds (yellow / red):\n"
+        )
+        limits = "\n".join(f"{label}: {_METRIC_THRESHOLDS[key][0]} / {_METRIC_THRESHOLDS[key][1]}°C" for key, label in (
+            ("cpu_temp", "CPU"), ("gpu_temp", "GPU Core"), ("gpu_hotspot_temp", "Hotspot"), ("gpu_memory_temp", "VRAM temp")
+        ))
+        _show_info_message("HeatMap sensor guide", meanings + limits +
+                           "\n\nClick the warning panel to copy full diagnostics. Sound: OFF means audible alerts are muted.")
 
     def _poll_diagnostics(self):
         if not self.running or not getattr(self, "_diagnostics_running", False):
@@ -2791,6 +2896,49 @@ class OverlayApp:
             self.details_frame.pack(**pack_options)
         else:
             self.details_frame.pack_forget()
+
+    def _fit_content(self):
+        """Keep the header and health panel visible when metrics exceed the work area."""
+        if not hasattr(self, "canvas"):
+            return
+        self.root.update_idletasks()
+        areas = _get_monitor_areas()
+        area = getattr(self, "_peek_monitor_area", None) or _select_monitor_for_window(
+            self.config.get("x", 50), self.config.get("y", 50),
+            self.root.winfo_width(), self.root.winfo_height(), areas)
+        if area is None:
+            return
+        _monitor, work = area
+        work_width, work_height = work[2] - work[0], work[3] - work[1]
+        if hasattr(self, "health_label"):
+            self.health_label.configure(wraplength=max(100, min(310, work_width - 24)))
+        self.root.update_idletasks()
+        available = max(40, work_height - self.header.winfo_reqheight() - self.footer.winfo_reqheight() - 12)
+        height = self.content.winfo_reqheight()
+        overflow = height > available
+        if overflow:
+            self.scrollbar.pack(side="right", fill="y")
+        else:
+            self.scrollbar.pack_forget()
+            self.canvas.yview_moveto(0)
+        gutter = self.scrollbar.winfo_reqwidth() if overflow else 0
+        width = max(100, min(max(280, self.content.winfo_reqwidth()), work_width - 12 - gutter))
+        self.canvas.itemconfigure(self._content_window, width=width)
+        self.canvas.configure(width=width, height=min(height, available), scrollregion=(0, 0, width, height))
+        self._content_overflow = overflow
+        self.root.update_idletasks()
+        size = (self.root.winfo_reqwidth(), self.root.winfo_reqheight())
+        if (getattr(self, "peek_visible", False) and not getattr(self, "_peek_animating", False)
+                and size != getattr(self, "_content_layout_size", None)):
+            y = min(max(self.root.winfo_rooty(), work[1]), max(work[1], work[3] - size[1]))
+            self.root.geometry(f"+{work[2] - size[0]}+{y}")
+        self._content_layout_size = size
+
+    def _scroll_content(self, event):
+        if getattr(self, "_content_overflow", False) and event.delta:
+            units = max(1, abs(event.delta) // 120)
+            self.canvas.yview_scroll(-units if event.delta > 0 else units, "units")
+            return "break"
 
     def _get_hwnd(self):
         """Get the native Windows HWND for the tkinter root window."""
@@ -2898,7 +3046,7 @@ class OverlayApp:
         # Left: disk name (orange, bold)
         tk.Label(
             row, text=f" {disk_name}", font=("Segoe UI", 10, "bold"),
-            fg=self.DISK_CLR, bg="#1a1a2e", anchor="w"
+            fg=self.DISK_CLR, bg="#1a1a2e", anchor="w", wraplength=180, justify="left"
         ).pack(side="left")
         # Far-right: usage % (colored)
         usage_lbl = tk.Label(
@@ -3078,6 +3226,7 @@ class OverlayApp:
         monitor_rect, work_rect = monitor_area
         screen_right = monitor_rect[2]
         try:
+            self._fit_content()
             self.root.update_idletasks()
             overlay_w = self.root.winfo_width()
             overlay_h = self.root.winfo_height()
@@ -3282,16 +3431,23 @@ class OverlayApp:
         severity = max((item.severity for item in self.thermal_findings), default=0)
         missing = [label for key, label in (("cpu_temp", "CPU"), ("gpu_core_temp", "GPU Core"))
                    if data.get(key) is None]
+        if self.config.get("case_fans_enabled", False):
+            reported = {item.key for item in self.thermal_findings}
+            missing.extend(label for key, label in (("gpu_hotspot_temp", "GPU Hotspot"), ("gpu_memory_temp", "VRAM temp"))
+                           if data.get(key) is None and "missing:" + key not in reported)
         if missing:
             messages.append("Unavailable: " + ", ".join(missing))
             severity = max(severity, 1)
         if status.get("state") == "error":
-            messages.insert(0, "Case fans: " + str(status.get("reason", "controller error")))
+            messages.insert(0, _case_fan_advice(status))
             severity = 2
+        self._set_health_panel(messages, severity)
+
+    def _set_health_panel(self, messages, severity):
+        self.health_messages = messages
         if hasattr(self, "health_label"):
-            suffix = "\nSound: OFF" if not self.alerts_enabled and severity else ""
             self.health_label.config(
-                text=("\n".join(messages[:3]) if messages else "No thermal warnings") + suffix,
+                text=_health_summary(messages, not self.alerts_enabled),
                 fg=("#4ade80", "#facc15", "#f87171")[severity],
             )
 
@@ -3485,6 +3641,8 @@ class OverlayApp:
             sample_time = getattr(self, "_sensor_sample_time", None)
 
         if not data:
+            if getattr(self, "_case_fan_status", {}).get("state") == "error":
+                self._show_sensor_error(text="--", color="#888888")
             self.root.after(500, self.update_ui)
             return
 
@@ -3561,16 +3719,19 @@ class OverlayApp:
         else:
             self.rows["vram"].config(text="--", fg="#888888")
 
+        stalled_ids = {finding.key for finding in self.thermal_findings if finding.severity == 2}
         for key in ("gpu_fan", "cpu_fan"):
             rpm = data.get(key)
+            stalled = (any(fan["id"] in stalled_ids for fan in data.get("gpu_fans", []))
+                       if key == "gpu_fan" else data.get("cpu_fan_id") in stalled_ids)
             self.rows[key].config(
-                text=_format_fan_reading(rpm, data.get(key + "_pct")),
-                fg="#4ade80" if rpm is not None else "#888888",
+                text=_format_gpu_fans(data) if key == "gpu_fan" else _format_fan_reading(rpm, data.get(key + "_pct")),
+                fg="#f87171" if stalled else "#4ade80" if rpm else "#888888",
             )
         if "cpu_optional_fan" in self.rows:
             rpm = data.get("cpu_optional_fan")
             self.rows["cpu_optional_fan"].config(
-                text=_format_rpm(rpm), fg="#4ade80" if rpm is not None else "#888888"
+                text=_format_rpm(rpm), fg="#f87171" if data.get("cpu_optional_fan_id") in stalled_ids else "#4ade80" if rpm else "#888888"
             )
         case_sensors = {fan["name"]: fan for fan in data.get("fans", [])}
         for number in range(1, 7):
@@ -3583,7 +3744,7 @@ class OverlayApp:
                 self._seen_case_fans.add(number)
                 self.rows[key].master.pack(fill="x", pady=1, before=self.rows["case_fan_control"].master)
             self.rows[key].config(
-                text=_format_rpm(rpm), fg="#4ade80" if rpm else "#888888"
+                text=_format_rpm(rpm), fg="#f87171" if fan and fan.get("id") in stalled_ids else "#4ade80" if rpm else "#888888"
             )
 
         # RAM: used/total GB + %
@@ -3661,6 +3822,7 @@ class OverlayApp:
         self._check_alerts(data)
 
         if hasattr(self, "health_label"):
+            self._fit_content()
             self.root.update_idletasks()
             size = (self.root.winfo_reqwidth(), self.root.winfo_reqheight())
             if size != getattr(self, "_thermal_layout_size", None):
@@ -3676,10 +3838,8 @@ class OverlayApp:
         if hasattr(self, "health_label"):
             status = getattr(self, "_case_fan_status", {})
             controller_error = status.get("state") == "error"
-            self.health_label.config(
-                text="Fresh sensor data unavailable" + ("\nCase fans: " + str(status.get("reason")) if controller_error else ""),
-                fg="#f87171" if controller_error else "#facc15",
-            )
+            messages = ([_case_fan_advice(status)] if controller_error else []) + ["Fresh sensor data unavailable"]
+            self._set_health_panel(messages, 2 if controller_error else 1)
             if controller_error:
                 self._check_alerts({})
         for child in list(self.disk_frame.winfo_children()):
@@ -3693,6 +3853,7 @@ class OverlayApp:
         for key, label in self.rows.items():
             if key != "case_fan_control":
                 label.config(text=text, fg=color)
+        self._fit_content()
 
     def quit(self):
         if not self.running:
