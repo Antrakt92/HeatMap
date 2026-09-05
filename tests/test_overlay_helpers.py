@@ -877,7 +877,9 @@ class OverlayHelperTests(unittest.TestCase):
         ):
             data = overlay.read_sensors(computer)
 
-        self.assertEqual(data["disks"], [{"name": "980 PRO", "temp": 62, "used_pct": 68, "life_pct": 77}])
+        self.assertEqual(data["disks"], [{"name": "980 PRO", "temp": 41, "used_pct": 68, "life_pct": 77,
+                                        "temperatures": [{"name": "Temperature", "temp": 41},
+                                                         {"name": "Temperature 2", "temp": 62}], "aux_temp": 62}])
 
     def test_read_sensors_gpu_vram_fan_and_clock_parsing(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
@@ -913,7 +915,7 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["gpu_vram_total_gb"], 12.0)
         self.assertNotIn(overlay.SENSOR_STATUS_KEY, data)
 
-    def test_read_sensors_gpu_temperature_breakdown_uses_hottest_sensor(self):
+    def test_read_sensors_gpu_temperature_breakdown_keeps_core_primary(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
         gpu = _FakeHardware(
             "AMD Radeon RX 7900 XT",
@@ -936,8 +938,8 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["gpu_core_temp"], 54)
         self.assertEqual(data["gpu_memory_temp"], 68)
         self.assertEqual(data["gpu_hotspot_temp"], 64)
-        self.assertEqual(data["gpu_temp"], 68)
-        self.assertEqual(data["gpu_temp_label"], "MEM")
+        self.assertEqual(data["gpu_temp"], 54)
+        self.assertEqual(data["gpu_temp_label"], "CORE")
 
     def test_read_sensors_accepts_common_gpu_memory_and_ram_name_variants(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
@@ -1234,7 +1236,7 @@ class OverlayHelperTests(unittest.TestCase):
             {"name": "System #1", "temp": 27},
         ])
 
-    def test_read_sensors_cpu_fan_control_falls_back_to_matching_number_only(self):
+    def test_read_sensors_cpu_fan_control_rejects_unlabelled_controls(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
         motherboard_hash_one = _FakeHardware(
             "Motherboard",
@@ -1274,7 +1276,7 @@ class OverlayHelperTests(unittest.TestCase):
             hash_one_data = overlay.read_sensors(SimpleNamespace(Hardware=[motherboard_hash_one]))
             first_data = overlay.read_sensors(SimpleNamespace(Hardware=[motherboard_first]))
 
-        self.assertEqual(hash_one_data["cpu_fan_pct"], 42)
+        self.assertIsNone(hash_one_data["cpu_fan_pct"])
         self.assertIsNone(first_data["cpu_fan_pct"])
 
     def test_read_sensors_cpu_temperature_from_subhardware(self):
@@ -1302,7 +1304,7 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["cpu_temp"], 52)
         self.assertEqual(data["cpu_load"], 35)
 
-    def test_read_sensors_cpu_fan_falls_back_to_numbered_motherboard_fan(self):
+    def test_read_sensors_does_not_guess_cpu_from_numbered_motherboard_fan(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
         motherboard = _FakeHardware(
             "Motherboard",
@@ -1321,8 +1323,9 @@ class OverlayHelperTests(unittest.TestCase):
         ):
             data = overlay.read_sensors(computer)
 
-        self.assertEqual(data["cpu_fan"], 1250)
-        self.assertEqual(data["cpu_fan_pct"], 48)
+        self.assertIsNone(data["cpu_fan"])
+        self.assertIsNone(data["cpu_fan_pct"])
+        self.assertEqual(data["fans"][0]["rpm"], 1250)
 
     def test_read_sensors_logs_and_skips_sensor_value_failure(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
@@ -1499,7 +1502,7 @@ class OverlayHelperTests(unittest.TestCase):
         values = overlay._detail_row_values(data)
 
         self.assertEqual(values["detail_cpu_fan_rpm"], "1800 RPM")
-        self.assertEqual(values["detail_gpu_fan_rpm"], "OFF")
+        self.assertEqual(values["detail_gpu_fan_rpm"], "0 RPM")
         self.assertEqual(values["detail_vram_gb"], "0.6/20.0G")
         self.assertEqual(values["detail_board_temps"], "VRM 34°C  CHIP 30°C  SYS 27°C")
         self.assertEqual(values["detail_disk_life"], "980 77%  860 97%")
@@ -1548,6 +1551,8 @@ class OverlayHelperTests(unittest.TestCase):
             "cpu_temp": 62,
             "gpu_temp": 60,
             "gpu_temp_label": "CORE",
+            "gpu_hotspot_temp": None,
+            "gpu_memory_temp": None,
             "ram_pct": 42,
             "disk_temp": 38,
             "disk_used_pct": 68,
@@ -1993,7 +1998,7 @@ class OverlayHelperTests(unittest.TestCase):
         read_sensors.assert_called_once_with(computer)
         build.assert_called_once_with(computer, {"cpu_temp": 58})
         self.assertTrue(computer.closed)
-        self.assertEqual(app.root.clipboard_value, "diagnostic dump")
+        self.assertEqual(app.root.clipboard_value, 'diagnostic dump\nCase fan controller:\n{"state": "off"}')
 
     def test_prepare_verified_pawnio_installer_returns_verified_path(self):
         with mock.patch("setup.download_pawnio", return_value=r"C:\verified\PawnIO.exe"):
@@ -2399,6 +2404,8 @@ def _update_ui_app():
         "cpu_clock": _FakeLabel(),
         "cpu_load": _FakeLabel(),
         "gpu_temp": _FakeLabel(),
+        "gpu_hotspot_temp": _FakeLabel(),
+        "gpu_memory_temp": _FakeLabel(),
         "gpu_clock": _FakeLabel(),
         "gpu_load": _FakeLabel(),
         "vram": _FakeLabel(),

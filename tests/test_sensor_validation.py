@@ -76,7 +76,6 @@ class SensorValidationTests(unittest.TestCase):
         app.alerts_enabled = True
         app._last_alert_time = 0
         app._ALERT_COOLDOWN = 60
-        app._CRITICAL = {"cpu_temp": 85, "gpu_temp": 90, "ram_pct": 95, "disk_temp": 55, "disk_used": 90}
         with (
             mock.patch.object(overlay.time, "time", return_value=1000),
             mock.patch.object(overlay.threading, "Thread") as thread,
@@ -161,7 +160,7 @@ class SensorValidationTests(unittest.TestCase):
     def test_known_numbered_cpu_fan_uses_matching_control(self):
         data = self.read(self.hardware("Motherboard", [
             ("CPU Fan #2", "Fan", 1300),
-            ("Fan #1", "Control", 0), ("Fan #2", "Control", 66),
+            ("Fan #1", "Control", 0), ("CPU Fan #2", "Control", 66),
         ]))
         self.assertEqual(data["cpu_fan_pct"], 66)
 

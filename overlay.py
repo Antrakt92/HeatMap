@@ -28,6 +28,11 @@ import xml.etree.ElementTree as ET
 
 import psutil
 
+from thermal_policy import ThermalAdvisor, gpu_delta, delta_severity
+from case_fans import FanWorkerClient
+
+VERSION = "1.0.0"
+
 
 # --- Paths ---
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1417,6 +1422,8 @@ def _empty_sensor_data():
         "gpu_clock": None,
         "cpu_fan": None,
         "cpu_fan_pct": None,
+        "cpu_optional_fan": None,
+        "fans": [],
         "gpu_fan": None,
         "gpu_fan_pct": None,
         "gpu_vram_pct": None,
@@ -1435,6 +1442,8 @@ def _empty_peak_data():
         "cpu_temp": None,
         "gpu_temp": None,
         "gpu_temp_label": None,
+        "gpu_hotspot_temp": None,
+        "gpu_memory_temp": None,
         "ram_pct": None,
         "disk_temp": None,
         "disk_used_pct": None,
@@ -1490,17 +1499,12 @@ def _select_cpu_fan(fan_sensors):
     for name, val in fan_sensors:
         if _is_primary_cpu_fan_name(name):
             return name, val
-    for name, val in fan_sensors:
-        if _fan_number(name) == "1":
-            return name, val
-    for name, val in fan_sensors:
-        if "pump" not in name and "optional" not in name:
-            return name, val
-    return fan_sensors[0]
+    # Unknown Fan #1/System Fan #1 cannot be assumed to be a CPU cooler.
+    return None
 
 
 def _select_cpu_fan_control(control_sensors, fan_name, has_cpu_fan):
-    if not control_sensors:
+    if not control_sensors or not has_cpu_fan:
         return None
     fan_idx = _fan_number(fan_name or "")
     for name, val in control_sensors:
@@ -1508,14 +1512,8 @@ def _select_cpu_fan_control(control_sensors, fan_name, has_cpu_fan):
             fan_idx is None or _fan_number(name) in (None, fan_idx)
         ):
             return val
-    if fan_idx:
-        for name, val in control_sensors:
-            if _fan_number(name) == fan_idx:
-                return val
-        return None
-    for name, val in control_sensors:
-        if _fan_number(name) == "1":
-            return val
+    # Numbered system controls must not be presented as CPU duty (particularly
+    # when the CPU itself uses automatic mode and has no readable percentage).
     return None
 
 
@@ -1547,30 +1545,26 @@ def _gpu_load_priority(name):
 
 def _gpu_temperature_key(name):
     name = _normalized_sensor_name(name)
-    if not name:
+    # WHY: LHM also exports GPU VR VDDC/MVDD/SoC, Liquid and PLX.
+    # A generic "gpu" match silently overwrites the actual die temperature.
+    if not name or any(marker in name for marker in (
+        "warning", "critical", "threshold", "limit", "vr ", "vrm", "liquid", "plx",
+    )):
         return None
     if "memory" in name or "vram" in name:
         return "gpu_memory_temp"
     if "hotspot" in name or "hot spot" in name or "junction" in name:
         return "gpu_hotspot_temp"
-    if "core" in name or "gpu" in name or "temperature" in name:
+    if name in ("core", "gpu core", "gpu", "gpu temperature", "temperature",
+                "edge", "gpu edge", "gpu core temperature"):
         return "gpu_core_temp"
     return None
 
 
 def _select_gpu_display_temperature(data):
-    candidates = [
-        ("CORE", data.get("gpu_core_temp")),
-        ("HOT", data.get("gpu_hotspot_temp")),
-        ("MEM", data.get("gpu_memory_temp")),
-    ]
-    priority = {"CORE": 0, "MEM": 1, "HOT": 2}
-    available = [(label, value) for label, value in candidates if value is not None]
-    if not available:
-        return
-    label, value = max(available, key=lambda item: (item[1], priority[item[0]]))
-    data["gpu_temp"] = value
-    data["gpu_temp_label"] = label
+    # SYNC: Hotspot and memory have independent rows and alert thresholds.
+    data["gpu_temp"] = data.get("gpu_core_temp")
+    data["gpu_temp_label"] = "CORE" if data["gpu_temp"] is not None else None
 
 
 def _is_gpu_memory_used_sensor(name):
@@ -1627,7 +1621,9 @@ def _is_storage_temperature_reading(name):
 def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_storage=True):
     hw_type = hw.HardwareType
     if hw_type == HardwareType.GpuIntel and any(
-        sample.get("gpu_temp") is not None for _rank, sample in candidates["gpus"]
+        any(sample.get(key) is not None for key in (
+            "gpu_core_temp", "gpu_hotspot_temp", "gpu_memory_temp"
+        )) for _rank, sample in candidates["gpus"]
     ):
         return
     is_storage = hw_type == HardwareType.Storage
@@ -1681,7 +1677,8 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
                 if temp_key:
                     val = _safe_temperature(sensor.Value)
                     if val is not None:
-                        gpu_sample[temp_key] = val
+                        previous = gpu_sample[temp_key]
+                        gpu_sample[temp_key] = max(previous, val) if previous is not None else val
             elif sensor.SensorType == SensorType.Load:
                 priority = _gpu_load_priority(sensor.Name)
                 if priority is not None:
@@ -1721,7 +1718,11 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
             gpu_sample["gpu_vram_used_gb"] = round(gpu_mem_used / 1024, 1)
             gpu_sample["gpu_vram_total_gb"] = round(gpu_mem_total / 1024, 1)
         hardware_priority = 10 if hw_type == HardwareType.GpuIntel else 20
-        display_temp = gpu_sample["gpu_temp"]
+        # Keep device ranking independent of the primary display policy.
+        temperatures = [gpu_sample[key] for key in (
+            "gpu_core_temp", "gpu_hotspot_temp", "gpu_memory_temp"
+        ) if gpu_sample[key] is not None]
+        display_temp = max(temperatures) if temperatures else None
         load_priority = selected_load[0] if selected_load else -1
         load_value = gpu_sample["gpu_load"]
         rank = (
@@ -1736,6 +1737,8 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
 
     elif hw_type == HardwareType.Storage:
         disk_temp = None
+        primary_temp = None
+        temperature_readings = []
         disk_used = None
         disk_life = None
         for sensor in hw.Sensors:
@@ -1743,6 +1746,12 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
                 if not _is_storage_temperature_reading(sensor.Name):
                     continue
                 val = _safe_temperature(sensor.Value)
+                if val is not None:
+                    temperature_readings.append({"name": str(sensor.Name), "temp": val})
+                    if _normalized_sensor_name(sensor.Name) in (
+                        "temperature", "composite", "composite temperature", "drive temperature"
+                    ):
+                        primary_temp = max(primary_temp, val) if primary_temp is not None else val
                 if val is not None and (disk_temp is None or val > disk_temp):
                     disk_temp = val
             elif sensor.SensorType == SensorType.Load:
@@ -1769,9 +1778,12 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
         ).strip() or str(hw.Name)
         disk_data = {
             "name": name,
-            "temp": disk_temp,
+            "temp": primary_temp if primary_temp is not None else disk_temp,
             "used_pct": disk_used,
         }
+        if len(temperature_readings) > 1:
+            disk_data["temperatures"] = temperature_readings
+            disk_data["aux_temp"] = max(item["temp"] for item in temperature_readings)
         if disk_life is not None:
             disk_data["life_pct"] = disk_life
         data["disks"].append(disk_data)
@@ -1785,6 +1797,12 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
                 val = _safe_round(sensor.Value, minimum=0)
                 if val is not None:
                     fan_sensors.append((name, val))
+                    data["fans"].append({
+                        "name": str(sensor.Name), "rpm": val,
+                        "id": str(getattr(sensor, "Identifier", str(hw.Name) + "/" + name)),
+                    })
+                    if "cpu" in name and "optional" in name:
+                        data["cpu_optional_fan"] = val
             elif sensor.SensorType == SensorType.Control:
                 val = _safe_percentage(sensor.Value)
                 if val is not None:
@@ -1891,52 +1909,73 @@ def read_sensors(computer, update_storage=True):
 
 
 # --- Color coding ---
-def temp_color(temp):
-    if temp is None:
+# Application warning/action thresholds, not universal hardware damage limits.
+# SYNC: rendering and sound alerts both consume this table.
+_METRIC_THRESHOLDS = {
+    "cpu_temp": (70, 85),
+    "gpu_temp": (80, 90),
+    "gpu_hotspot_temp": (90, 105),
+    "gpu_memory_temp": (85, 100),
+    "disk_temp": (45, 55),
+    "disk_used": (80, 90),
+    "ram_pct": (80, 95),
+}
+
+
+def _metric_color(value, thresholds):
+    if value is None:
         return "#888888"
-    if temp < 55:
+    warning, critical = thresholds
+    if value < warning:
         return "#4ade80"
-    if temp < 75:
+    if value < critical:
         return "#facc15"
     return "#f87171"
 
 
-def disk_temp_color(temp):
-    if temp is None:
-        return "#888888"
-    if temp < 45:
-        return "#4ade80"
-    if temp < 55:
-        return "#facc15"
-    return "#f87171"
+def temp_color(temp, metric="cpu_temp"):
+    return _metric_color(temp, _METRIC_THRESHOLDS[metric])
+
+
+def _disk_temperature_thresholds(name):
+    # Samsung specifies 0-70 C operating temperature for these SSD families.
+    # Unknown disks retain the conservative policy; HDD limits can be lower.
+    if re.search(r"\b(?:980\s+PRO|860\s+EVO)\b", str(name), re.IGNORECASE):
+        return (55, 70)
+    return _METRIC_THRESHOLDS["disk_temp"]
+
+
+def disk_temp_color(temp, name=""):
+    return _metric_color(temp, _disk_temperature_thresholds(name))
 
 
 def load_color(load):
     if load is None:
         return "#888888"
-    if load < 50:
-        return "#4ade80"
     if load < 80:
-        return "#facc15"
-    return "#f87171"
+        return "#4ade80"
+    # High utilization/fan speed is activity, not evidence of overheating.
+    return "#facc15"
 
 
 def disk_usage_color(pct):
-    if pct is None:
-        return "#888888"
-    if pct < 70:
-        return "#4ade80"
-    if pct < 85:
-        return "#facc15"
-    return "#f87171"
+    return _metric_color(pct, _METRIC_THRESHOLDS["disk_used"])
 
 
 def _format_rpm(value):
     if value is None:
         return "--"
     if value == 0:
-        return "OFF"
+        return "0 RPM"
     return f"{value} RPM"
+
+
+def _format_fan_reading(rpm, control_pct=None):
+    # PWM/DC duty and tachometer RPM are different quantities; never derive one from the other.
+    reading = _format_rpm(rpm)
+    if control_pct is not None:
+        reading += f" | {control_pct}% ctl"
+    return reading
 
 
 def _format_vram_gb(used_gb, total_gb):
@@ -2010,7 +2049,7 @@ def _format_gpu_temps(data):
 
 
 def _update_peak_values(peaks, data):
-    for key in ("cpu_temp", "ram_pct"):
+    for key in ("cpu_temp", "ram_pct", "gpu_hotspot_temp", "gpu_memory_temp"):
         value = data.get(key)
         if value is not None and (peaks.get(key) is None or value > peaks[key]):
             peaks[key] = value
@@ -2038,6 +2077,9 @@ def _format_peak_temps(peaks):
         gpu_label = peaks.get("gpu_temp_label")
         label_part = f" {gpu_label}" if gpu_label else ""
         parts.append(f"GPU{label_part} {peaks['gpu_temp']}°C")
+    for key, label in (("gpu_hotspot_temp", "HOT"), ("gpu_memory_temp", "MEM")):
+        if peaks.get(key) is not None:
+            parts.append(f"{label} {peaks[key]}°C")
     if peaks.get("disk_temp") is not None:
         parts.append(f"DISK {peaks['disk_temp']}°C")
     return "  ".join(parts) if parts else "--"
@@ -2064,6 +2106,10 @@ def _detail_row_values(data, peaks=None):
         "detail_gpu_temps": _format_gpu_temps(data),
         "detail_board_temps": _format_board_temps(data.get("motherboard_temps", [])),
         "detail_disk_life": _format_disk_life(data.get("disks", [])),
+        "detail_disk_sensors": "  ".join(
+            f"{disk['name']}: " + ", ".join(f"{s['name']} {s['temp']}°C" for s in disk["temperatures"])
+            for disk in data.get("disks", []) if disk.get("temperatures")
+        ) or "--",
         "detail_peak_temps": _format_peak_temps(peaks),
         "detail_peak_usage": _format_peak_usage(peaks),
     }
@@ -2084,6 +2130,7 @@ def build_sensor_diagnostics(computer, sensor_data=None, is_admin=None, pawnio_i
     pawnio_installed = is_pawnio_driver_installed() if pawnio_installed is None else pawnio_installed
     lines = [
         "HeatMap diagnostics",
+        f"Version: {VERSION}",
         f"Admin: {'yes' if is_admin else 'no'}",
         f"PawnIO: {'installed' if pawnio_installed else 'missing'}",
         f"LHM computer: {'yes' if computer is not None else 'no'}",
@@ -2092,7 +2139,7 @@ def build_sensor_diagnostics(computer, sensor_data=None, is_admin=None, pawnio_i
     if sensor_data:
         lines.append("Sensor data:")
         for key in (
-            "cpu_temp", "cpu_load", "cpu_clock", "cpu_fan", "cpu_fan_pct",
+            "cpu_temp", "cpu_load", "cpu_clock", "cpu_fan", "cpu_fan_pct", "cpu_optional_fan", "fans",
             "gpu_temp", "gpu_temp_label", "gpu_core_temp", "gpu_hotspot_temp", "gpu_memory_temp",
             "gpu_load", "gpu_clock", "gpu_fan", "gpu_fan_pct",
             "gpu_vram_pct", "gpu_vram_used_gb", "gpu_vram_total_gb",
@@ -2153,11 +2200,11 @@ def _normalize_config(cfg, defaults):
             invalid_keys.append(key)
         else:
             normalized[key] = int(value)
-    for key in ("peek_enabled", "alerts_enabled", "details_enabled"):
+    for key in ("peek_enabled", "alerts_enabled", "details_enabled", "case_fans_enabled"):
         if key not in provided_keys:
             continue
         if not isinstance(normalized.get(key), bool):
-            normalized[key] = defaults[key]
+            normalized[key] = defaults.get(key, False)
             invalid_keys.append(key)
     for key in ("gpu_fan_max_rpm", "cpu_fan_max_rpm"):
         if key not in provided_keys:
@@ -2303,18 +2350,12 @@ class OverlayApp:
         self.details_enabled = self.config.get("details_enabled", False)
         self._last_alert_time = 0
         self._ALERT_COOLDOWN = 60  # seconds between repeated alerts
-        self._CRITICAL = {
-            "cpu_temp": 85,
-            "gpu_temp": 90,
-            "disk_temp": 55,
-            "disk_used": 90,
-            "ram_pct": 95,
-        }
-        # Max RPM for fan % estimation (auto-calibrated, persisted in config)
-        self._GPU_FAN_MAX_RPM = self.config.get("gpu_fan_max_rpm", 2200)
-        self._CPU_FAN_MAX_RPM = self.config.get("cpu_fan_max_rpm", 1800)
-        self._config_save_pending = False
         self.peaks = _empty_peak_data()
+        self.advisor = ThermalAdvisor()
+        self.thermal_findings = []
+        self.fan_worker = FanWorkerClient(APP_DIR)
+        self._case_fan_status = {"state": "off"}
+        self._seen_case_fans = set()
 
         # --- tkinter setup ---
         self.root = tk.Tk()
@@ -2389,12 +2430,13 @@ class OverlayApp:
         self.rows["cpu_temp"].pack(side="right", padx=(0, 4))
 
         self._make_row("cpu_fan", "C.FAN", label_fg=CPU_CLR)
+        self._make_row("cpu_optional_fan", "C.OPT", label_fg=CPU_CLR)
         tk.Frame(self.content, bg="#2a2a4e", height=1).pack(fill="x", pady=2)
 
         # GPU group — temp + clock + load as three separate colored values
         gpu_row = tk.Frame(self.content, bg="#1a1a2e")
         gpu_row.pack(fill="x", pady=1)
-        tk.Label(gpu_row, text=" GPU", font=("Segoe UI", 10, "bold"),
+        tk.Label(gpu_row, text=" G.CORE", font=("Segoe UI", 10, "bold"),
                  fg=GPU_CLR, bg="#1a1a2e", width=6, anchor="w").pack(side="left")
         self.rows["gpu_load"] = tk.Label(gpu_row, text="", font=("Segoe UI", 10),
                                          fg="#888888", bg="#1a1a2e", anchor="e")
@@ -2406,8 +2448,15 @@ class OverlayApp:
                                          fg="#888888", bg="#1a1a2e", anchor="e")
         self.rows["gpu_temp"].pack(side="right", padx=(0, 4))
 
+        self._make_row("gpu_hotspot_temp", "HOTSPOT", label_fg=GPU_CLR)
+        self._make_row("gpu_delta", "HOT−CORE", label_fg=GPU_CLR)
+        self._make_row("gpu_memory_temp", "V.TEMP", label_fg=GPU_CLR)
         self._make_row("vram", "VRAM", label_fg=GPU_CLR)
         self._make_row("gpu_fan", "G.FAN", label_fg=GPU_CLR)
+        for number in (1, 2, 3, 4, 5, 6):
+            self._make_row(f"case_fan_{number}", f"SYS {number}" + ("/P" if number >= 5 else ""))
+            self.rows[f"case_fan_{number}"].master.pack_forget()
+        self._make_row("case_fan_control", "AIRFLOW")
         tk.Frame(self.content, bg="#2a2a4e", height=1).pack(fill="x", pady=2)
 
         # RAM — used/total + load% (like CPU row)
@@ -2432,6 +2481,7 @@ class OverlayApp:
         self._make_row("detail_gpu_temps", "G.TEMP", parent=self.details_frame, label_fg=GPU_CLR)
         self._make_row("detail_board_temps", "BOARD", parent=self.details_frame, label_fg="#a7f3d0")
         self._make_row("detail_disk_life", "D.LIFE", parent=self.details_frame, label_fg=self.DISK_CLR)
+        self._make_row("detail_disk_sensors", "D.SENSE", parent=self.details_frame, label_fg=self.DISK_CLR)
         self._make_row("detail_peak_temps", "PEAK.T", parent=self.details_frame, label_fg="#facc15")
         self._make_row("detail_peak_usage", "PEAK.%", parent=self.details_frame, label_fg="#facc15")
 
@@ -2454,6 +2504,11 @@ class OverlayApp:
         self._status_label_visible = False
         self._refresh_runtime_status()
         self._clamp_saved_position_to_visible_screen(persist=True)
+        self.health_label = tk.Label(
+            self.content, text="Sensors warming up", font=("Segoe UI", 9, "bold"),
+            bg="#1a1a2e", fg="#facc15", anchor="w", justify="left", wraplength=310,
+        )
+        self.health_label.pack(fill="x", pady=(3, 2))
 
         # --- Right-click menu ---
         self.topmost = False
@@ -2490,6 +2545,9 @@ class OverlayApp:
         self.menu.add_command(label="Open log file", command=self.open_log_file)
         self.menu.add_command(label="Copy log path", command=self.copy_log_path)
         self._add_menu_item("diagnostics", "Copy diagnostics", self.copy_diagnostics)
+        self._add_menu_item("case_fans", "Automatic case fans: " +
+                            ("ON" if self.config.get("case_fans_enabled", False) else "OFF"),
+                            self.toggle_case_fans)
         self.menu.add_command(label="Reset peaks", command=self.reset_peaks)
         self.menu.add_separator()
         self.menu.add_command(label="Close", command=self.quit)
@@ -2515,6 +2573,8 @@ class OverlayApp:
         self.sensor_thread.start()
 
         # --- Start UI update loop ---
+        if self.config.get("case_fans_enabled", False):
+            self.fan_worker.start()
         self.update_ui()
 
     def _add_menu_item(self, key, label, command):
@@ -2641,6 +2701,8 @@ class OverlayApp:
                 data = read_sensors(computer)
                 if not self._stop_event.is_set():
                     result = (True, build_sensor_diagnostics(computer, data))
+                    result = (True, result[1] + "\nCase fan controller:\n" +
+                              json.dumps(getattr(self, "_case_fan_status", {"state": "off"}), ensure_ascii=False))
             except Exception as e:
                 log.warning("Failed to collect diagnostics: %s", e, exc_info=True)
                 result = (False, str(e))
@@ -2818,11 +2880,12 @@ class OverlayApp:
         row.pack(fill="x", pady=1)
         tk.Label(
             row, text=f" {label_text}", font=("Segoe UI", 10, "bold"),
-            fg=label_fg, bg="#1a1a2e", width=6, anchor="w"
+            fg=label_fg, bg="#1a1a2e", width=max(6, len(label_text) + 1), anchor="w"
         ).pack(side="left")
         val_lbl = tk.Label(
             row, text="--", font=("Segoe UI", 10),
-            fg="#888888", bg="#1a1a2e", anchor="e"
+            fg="#888888", bg="#1a1a2e", anchor="e",
+            wraplength=260 if key.startswith("detail_") else 0, justify="right",
         )
         val_lbl.pack(side="right")
         self.rows[key] = val_lbl
@@ -3193,18 +3256,49 @@ class OverlayApp:
             "Details: ON" if self.details_enabled else "Details: OFF"
         )
 
+    def toggle_case_fans(self):
+        enabled = not self.config.get("case_fans_enabled", False)
+        if enabled:
+            process = self.fan_worker.process
+            if process is not None and process.poll() is None and process.stdin.closed:
+                self.health_label.config(text="Case fans: waiting for firmware restore", fg="#facc15")
+                return
+            self.fan_worker.start()
+        else:
+            self.fan_worker.stop()
+        self.config["case_fans_enabled"] = enabled
+        self._save_config()
+        self._set_menu_label("case_fans", "Automatic case fans: " + ("ON" if enabled else "OFF"))
+
+    def _update_thermal_advice(self, data):
+        if not hasattr(self, "advisor"):
+            self.advisor = ThermalAdvisor()
+        self.thermal_findings = self.advisor.evaluate(
+            data, time.monotonic(), _METRIC_THRESHOLDS, _disk_temperature_thresholds
+        )
+        status = getattr(self, "_case_fan_status", {"state": "off"})
+        messages = [item.text for item in self.thermal_findings]
+        severity = max((item.severity for item in self.thermal_findings), default=0)
+        missing = [label for key, label in (("cpu_temp", "CPU"), ("gpu_core_temp", "GPU Core"))
+                   if data.get(key) is None]
+        if missing:
+            messages.append("Unavailable: " + ", ".join(missing))
+            severity = max(severity, 1)
+        if status.get("state") == "error":
+            messages.insert(0, "Case fans: " + str(status.get("reason", "controller error")))
+            severity = 2
+        if hasattr(self, "health_label"):
+            suffix = "\nSound: OFF" if not self.alerts_enabled and severity else ""
+            self.health_label.config(
+                text=("\n".join(messages[:3]) if messages else "No thermal warnings") + suffix,
+                fg=("#4ade80", "#facc15", "#f87171")[severity],
+            )
+
     def reset_peaks(self):
         self.peaks = _empty_peak_data()
         for key in ("detail_peak_temps", "detail_peak_usage"):
             if key in self.rows:
                 self.rows[key].config(text="--", fg="#888888")
-
-    def _flush_config(self):
-        """Flush pending config changes to disk (debounced)."""
-        self._config_save_pending = False
-        if not self.running:
-            return
-        self._save_config()
 
     def _check_alerts(self, data):
         """Play a warning beep if any value exceeds critical thresholds."""
@@ -3215,25 +3309,28 @@ class OverlayApp:
             return
 
         alerts = []
-        cpu_temp = data.get("cpu_temp")
-        if cpu_temp is not None and cpu_temp >= self._CRITICAL["cpu_temp"]:
-            alerts.append(f"CPU {cpu_temp}°C")
-
-        gpu_temp = data.get("gpu_temp")
-        if gpu_temp is not None and gpu_temp >= self._CRITICAL["gpu_temp"]:
-            alerts.append(f"GPU {gpu_temp}°C")
-
-        ram_pct = data.get("ram_pct")
-        if ram_pct is not None and ram_pct >= self._CRITICAL["ram_pct"]:
-            alerts.append(f"RAM {ram_pct}%")
+        for key, label in (
+            ("cpu_temp", "CPU"), ("gpu_temp", "GPU Core"),
+            ("gpu_hotspot_temp", "GPU Hotspot"), ("gpu_memory_temp", "GPU Memory"),
+            ("ram_pct", "RAM"),
+        ):
+            value = data.get(key)
+            if value is not None and value >= _METRIC_THRESHOLDS[key][1]:
+                unit = "%" if key == "ram_pct" else "°C"
+                alerts.append(f"{label} {value}{unit}")
 
         for disk in data.get("disks", []):
             dtemp = disk.get("temp")
-            if dtemp is not None and dtemp >= self._CRITICAL["disk_temp"]:
+            if dtemp is not None and dtemp >= _disk_temperature_thresholds(disk["name"])[1]:
                 alerts.append(f"{disk['name']} {dtemp}°C")
             used = disk.get("used_pct")
-            if used is not None and used >= self._CRITICAL["disk_used"]:
+            if used is not None and used >= _METRIC_THRESHOLDS["disk_used"][1]:
                 alerts.append(f"{disk['name']} {used}%")
+
+        if any(item.severity == 2 for item in getattr(self, "thermal_findings", [])):
+            alerts.append("Thermal health warning")
+        if getattr(self, "_case_fan_status", {}).get("state") == "error":
+            alerts.append("Case fan controller error")
 
         if alerts:
             self._last_alert_time = now
@@ -3363,6 +3460,20 @@ class OverlayApp:
         if not self.running:
             return
 
+        if hasattr(self, "fan_worker"):
+            self._case_fan_status = self.fan_worker.poll()
+            if self.config.get("case_fans_enabled", False) and self._case_fan_status.get("state") == "stopped":
+                self._case_fan_status = dict(self._case_fan_status, state="error",
+                                             reason="Controller stopped; toggle automatic case fans OFF then ON")
+            status = self._case_fan_status
+            state = status.get("state", "off")
+            command = status.get("command_pct")
+            self.rows["case_fan_control"].config(
+                text=f"AUTO {command}%" if state == "active" else
+                     {"off": "Firmware", "stopped": "Firmware", "checking": "Checking..."}.get(state, "ERROR"),
+                fg="#f87171" if state == "error" else "#facc15" if state == "checking" else "#4ade80",
+            )
+
         with self.lock:
             data = self.sensor_data
             sample_time = getattr(self, "_sensor_sample_time", None)
@@ -3384,6 +3495,7 @@ class OverlayApp:
             return
 
         self._set_sensor_status(data.get(SENSOR_STATUS_KEY))
+        self._update_thermal_advice(data)
 
         # CPU: temp + clock + load%
         cpu_temp = data.get("cpu_temp")
@@ -3409,8 +3521,20 @@ class OverlayApp:
         gpu_clock = data.get("gpu_clock")
         self.rows["gpu_temp"].config(
             text=f"{gpu_temp}°C" if gpu_temp is not None else "--",
-            fg=temp_color(gpu_temp)
+            fg=temp_color(gpu_temp, "gpu_temp")
         )
+        for key in ("gpu_hotspot_temp", "gpu_memory_temp"):
+            value = data.get(key)
+            self.rows[key].config(
+                text=f"{value}°C" if value is not None else "--",
+                fg=temp_color(value, key),
+            )
+        if "gpu_delta" in self.rows:
+            delta = gpu_delta(data)
+            self.rows["gpu_delta"].config(
+                text=f"{delta:+}°C" if delta is not None else "--",
+                fg=("#4ade80", "#facc15", "#f87171")[delta_severity(data)] if delta is not None else "#888888",
+            )
         if gpu_clock is not None:
             if gpu_clock >= 1000:
                 ghz = gpu_clock / 1000
@@ -3427,60 +3551,34 @@ class OverlayApp:
         # VRAM: usage %
         vram_pct = data.get("gpu_vram_pct")
         if vram_pct is not None:
-            self.rows["vram"].config(text=f"{vram_pct}%", fg=load_color(vram_pct))
+            self.rows["vram"].config(text=f"{vram_pct}%", fg=_metric_color(vram_pct, (90, 98)))
         else:
             self.rows["vram"].config(text="--", fg="#888888")
 
-        # Auto-calibrate fan RPM max from observed values
-        _MAX_SANE_RPM = 10000  # reject glitchy outliers above this
-        gpu_fan = data.get("gpu_fan")
-        cpu_fan = data.get("cpu_fan")
-        rpm_changed = False
-        if gpu_fan is not None and gpu_fan > self._GPU_FAN_MAX_RPM and gpu_fan <= _MAX_SANE_RPM:
-            self._GPU_FAN_MAX_RPM = gpu_fan
-            rpm_changed = True
-        if cpu_fan is not None and cpu_fan > self._CPU_FAN_MAX_RPM and cpu_fan <= _MAX_SANE_RPM:
-            self._CPU_FAN_MAX_RPM = cpu_fan
-            rpm_changed = True
-        if rpm_changed:
-            self.config["gpu_fan_max_rpm"] = self._GPU_FAN_MAX_RPM
-            self.config["cpu_fan_max_rpm"] = self._CPU_FAN_MAX_RPM
-            # Debounce: schedule a single save instead of writing every 2 seconds
-            if not self._config_save_pending:
-                self._config_save_pending = True
-                self.root.after(30000, self._flush_config)
-
-        # GPU FAN: prefer %, fallback RPM
-        gpu_fan_pct = data.get("gpu_fan_pct")
-        if gpu_fan_pct is not None:
-            if gpu_fan_pct == 0:
-                self.rows["gpu_fan"].config(text="OFF", fg="#4ade80")
-            else:
-                self.rows["gpu_fan"].config(text=f"{gpu_fan_pct}%", fg=load_color(gpu_fan_pct))
-        elif gpu_fan is not None:
-            if gpu_fan == 0:
-                self.rows["gpu_fan"].config(text="OFF", fg="#4ade80")
-            else:
-                est_pct = min(100, round(gpu_fan / self._GPU_FAN_MAX_RPM * 100))
-                self.rows["gpu_fan"].config(text=f"~{est_pct}%", fg=load_color(est_pct))
-        else:
-            self.rows["gpu_fan"].config(text="--", fg="#888888")
-
-        # CPU FAN: show % (same style as GPU fan)
-        cpu_fan_pct = data.get("cpu_fan_pct")
-        if cpu_fan_pct is not None:
-            if cpu_fan_pct == 0:
-                self.rows["cpu_fan"].config(text="OFF", fg="#4ade80")
-            else:
-                self.rows["cpu_fan"].config(text=f"{cpu_fan_pct}%", fg=load_color(cpu_fan_pct))
-        elif cpu_fan is not None:
-            if cpu_fan == 0:
-                self.rows["cpu_fan"].config(text="OFF", fg="#4ade80")
-            else:
-                est_pct = min(100, round(cpu_fan / self._CPU_FAN_MAX_RPM * 100))
-                self.rows["cpu_fan"].config(text=f"~{est_pct}%", fg=load_color(est_pct))
-        else:
-            self.rows["cpu_fan"].config(text="--", fg="#888888")
+        for key in ("gpu_fan", "cpu_fan"):
+            rpm = data.get(key)
+            self.rows[key].config(
+                text=_format_fan_reading(rpm, data.get(key + "_pct")),
+                fg="#4ade80" if rpm is not None else "#888888",
+            )
+        if "cpu_optional_fan" in self.rows:
+            rpm = data.get("cpu_optional_fan")
+            self.rows["cpu_optional_fan"].config(
+                text=_format_rpm(rpm), fg="#4ade80" if rpm is not None else "#888888"
+            )
+        case_sensors = {fan["name"]: fan for fan in data.get("fans", [])}
+        for number in range(1, 7):
+            key = f"case_fan_{number}"
+            if key not in self.rows:
+                continue
+            fan = case_sensors.get(f"System Fan #{number}") or case_sensors.get(f"System Fan #{number} / Pump")
+            rpm = fan.get("rpm") if fan else None
+            if rpm and hasattr(self, "_seen_case_fans") and number not in self._seen_case_fans:
+                self._seen_case_fans.add(number)
+                self.rows[key].master.pack(fill="x", pady=1, before=self.rows["case_fan_control"].master)
+            self.rows[key].config(
+                text=_format_rpm(rpm), fg="#4ade80" if rpm else "#888888"
+            )
 
         # RAM: used/total GB + %
         ram_pct = data.get("ram_pct")
@@ -3489,12 +3587,14 @@ class OverlayApp:
         if ram_used is not None and ram_total is not None:
             self.rows["ram_gb"].config(
                 text=f"{ram_used}/{ram_total}G",
-                fg=load_color(ram_pct)
+                fg=_metric_color(ram_pct, _METRIC_THRESHOLDS["ram_pct"])
             )
         else:
             self.rows["ram_gb"].config(text="--", fg="#888888")
         if ram_pct is not None:
-            self.rows["ram_pct"].config(text=f"{ram_pct}%", fg=load_color(ram_pct))
+            self.rows["ram_pct"].config(
+                text=f"{ram_pct}%", fg=_metric_color(ram_pct, _METRIC_THRESHOLDS["ram_pct"])
+            )
         else:
             self.rows["ram_pct"].config(text="", fg="#888888")
 
@@ -3526,7 +3626,7 @@ class OverlayApp:
             disk = disks[i]
             dtemp = disk.get("temp")
             if dtemp is not None:
-                self.rows[key].config(text=f"{dtemp}°C", fg=disk_temp_color(dtemp))
+                self.rows[key].config(text=f"{dtemp}°C", fg=disk_temp_color(dtemp, disk["name"]))
             else:
                 self.rows[key].config(text="--", fg="#888888")
             used = disk.get("used_pct")
@@ -3538,17 +3638,44 @@ class OverlayApp:
         _update_peak_values(self.peaks, data)
         for key, text in _detail_row_values(data, self.peaks).items():
             if key in self.rows:
+                color = "#4ade80" if text != "--" else "#888888"
+                if key == "detail_gpu_temps":
+                    colors = [temp_color(data.get(sensor), metric) for sensor, metric in (
+                        ("gpu_core_temp", "gpu_temp"),
+                        ("gpu_hotspot_temp", "gpu_hotspot_temp"),
+                        ("gpu_memory_temp", "gpu_memory_temp"),
+                    )]
+                    color = max(colors, key=("#888888", "#4ade80", "#facc15", "#f87171").index)
                 self.rows[key].config(
                     text=text,
-                    fg="#4ade80" if text != "--" else "#888888",
+                    fg=color,
                 )
 
         # Check critical thresholds and alert
         self._check_alerts(data)
 
+        if hasattr(self, "health_label"):
+            self.root.update_idletasks()
+            size = (self.root.winfo_reqwidth(), self.root.winfo_reqheight())
+            if size != getattr(self, "_thermal_layout_size", None):
+                self._thermal_layout_size = size
+                self._clamp_saved_position_to_visible_screen(persist=True)
+
         self.root.after(2000, self.update_ui)
 
     def _show_sensor_error(self, text="ERR", color="#f87171"):
+        if hasattr(self, "advisor"):
+            self.advisor.reset()
+        self.thermal_findings = []
+        if hasattr(self, "health_label"):
+            status = getattr(self, "_case_fan_status", {})
+            controller_error = status.get("state") == "error"
+            self.health_label.config(
+                text="Fresh sensor data unavailable" + ("\nCase fans: " + str(status.get("reason")) if controller_error else ""),
+                fg="#f87171" if controller_error else "#facc15",
+            )
+            if controller_error:
+                self._check_alerts({})
         for child in list(self.disk_frame.winfo_children()):
             child.destroy()
         for key in list(self.disk_labels):
@@ -3557,11 +3684,14 @@ class OverlayApp:
         self.disk_labels.clear()
         self._last_disk_names = []
 
-        for label in self.rows.values():
-            label.config(text=text, fg=color)
+        for key, label in self.rows.items():
+            if key != "case_fan_control":
+                label.config(text=text, fg=color)
 
     def quit(self):
         self._cancel_scheduled_embed()
+        if hasattr(self, "fan_worker"):
+            self.fan_worker.stop()
         self.running = False
         self._stop_event.set()
         # Cancel all pending after() callbacks to prevent TclError on destroy
@@ -3584,8 +3714,6 @@ class OverlayApp:
         self.config["peek_enabled"] = self.peek_enabled
         self.config["alerts_enabled"] = self.alerts_enabled
         self.config["details_enabled"] = self.details_enabled
-        self.config["gpu_fan_max_rpm"] = self._GPU_FAN_MAX_RPM
-        self.config["cpu_fan_max_rpm"] = self._CPU_FAN_MAX_RPM
         self._save_config(update_status=False)
         # Both workers own their monitors; share one deadline for their cleanup.
         deadline = time.monotonic() + 5

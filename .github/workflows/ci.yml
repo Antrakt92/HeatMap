@@ -26,7 +26,7 @@ jobs:
       - run: python tools/check_constraint_ages.py
       - run: python -m pip check
       - run: python -m unittest discover -s tests
-      - run: python -m compileall -q overlay.py setup.py tests
+      - run: python -m compileall -q overlay.py thermal_policy.py case_fans.py enable_case_fans.py setup.py tests
       - run: python tools/sync_runtime_manifest.py --check
       - run: python setup.py --verify
       - run: python setup.py --preflight
@@ -68,7 +68,7 @@ jobs:
       - run: python -m pip install -r requirements.txt
       - run: python -m pip check
       - run: python -m unittest discover -s tests
-      - run: python -m compileall -q overlay.py setup.py tests
+      - run: python -m compileall -q overlay.py thermal_policy.py case_fans.py enable_case_fans.py setup.py tests
       - run: python tools/sync_runtime_manifest.py --check
       - run: python setup.py --verify
       - run: python setup.py --preflight

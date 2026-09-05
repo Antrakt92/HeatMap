@@ -115,7 +115,7 @@ class StartupDiagnosticsTests(unittest.TestCase):
             app._poll_diagnostics()
 
         computer.Close.assert_called_once_with()
-        app.root.clipboard_append.assert_called_once_with("synthetic diagnostics")
+        app.root.clipboard_append.assert_called_once_with('synthetic diagnostics\nCase fan controller:\n{"state": "off"}')
         self.assertFalse(app._diagnostics_running)
 
     def test_diagnostics_cancelled_during_open_close_without_sampling(self):
