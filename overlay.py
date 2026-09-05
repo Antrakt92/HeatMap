@@ -596,6 +596,55 @@ def _show_without_reordering(hwnd):
     return shown
 
 
+def _covered_by_application(hwnd):
+    """Detect full coverage even when a game is behind another active app."""
+    widget = ctypes.wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(widget)):
+        return False
+    if widget.right <= widget.left or widget.bottom <= widget.top:
+        return False
+    covered = False
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+    def inspect(candidate, _lparam):
+        nonlocal covered
+        if candidate == hwnd or not user32.IsWindowVisible(candidate) or user32.IsIconic(candidate):
+            return True
+        rect = ctypes.wintypes.RECT()
+        if not user32.GetWindowRect(candidate, ctypes.byref(rect)):
+            return True
+        # Native/Tk rectangles can differ by a rounded pixel at fractional DPI.
+        if not (rect.left <= widget.left + 2 and rect.top <= widget.top + 2
+                and rect.right >= widget.right - 2 and rect.bottom >= widget.bottom - 2):
+            return True
+        pid = ctypes.wintypes.DWORD()
+        user32.GetWindowThreadProcessId(candidate, ctypes.byref(pid))
+        if pid.value == _MY_PID or _window_has_class(candidate, {
+            "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",
+        }):
+            return True
+        cloak = ctypes.wintypes.DWORD()
+        result = dwmapi.DwmGetWindowAttribute(ctypes.wintypes.HWND(candidate), 14,
+                                            ctypes.byref(cloak), ctypes.sizeof(cloak))
+        if result == 0 and cloak.value:
+            return True
+        covered = True
+        return False
+
+    user32.EnumWindows(inspect, 0)
+    return covered
+
+
+def _hide_covered_desktop_window(hwnd, desktop_foreground):
+    if not desktop_foreground and _covered_by_application(hwnd):
+        # Independent fallback is still an ordinary window. A z-order request
+        # alone must not redisplay it over a game after the Peek slide has ended.
+        _set_window_cloaked(hwnd, True)
+        user32.ShowWindow(hwnd, SW_HIDE)
+        return True
+    return False
+
+
 def _show_error_message(title, message):
     try:
         ctypes.windll.user32.MessageBoxW(0, message, title, 0x10)
@@ -3072,7 +3121,8 @@ class OverlayApp:
                 self._desktop_fallback_ready = bool(user32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0,
                                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE))
         # No Tk attribute/geometry changes after placement: show in that layer.
-        _show_without_reordering(hwnd)
+        if self.embedded or not _hide_covered_desktop_window(hwnd, self._desktop_foreground()):
+            _show_without_reordering(hwnd)
 
     def _schedule_embed(self, delay=50):
         """Schedule a generation-guarded embed; stale callbacks become no-ops."""
@@ -3198,9 +3248,12 @@ class OverlayApp:
                     or getattr(self, "_embed_after_id", None) is not None):
                 return
             hwnd = self._get_hwnd()
+            if _hide_covered_desktop_window(hwnd, desktop):
+                return
             if user32.IsIconic(hwnd) or not user32.IsWindowVisible(hwnd):
                 user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
             _position_above_desktop(hwnd)
+            _set_window_cloaked(hwnd, False)
         except tk.TclError:
             log.debug("Desktop visibility changed during window transition", exc_info=True)
         finally:

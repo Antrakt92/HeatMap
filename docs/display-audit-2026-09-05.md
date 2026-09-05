@@ -99,3 +99,37 @@ afterwards. It covers repeated installation, the activation response, Tk-local
 click bindings, unchanged foreground and hiding on a mocked cursor departure.
 Mouse movement and physical clicks in the user's game were not automated;
 the Tk-local event check does not replace that acceptance scenario.
+
+## Return visibility follow-up
+
+The click-activation fix did not resolve the user's report. A fresh user-triggered
+trace finally captured entry, cursor departure, slide-out, and return. The cursor
+left the widget at about epoch 1788645648.9; the slide then ended and `peek=False`,
+`animating=False`, and native topmost=False remained stable with the normal polling
+callbacks still scheduled. The menu was not mapped. The saved desktop position
+coincided with the Peek position. The user still saw the panel after this logical
+return: always remapping the independent desktop window was insufficient.
+
+The first temporary recorder had stopped at 3000 idle samples before an earlier
+attempt; it did not capture that attempt and was not used as evidence. A bounded
+rotating recorder without a time limit captured the successful reproduction.
+
+The independent fallback now remains unmapped and owner-cloaked while a visible,
+non-minimized application fully covers its rectangle. All application windows are
+considered, including a game behind a narrow active window. Shell windows, HeatMap's
+own windows and DWM-cloaked windows are excluded. Two logical pixels of tolerance
+cover native/Tk rounding at fractional DPI. Partial overlap retains existing desktop
+behavior. Real WorkerW embedding and explicit Always on top are unchanged.
+
+The normal visibility poll cannot remap this covered window. A deliberate edge
+preview still uncloaks it; Show Desktop or an uncovered location restores normal
+desktop visibility without taking focus. The new native regression failed before
+the implementation because the covered window was visible after return, then passed
+after it. Coverage tests include partial overlap, fractional edges, minimized,
+hidden, shell, own-process and cloaked windows. The timed slide regression now
+exercises the real mouse-leave handler instead of replacing it with immediate hide.
+
+336 tests, compileall, DLL integrity and the native desktop integration check passed
+locally. One full run emitted Python/Tk's interpreter-finalization RuntimeWarning
+from a later test thread; no test failed. Physical game-frame acceptance remains
+separate from these checks and the trace of the earlier failing build.

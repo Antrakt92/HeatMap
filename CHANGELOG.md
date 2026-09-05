@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Keep the independent desktop fallback hidden and DWM-cloaked when an application
+  fully covers its location. Finishing a Peek slide no longer remaps that window
+  over a game; the next edge preview and Show Desktop can reveal it again.
+
 - Prevent clicks on the overlay from activating Tk's native wrapper and taking
   foreground ownership from the game. Handle WM_MOUSEACTIVATE explicitly while
   preserving mouse delivery and normal activation of separate settings dialogs.

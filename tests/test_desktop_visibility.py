@@ -7,6 +7,40 @@ from test_overlay_helpers import _FakeRoot
 
 
 class DesktopVisibilityTests(unittest.TestCase):
+    def test_full_coverage_ignores_shell_hidden_minimized_and_own_windows(self):
+        scenarios = (
+            ("full", (0, 0, 1920, 1080), True, False, 0, False, False, True),
+            ("rounded edge", (0, 0, 1920, 1080), True, False, 0, False, False, True),
+            ("partial", (0, 0, 1650, 1080), True, False, 0, False, False, False),
+            ("hidden", (0, 0, 1920, 1080), False, False, 0, False, False, False),
+            ("minimized", (0, 0, 1920, 1080), True, True, 0, False, False, False),
+            ("other desktop", (0, 0, 1920, 1080), True, False, 2, False, False, False),
+            ("shell", (0, 0, 1920, 1080), True, False, 0, True, False, False),
+            ("own dialog", (0, 0, 1920, 1080), True, False, 0, False, True, False),
+        )
+        for name, bounds, visible, iconic, cloak, shell, own, expected in scenarios:
+            with self.subTest(name=name):
+                def rectangle(hwnd, pointer):
+                    values = (1620, 200, 1921 if name == "rounded edge" else 1920, 800) if hwnd == 100 else bounds
+                    pointer._obj.left, pointer._obj.top, pointer._obj.right, pointer._obj.bottom = values
+                    return True
+                def process(_hwnd, pointer):
+                    pointer._obj.value = overlay._MY_PID if own else overlay._MY_PID + 1
+                    return 1
+                def cloaking(_hwnd, _attribute, pointer, _size):
+                    pointer._obj.value = cloak
+                    return 0
+                with (
+                    mock.patch.object(overlay.user32, "EnumWindows", side_effect=lambda callback, _: callback(200, 0)),
+                    mock.patch.object(overlay.user32, "GetWindowRect", side_effect=rectangle),
+                    mock.patch.object(overlay.user32, "IsWindowVisible", return_value=visible),
+                    mock.patch.object(overlay.user32, "IsIconic", return_value=iconic),
+                    mock.patch.object(overlay.user32, "GetWindowThreadProcessId", side_effect=process),
+                    mock.patch.object(overlay, "_window_has_class", return_value=shell),
+                    mock.patch.object(overlay.dwmapi, "DwmGetWindowAttribute", side_effect=cloaking),
+                ):
+                    self.assertEqual(overlay._covered_by_application(100), expected)
+
     def test_peek_does_not_slide_away_while_its_menu_or_settings_are_open(self):
         for dialog in (True, False):
             app = self.make_app()

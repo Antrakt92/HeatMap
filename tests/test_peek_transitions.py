@@ -38,6 +38,39 @@ def native_app():
 
 
 class NativePeekTests(unittest.TestCase):
+    def test_return_stays_hidden_when_application_covers_desktop_location(self):
+        with native_app() as app:
+            hwnd = app._get_hwnd()
+            with (
+                mock.patch.object(overlay, "_covered_by_application", return_value=True),
+                mock.patch.object(overlay, "find_desktop_worker_w", return_value=None),
+                mock.patch.object(overlay, "_find_desktop_surface", return_value=None),
+            ):
+                app.peek_visible = True
+                app._saved_pos = (-30200, -30000)
+                app._restore_desktop_mode()
+                app._cancel_scheduled_embed()
+                app._embed_into_desktop()
+                self.assertFalse(overlay.user32.IsWindowVisible(hwnd))
+                app._poll_desktop_visibility()
+                self.assertFalse(overlay.user32.IsWindowVisible(hwnd))
+                # Occlusion must not prevent the next deliberate edge preview.
+                with mock.patch.object(app, "_animate_slide"):
+                    app._peek_show(app._monitor_areas[0])
+                self.assertTrue(overlay.user32.IsWindowVisible(hwnd))
+                app._restore_desktop_mode()
+                app._cancel_scheduled_embed()
+                app._embed_into_desktop()
+                self.assertFalse(overlay.user32.IsWindowVisible(hwnd))
+                # Show Desktop may leave background application HWNDs visible.
+                app._desktop_foreground = lambda: True
+                app._poll_desktop_visibility()
+                self.assertTrue(overlay.user32.IsWindowVisible(hwnd))
+                flags = ctypes.wintypes.DWORD()
+                overlay.dwmapi.DwmGetWindowAttribute(ctypes.wintypes.HWND(hwnd), 14,
+                    ctypes.byref(flags), ctypes.sizeof(flags))
+                self.assertEqual(flags.value & 1, 0)
+
     def test_click_keeps_game_activation_and_leave_still_hides(self):
         with native_app() as app:
             hwnd = app._get_hwnd()
@@ -98,10 +131,14 @@ class NativePeekTests(unittest.TestCase):
                 completed.append(True)
                 app.root.quit()
 
+            def cursor_outside(pointer):
+                pointer._obj.x, pointer._obj.y = -30500, -30500
+                return True
+
             # Mouse departure immediately after slide-in; keep the real timers,
             # animation callbacks, return delay and Win32 fallback placement.
             with (
-                mock.patch.object(app, "_peek_check_mouse", side_effect=app._peek_hide),
+                mock.patch.object(overlay.user32, "GetCursorPos", side_effect=cursor_outside),
                 mock.patch.object(app, "_embed_into_desktop", side_effect=finish),
                 mock.patch.object(overlay, "find_desktop_worker_w", return_value=None),
                 mock.patch.object(overlay, "_find_desktop_surface", return_value=None),
