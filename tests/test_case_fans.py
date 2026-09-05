@@ -192,28 +192,38 @@ class CaseFanTests(unittest.TestCase):
         client.process.kill.assert_not_called()
         client.process.terminate.assert_not_called()
 
-    def test_worker_restores_after_read_failure_and_after_owner_dies(self):
+    def test_worker_restores_after_read_or_status_failure_and_after_owner_dies(self):
         import overlay
-        for failure in (True, False):
+        for failure in ("read", "write", None):
             computer, controls = fixture()
             owner = mock.Mock()
             owner.create_time.return_value = 1
             owner.is_running.side_effect = [True, True, False] if not failure else [True, True, True]
             modules = {"clr": mock.Mock(), "LibreHardwareMonitor": mock.Mock(),
                        "LibreHardwareMonitor.Hardware": NS(Computer=lambda: computer)}
+            write_status = fans.write_status
+            def publish(path, state, **details):
+                if failure == "write" and state == "checking":
+                    raise PermissionError("status remains locked after retries")
+                return write_status(path, state, **details)
             with tempfile.TemporaryDirectory() as directory, mock.patch.dict("sys.modules", modules), \
                  mock.patch.object(overlay, "_is_admin", return_value=True), \
                  mock.patch.object(overlay, "_runtime_dll_errors", return_value=[]), \
                  mock.patch.object(fans.psutil, "process_iter", return_value=[]), \
                  mock.patch.object(fans.psutil, "Process", return_value=owner), \
                  mock.patch.object(fans.threading, "Thread"), \
-                 mock.patch.object(overlay, "read_sensors", side_effect=[{}, RuntimeError("read failed")] if failure else [{}, {}]):
+                 mock.patch.object(fans, "write_status", side_effect=publish), \
+                 mock.patch.object(overlay, "read_sensors", side_effect=[{}, RuntimeError("read failed")] if failure == "read" else [{}, {}]):
                 path = os.path.join(directory, "status.json")
                 result = fans.worker(path, 7, 1)
                 self.assertEqual(result, 1 if failure else 0)
                 for control in controls[:3]:
                     control.SetDefault.assert_called_once()
                 computer.Close.assert_called_once()
+                with fans.open_status_file(path) as stream:
+                    status = json.load(stream)
+                self.assertTrue(status["restore_confirmed"])
+                self.assertEqual(status["state"], "error" if failure else "stopped")
 
 
 if __name__ == "__main__":

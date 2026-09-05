@@ -18,6 +18,63 @@ TARGETS = ("System Fan #1", "System Fan #2", "System Fan #4")
 CONFLICTS = {"fancontrol.exe", "siv.exe", "gcc.exe", "easytune.exe"}
 
 
+def open_status_file(path):
+    """Read a snapshot without denying Windows rename/delete access."""
+    if os.name != "nt":
+        return open(path, encoding="utf-8")
+    import msvcrt
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                  ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    # FILE_SHARE_DELETE is required even for rename; ordinary Python open()
+    # omits it and can make our own reader intermittently stop the controller.
+    delays = (0.005, 0.01, 0.02)
+    for attempt in range(len(delays) + 1):
+        handle = kernel.CreateFileW(os.fspath(path), 0x80000000, 0x1 | 0x2 | 0x4, None, 3, 0x80, None)
+        if handle != ctypes.c_void_p(-1).value:
+            break
+        error = ctypes.get_last_error()
+        # ReplaceFileW can briefly remove the old name before publishing the new
+        # one. Retry opening only; never parse or expose a partially written file.
+        if error not in (2, 5, 32, 33) or attempt == len(delays):
+            raise ctypes.WinError(error)
+        time.sleep(delays[attempt])
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except Exception:
+        kernel.CloseHandle(handle)
+        raise
+    try:
+        return os.fdopen(fd, "r", encoding="utf-8")
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def replace_status_file(temporary, path):
+    """Replace a Windows snapshot while shared readers retain the old contents."""
+    if os.name != "nt":
+        os.replace(temporary, path)
+        return
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.ReplaceFileW.argtypes = (wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                   wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p)
+    kernel.ReplaceFileW.restype = wintypes.BOOL
+    # MoveFileExW (os.replace) can deny replacement even with shared-delete
+    # readers. ReplaceFileW preserves their snapshot and the destination ACL.
+    if kernel.ReplaceFileW(os.fspath(path), os.fspath(temporary), None, 0, None, None):
+        return
+    error = ctypes.get_last_error()
+    if error == 2:  # Initial publication has no existing destination to replace.
+        os.replace(temporary, path)
+        return
+    raise ctypes.WinError(error)
+
+
 class FanWorkerClient:
     """UI-side heartbeat and status; all hardware ownership stays in the child."""
     def __init__(self, app_dir, full_rpm=None):
@@ -27,6 +84,7 @@ class FanWorkerClient:
         self.error = None
         self.full_rpm = full_rpm_reference(full_rpm)
         self.worker_pid = None
+        self.last_status = None
 
     def start(self):
         if self.process is not None and self.process.poll() is None:
@@ -34,6 +92,7 @@ class FanWorkerClient:
         directory = os.path.join(os.environ.get("LOCALAPPDATA", self.app_dir), "HeatMap", "fan-status")
         self.error = None
         self.worker_pid = None
+        self.last_status = None
         self.started = time.time()
         try:
             os.makedirs(directory, exist_ok=True)
@@ -62,8 +121,16 @@ class FanWorkerClient:
             except (OSError, ValueError):
                 pass
         try:
-            with open(self.status_path, encoding="utf-8") as stream:
-                status = json.loads(stream.read(65536))
+            try:
+                with open_status_file(self.status_path) as stream:
+                    snapshot = stream.read(65536)
+                status = json.loads(snapshot)
+            except (OSError, ValueError):
+                if self.last_status is None:
+                    raise
+                # A busy file must not manufacture an error while the last
+                # verified report is still fresh. All PID/expiry checks still run.
+                status = self.last_status
             stamp = finite(status.get("time"), 0, 1e12)
             if status.get("state") not in ("checking", "active", "error", "stopped"):
                 return {"state": "error", "reason": "Invalid case fan controller status"}
@@ -92,6 +159,7 @@ class FanWorkerClient:
                 return {"state": "error", "reason": "Case fan controller status is stale"}
             if exited and not terminal:
                 return {"state": "error", "reason": "Case fan controller exited unexpectedly; restart Windows if RPM stay abnormal"}
+            self.last_status = status
             return status
         except (OSError, ValueError, TypeError, AttributeError):
             if self.process.poll() is not None or time.time() - self.started > 30:
@@ -232,9 +300,22 @@ class CaseFanSession:
 def write_status(path, state, **details):
     payload = {"state": state, "time": time.time(), "pid": os.getpid(), "profile": PROFILE, **details}
     temporary = path + ".tmp"
-    with open(temporary, "w", encoding="utf-8") as stream:
-        json.dump(payload, stream, ensure_ascii=False)
-    os.replace(temporary, path)
+    # External readers/scanners may still omit FILE_SHARE_DELETE. Retry briefly
+    # without truncating the published snapshot or delaying thermal control for
+    # an unbounded time. Persistent I/O failures still trigger normal restoration.
+    delays = (0.01, 0.02, 0.04, 0.08, 0.16, 0.32)
+    for attempt in range(len(delays) + 1):
+        try:
+            with open(temporary, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream, ensure_ascii=False)
+            replace_status_file(temporary, path)
+            return
+        except OSError as exc:
+            # ReplaceFileW's ERROR_UNABLE_TO_REMOVE_REPLACED (1175) also
+            # preserves both original names, so retrying it is safe.
+            if getattr(exc, "winerror", None) not in (5, 32, 33, 1175) or attempt == len(delays):
+                raise
+            time.sleep(delays[attempt])
 
 
 def worker(status_path, owner_pid, owner_created, full_rpm=None):

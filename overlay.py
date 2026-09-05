@@ -31,7 +31,7 @@ import psutil
 from thermal_policy import ThermalAdvisor, gpu_delta, delta_severity
 from case_fans import FanWorkerClient, full_rpm_reference
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 
 # --- Paths ---

@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.2 — 2026-09-05
+
+- Fix intermittent Windows Access denied errors that stopped automatic case fan
+  control when its status file was being read. Shared snapshot reads and native
+  replacement avoid the original reader/writer conflict.
+- Retry temporary Windows file contention with bounded delays. Keep the last
+  verified report through brief read failures, with the existing PID and freshness
+  checks; persistent write failures still restore original fan control.
+- Add native Windows regressions for open readers, transient and permanent locks,
+  concurrent status traffic, expired cached reports and restoration after a
+  status publication failure. No fan curve, driver or dependency changes.
+
 ## 1.0.1 — 2026-09-05
 
 - Accept the real worker process behind Windows virtualenv redirectors; a valid
