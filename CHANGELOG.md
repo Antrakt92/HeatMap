@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Restore component identity colors on group headings and sensor labels: blue
+  CPU, purple GPU, cyan RAM, orange disks and mint case cooling. Reading colors
+  continue to express their independent health/activity policy.
+
 - Group the dashboard into CPU, GPU, case cooling and memory/storage; expose
   grouped settings through a header button. Keep Peek open while using menus.
 - Show CPU fan duty when available, otherwise an explicitly configured approximate

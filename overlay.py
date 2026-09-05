@@ -2530,13 +2530,13 @@ class OverlayApp:
 
         self.rows = {}
         self.groups = {}
-        self.DISK_CLR = "#a8b8ca"
-        cpu = self._make_group("CPU")
+        self.DISK_CLR = "#fdba74"
+        cpu = self._make_group("CPU", "#6ea8fe")
         self._make_summary_row(cpu, "Package", "cpu")
         self._make_row("cpu_fan", "Fan 1", parent=cpu)
         self._make_row("cpu_optional_fan", "Fan 2", parent=cpu)
 
-        gpu = self._make_group("GPU")
+        gpu = self._make_group("GPU", "#c084fc")
         self._make_summary_row(gpu, "Core", "gpu")
         self._make_row("gpu_hotspot_temp", "Hotspot", parent=gpu)
         hotspot = self.rows["gpu_hotspot_temp"]
@@ -2547,13 +2547,13 @@ class OverlayApp:
         self._make_row("vram", "VRAM", parent=gpu)
         self._make_row("gpu_fan", "Fans", parent=gpu)
 
-        cooling = self._make_group("CASE COOLING")
+        cooling = self._make_group("CASE COOLING", "#a7f3d0")
         for number in range(1, 7):
             self._make_row(f"case_fan_{number}", f"SYS {number}" + (" / Pump" if number >= 5 else ""), parent=cooling)
             self.rows[f"case_fan_{number}"].master.pack_forget()
         self._make_row("case_fan_control", "Mode", parent=cooling)
 
-        memory = self._make_group("MEMORY & STORAGE")
+        memory = self._make_group("MEMORY & STORAGE", "#67e8f9")
         self._make_row("ram_gb", "RAM", parent=memory)
         ram = self.rows["ram_gb"]
         self.rows["ram_pct"] = tk.Label(ram.master, text="", font=("Segoe UI", 9),
@@ -2564,7 +2564,8 @@ class OverlayApp:
         for key, label in (("detail_board_temps", "Board"), ("detail_disk_life", "SSD life"),
                            ("detail_disk_sensors", "Disk sensors"), ("detail_peak_temps", "Peak temp"),
                            ("detail_peak_usage", "Peak usage")):
-            self._make_row(key, label, parent=self.details_frame)
+            self._make_row(key, label, parent=self.details_frame,
+                           label_fg=self.DISK_CLR if key.startswith("detail_disk_") else "#cbd5e1")
         self.disk_frame = tk.Frame(memory, bg="#1a1a2e")
         self.disk_frame.pack(fill="x")
         self.disk_labels = []
@@ -2681,8 +2682,8 @@ class OverlayApp:
             self._save_config()
             self._set_menu_label("cpu_reference", self._cpu_reference_label())
 
-    def _make_group(self, title):
-        group = tk.LabelFrame(self.content, text=title, bg="#1a1a2e", fg="#9baec4",
+    def _make_group(self, title, color):
+        group = tk.LabelFrame(self.content, text=title, bg="#1a1a2e", fg=color,
                               font=("Segoe UI", 8, "bold"), relief="flat", bd=1, padx=4, pady=2)
         group.pack(fill="x", pady=(0, 5))
         self.groups[title] = group
@@ -2691,7 +2692,7 @@ class OverlayApp:
     def _make_summary_row(self, parent, label, prefix):
         row = tk.Frame(parent, bg="#1a1a2e")
         row.pack(fill="x", pady=1)
-        tk.Label(row, text=label, font=("Segoe UI", 9), fg="#cbd5e1", bg="#1a1a2e", anchor="w").pack(side="left")
+        tk.Label(row, text=label, font=("Segoe UI", 9), fg=parent.cget("fg"), bg="#1a1a2e", anchor="w").pack(side="left")
         for metric in ("load", "clock", "temp"):
             widget = tk.Label(row, text="--", font=("Segoe UI", 9), fg="#888888", bg="#1a1a2e", anchor="e")
             widget.pack(side="right", padx=(6, 0))
@@ -3074,8 +3075,10 @@ class OverlayApp:
         user32.GetClassNameW(parent, class_name, 256)
         return class_name.value == "WorkerW"
 
-    def _make_row(self, key, label_text, parent=None, label_fg="#cbd5e1"):
+    def _make_row(self, key, label_text, parent=None, label_fg=None):
         parent = parent or self.content
+        if label_fg is None:
+            label_fg = parent.cget("fg") if isinstance(parent, tk.LabelFrame) else "#cbd5e1"
         row = tk.Frame(parent, bg="#1a1a2e")
         row.pack(fill="x", pady=1)
         tk.Label(
