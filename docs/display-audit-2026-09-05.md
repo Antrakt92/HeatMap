@@ -73,3 +73,29 @@ worker reported confirmed restoration with no restore errors. The new worker
 passed its full-speed check and returned to temperature-based AUTO at 80%, with
 SYS 1/2/4 reporting approximately 1082/1000/974 RPM. These are a point-in-time
 startup observation, not a controlled cooling comparison or reboot test.
+
+## Click activation follow-up
+
+The user reported that Peek remained open after clicking it and moving the cursor
+back over the game, until another click activated the game. A real disposable Tk
+window confirmed `WM_MOUSEACTIVATE` returned `MA_ACTIVATE` (1) despite the window's
+`WS_EX_NOACTIVATE` style. This was a gap in the previous focus tests, which covered
+programmatic window movement but not the mouse-activation message.
+
+The overlay wrapper now has a UI-thread `SetWindowSubclass` handler returning
+`MA_NOACTIVATE` (3); other messages go to `DefSubclassProc`, and the handler is
+removed on `WM_NCDESTROY`. A process-lifetime callback reference prevents native
+calls into a garbage-collected Python callback. Reinstallation is idempotent.
+Separate settings dialogs are not subclassed.
+
+[Microsoft documents](https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-mouseactivate)
+that this return value preserves the click while preventing activation.
+[Subclass lifetime/thread requirements](https://learn.microsoft.com/en-us/windows/win32/api/commctrl/nf-commctrl-setwindowsubclass)
+and [Tk 9.0.4 wrapper source](https://github.com/tcltk/tk/blob/core-9-0-4/win/tkWinWm.c)
+were inspected; Tcl reports 9.0.4 in the local virtualenv.
+
+The new native regression failed before the fix (1 instead of 3) and passed
+afterwards. It covers repeated installation, the activation response, Tk-local
+click bindings, unchanged foreground and hiding on a mocked cursor departure.
+Mouse movement and physical clicks in the user's game were not automated;
+the Tk-local event check does not replace that acceptance scenario.

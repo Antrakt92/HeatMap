@@ -224,6 +224,32 @@ user32.GetMonitorInfoW.argtypes = [ctypes.wintypes.HMONITOR, ctypes.POINTER(MONI
 user32.GetMonitorInfoW.restype = ctypes.c_bool
 _MY_PID = os.getpid()
 
+# Keep the callback alive for the process lifetime; only the UI thread installs
+# it on our own overlay HWND. Windows removes it when that HWND is destroyed.
+_SUBCLASS_PROC = ctypes.WINFUNCTYPE(
+    ctypes.c_ssize_t, ctypes.wintypes.HWND, ctypes.wintypes.UINT,
+    ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM, ctypes.c_size_t, ctypes.c_size_t,
+)
+comctl32 = ctypes.WinDLL("comctl32")
+comctl32.SetWindowSubclass.argtypes = [ctypes.wintypes.HWND, _SUBCLASS_PROC, ctypes.c_size_t, ctypes.c_size_t]
+comctl32.SetWindowSubclass.restype = ctypes.wintypes.BOOL
+comctl32.RemoveWindowSubclass.argtypes = [ctypes.wintypes.HWND, _SUBCLASS_PROC, ctypes.c_size_t]
+comctl32.RemoveWindowSubclass.restype = ctypes.wintypes.BOOL
+comctl32.DefSubclassProc.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.UINT,
+                                    ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM]
+comctl32.DefSubclassProc.restype = ctypes.c_ssize_t
+
+
+@_SUBCLASS_PROC
+def _overlay_mouse_activation(hwnd, message, wparam, lparam, subclass_id, _reference):
+    if message == 0x0021:  # WM_MOUSEACTIVATE
+        # Tk's wrapper returns MA_ACTIVATE despite WS_EX_NOACTIVATE. Preserve
+        # the game foreground and still deliver the click to our controls.
+        return 3  # MA_NOACTIVATE, not MA_NOACTIVATEANDEAT
+    if message == 0x0082:  # WM_NCDESTROY
+        comctl32.RemoveWindowSubclass(hwnd, _overlay_mouse_activation, subclass_id)
+    return comctl32.DefSubclassProc(hwnd, message, wparam, lparam)
+
 # Virtual screen metrics (all monitors combined)
 SM_XVIRTUALSCREEN = 76
 SM_YVIRTUALSCREEN = 77
@@ -486,6 +512,8 @@ def set_tool_window(hwnd):
     style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
     style |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
     user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+    if not comctl32.SetWindowSubclass(hwnd, _overlay_mouse_activation, 1, 0):
+        log.debug("Mouse activation guard could not be installed on hwnd=%s", hwnd)
     # Our slide is the only animation; shell transitions must not replay a
     # disappearing surface after its HWND has moved to the saved desktop point.
     enabled = ctypes.wintypes.BOOL(True)

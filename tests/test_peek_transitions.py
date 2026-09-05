@@ -38,6 +38,35 @@ def native_app():
 
 
 class NativePeekTests(unittest.TestCase):
+    def test_click_keeps_game_activation_and_leave_still_hides(self):
+        with native_app() as app:
+            hwnd = app._get_hwnd()
+            native_user = ctypes.WinDLL("user32")
+            native_user.SendMessageW.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.UINT,
+                                                ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM]
+            native_user.SendMessageW.restype = ctypes.c_ssize_t
+            foreground = overlay.user32.GetForegroundWindow()
+            # A normal client click must survive without activating Tk's wrapper.
+            for _ in range(2):
+                overlay.set_tool_window(hwnd)
+                self.assertEqual(native_user.SendMessageW(hwnd, 0x21, hwnd, (0x201 << 16) | 1), 3)
+            clicked = []
+            app.root.bind("<Button-1>", lambda _event: clicked.append(True))
+            # Tk routes native clicks through the real cursor position. Exercise
+            # its binding with local events without moving the user's cursor.
+            app.root.event_generate("<ButtonPress-1>", x=10, y=10)
+            app.root.event_generate("<ButtonRelease-1>", x=10, y=10)
+            app.root.update()
+            self.assertEqual(clicked, [True])
+            self.assertEqual(overlay.user32.GetForegroundWindow(), foreground)
+            app.peek_visible = True
+            def outside(pointer):
+                pointer._obj.x, pointer._obj.y = -30500, -30500
+                return True
+            with mock.patch.object(overlay.user32, "GetCursorPos", side_effect=outside), mock.patch.object(app, "_peek_hide") as hide:
+                app._peek_check_mouse()
+            hide.assert_called_once()
+
     def test_return_is_cloaked_in_the_compositor_until_show(self):
         with native_app() as app:
             hwnd = app._get_hwnd()

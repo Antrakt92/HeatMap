@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Prevent clicks on the overlay from activating Tk's native wrapper and taking
+  foreground ownership from the game. Handle WM_MOUSEACTIVATE explicitly while
+  preserving mouse delivery and normal activation of separate settings dialogs.
+
 - Restore component identity colors on group headings and sensor labels: blue
   CPU, purple GPU, cyan RAM, orange disks and mint case cooling. Reading colors
   continue to express their independent health/activity policy.
