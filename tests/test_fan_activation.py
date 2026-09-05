@@ -7,7 +7,7 @@ import enable_case_fans as activation
 class ActivationTests(unittest.TestCase):
     def test_enable_requires_actual_samples_then_verified_restore(self):
         client = mock.Mock()
-        client.poll.side_effect = [dict(state="active", fans=[dict(rpm=1200)]), dict(state="stopped", restore_errors=[])]
+        client.poll.side_effect = [dict(state="active", fans=[dict(rpm=1200)]), dict(state="stopped", restore_errors=[], restore_confirmed=True)]
         samples = []
         activation.verify_worker(client, samples, duration=0)
         self.assertEqual(len(samples), 1)
@@ -16,7 +16,7 @@ class ActivationTests(unittest.TestCase):
 
     def test_failure_still_stops_and_checks_restoration(self):
         client = mock.Mock()
-        client.poll.side_effect = [dict(state="error", reason="tachometer"), dict(state="stopped", restore_errors=[])]
+        client.poll.side_effect = [dict(state="error", reason="tachometer"), dict(state="error", restore_errors=[], restore_confirmed=True)]
         with self.assertRaisesRegex(RuntimeError, "tachometer"):
             activation.verify_worker(client, [])
         client.stop.assert_called_once()

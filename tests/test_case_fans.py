@@ -102,8 +102,74 @@ class CaseFanTests(unittest.TestCase):
         fans.verify_full_airflow(baseline, [dict(name="SYS1", rpm=1200, control_pct=100)])
 
     def test_silent_restore_failure_detected(self):
-        self.assertTrue(fans.verify_restore([dict(name="SYS1", control_pct=None)], [dict(control_pct=100)]))
-        self.assertTrue(fans.verify_restore([dict(name="SYS1", control_pct=59)], [dict(control_pct=100)]))
+        self.assertTrue(fans.verify_restore([dict(name="SYS1", control_pct=None)], [dict(name="SYS1", control_pct=100)]))
+        self.assertTrue(fans.verify_restore([dict(name="SYS1", control_pct=59)], [dict(name="SYS1", control_pct=100)]))
+
+    def test_restart_accepts_previously_verified_full_rpm_without_new_acceleration(self):
+        baseline = [dict(name=name, rpm=1200, control_pct=None) for name in fans.TARGETS]
+        readings = [dict(name=name, rpm=1190, control_pct=100) for name in fans.TARGETS]
+        with self.assertRaises(RuntimeError):
+            fans.verify_full_airflow(baseline, readings)
+        fans.verify_full_airflow(baseline, readings, {name: 1200 for name in fans.TARGETS})
+        readings[0]["rpm"] = 800
+        with self.assertRaises(RuntimeError):
+            fans.verify_full_airflow(baseline, readings, {name: 1200 for name in fans.TARGETS})
+
+    def test_invalid_reference_or_incomplete_readings_never_passes_verification(self):
+        for value in (None, {}, {fans.TARGETS[0]: 1200}, {name: float("nan") for name in fans.TARGETS}):
+            self.assertIsNone(fans.full_rpm_reference(value))
+        with self.assertRaises(RuntimeError):
+            fans.verify_full_airflow([], [])
+        self.assertTrue(fans.verify_restore([], []))
+
+    def test_completed_status_does_not_expire_into_false_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = fans.FanWorkerClient(directory)
+            client.status_path = os.path.join(directory, "state.json")
+            client.process = mock.Mock(pid=7)
+            client.process.poll.return_value = 0
+            for state in ("stopped", "error"):
+                with open(client.status_path, "w") as stream:
+                    json.dump(dict(pid=7, time=10, state=state, reason="original reason"), stream)
+                with mock.patch.object(fans.time, "time", return_value=100):
+                    self.assertEqual(client.poll()["reason"], "original reason")
+
+    def test_windows_venv_redirector_accepts_descendant_worker_pid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = fans.FanWorkerClient(directory)
+            client.status_path = os.path.join(directory, "state.json")
+            client.started = 90
+            client.process = mock.Mock(pid=7, stdin=io.StringIO())
+            client.process.poll.return_value = None
+            child = mock.Mock()
+            child.parents.return_value = [NS(pid=7)]
+            with open(client.status_path, "w") as stream:
+                json.dump(dict(pid=8, time=100, state="active", command_pct=100), stream)
+            with mock.patch.object(fans.time, "time", return_value=100), \
+                 mock.patch.object(fans.psutil, "Process", return_value=child):
+                self.assertEqual(client.poll()["state"], "active")
+            self.assertEqual(client.worker_pid, 8)
+
+    def test_malformed_status_never_looks_like_active_control(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = fans.FanWorkerClient(directory)
+            client.status_path = os.path.join(directory, "state.json")
+            client.process = mock.Mock(pid=7, stdin=io.StringIO())
+            client.process.poll.return_value = None
+            for fields in (dict(state="unknown", pid=7), dict(state="active", pid=None, command_pct=80),
+                           dict(state="active", pid=7, command_pct=float("nan"))):
+                with open(client.status_path, "w") as stream:
+                    json.dump(dict(time=100, **fields), stream)
+                with mock.patch.object(fans.time, "time", return_value=100):
+                    self.assertEqual(client.poll()["state"], "error")
+
+    def test_unwritable_status_directory_is_reported_without_crashing_ui(self):
+        client = fans.FanWorkerClient(".")
+        with mock.patch.object(fans.os, "makedirs", side_effect=PermissionError("denied")), \
+             mock.patch.object(fans.subprocess, "Popen") as launch:
+            client.start()
+        launch.assert_not_called()
+        self.assertEqual(client.poll()["state"], "error")
 
     def test_client_rejects_dead_stale_wrong_pid_and_future_active_status(self):
         with tempfile.TemporaryDirectory() as directory:

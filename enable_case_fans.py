@@ -12,7 +12,7 @@ import time
 import psutil
 
 import overlay
-from case_fans import FanWorkerClient
+from case_fans import FanWorkerClient, full_rpm_reference
 
 
 def close_previous_overlay():
@@ -80,7 +80,7 @@ def verify_worker(client, samples, duration=20):
             except subprocess.TimeoutExpired:
                 raise RuntimeError("Native fan restore did not finish. Restart Windows before retrying.")
     restored = client.poll()
-    if restored.get("state") != "stopped" or restored.get("restore_errors"):
+    if not restored.get("restore_confirmed") or restored.get("restore_errors"):
         raise RuntimeError("Fan restore not confirmed: " + str(restored))
     if failure:
         raise failure
@@ -110,14 +110,18 @@ def main():
         if not overlay.acquire_single_instance():
             raise RuntimeError("Another HeatMap instance is still running")
         try:
-            client = FanWorkerClient(overlay.APP_DIR)
-            report["restore"] = verify_worker(client, report["samples"])
             config, error = overlay.load_config_result()
             if error:
                 raise RuntimeError(error)
+            client = FanWorkerClient(overlay.APP_DIR, config.get("case_fan_full_rpm"))
+            report["restore"] = verify_worker(client, report["samples"])
             if Path(overlay.CONFIG_PATH).exists():
                 shutil.copy2(overlay.CONFIG_PATH, directory / f"config-before-fans-{time.time_ns()}.json")
             config.update(case_fans_enabled=True, alerts_enabled=True)
+            reference = full_rpm_reference(report["samples"][-1].get("verified_full_rpm"))
+            if reference is None:
+                raise RuntimeError("Missing verified full-speed RPM; activation was not saved")
+            config["case_fan_full_rpm"] = reference
             ok, message = overlay.save_config(config)
             if not ok:
                 raise RuntimeError(message)

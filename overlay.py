@@ -29,9 +29,9 @@ import xml.etree.ElementTree as ET
 import psutil
 
 from thermal_policy import ThermalAdvisor, gpu_delta, delta_severity
-from case_fans import FanWorkerClient
+from case_fans import FanWorkerClient, full_rpm_reference
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 
 # --- Paths ---
@@ -2353,7 +2353,7 @@ class OverlayApp:
         self.peaks = _empty_peak_data()
         self.advisor = ThermalAdvisor()
         self.thermal_findings = []
-        self.fan_worker = FanWorkerClient(APP_DIR)
+        self.fan_worker = FanWorkerClient(APP_DIR, self.config.get("case_fan_full_rpm"))
         self._case_fan_status = {"state": "off"}
         self._seen_case_fans = set()
 
@@ -3468,6 +3468,11 @@ class OverlayApp:
                                              reason="Controller stopped; toggle automatic case fans OFF then ON")
             status = self._case_fan_status
             state = status.get("state", "off")
+            reference = full_rpm_reference(status.get("verified_full_rpm"))
+            if state == "active" and reference and full_rpm_reference(self.config.get("case_fan_full_rpm")) is None:
+                self.config["case_fan_full_rpm"] = reference
+                self.fan_worker.full_rpm = reference
+                self._save_config()
             command = status.get("command_pct")
             self.rows["case_fan_control"].config(
                 text=f"AUTO {command}%" if state == "active" else

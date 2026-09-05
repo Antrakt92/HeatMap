@@ -20,25 +20,29 @@ CONFLICTS = {"fancontrol.exe", "siv.exe", "gcc.exe", "easytune.exe"}
 
 class FanWorkerClient:
     """UI-side heartbeat and status; all hardware ownership stays in the child."""
-    def __init__(self, app_dir):
+    def __init__(self, app_dir, full_rpm=None):
         self.app_dir = app_dir
         self.process = None
         self.status_path = None
         self.error = None
+        self.full_rpm = full_rpm_reference(full_rpm)
+        self.worker_pid = None
 
     def start(self):
         if self.process is not None and self.process.poll() is None:
             return
         directory = os.path.join(os.environ.get("LOCALAPPDATA", self.app_dir), "HeatMap", "fan-status")
-        os.makedirs(directory, exist_ok=True)
-        self.status_path = os.path.join(directory, uuid.uuid4().hex + ".json")
         self.error = None
+        self.worker_pid = None
         self.started = time.time()
         try:
+            os.makedirs(directory, exist_ok=True)
+            self.status_path = os.path.join(directory, uuid.uuid4().hex + ".json")
             self.process = subprocess.Popen(
                 [sys.executable, os.path.join(self.app_dir, "case_fans.py"),
                  "--status", self.status_path, "--owner-pid", str(os.getpid()),
-                 "--owner-created", str(psutil.Process().create_time())],
+                 "--owner-created", str(psutil.Process().create_time()),
+                 "--full-rpm", json.dumps(self.full_rpm)],
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 text=True, bufsize=1, creationflags=subprocess.CREATE_NO_WINDOW,
                 cwd=self.app_dir,
@@ -61,9 +65,32 @@ class FanWorkerClient:
             with open(self.status_path, encoding="utf-8") as stream:
                 status = json.loads(stream.read(65536))
             stamp = finite(status.get("time"), 0, 1e12)
-            if status.get("pid") != self.process.pid or stamp is None or not -2 <= time.time() - stamp <= 10:
+            if status.get("state") not in ("checking", "active", "error", "stopped"):
+                return {"state": "error", "reason": "Invalid case fan controller status"}
+            if status.get("state") == "active" and finite(status.get("command_pct"), 60, 100) is None:
+                return {"state": "error", "reason": "Invalid case fan controller command report"}
+            exited = self.process.poll() is not None
+            terminal = status.get("state") in ("error", "stopped")
+            pid = status.get("pid")
+            valid_pid = (isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 and
+                         (pid == self.process.pid or pid == self.worker_pid))
+            if not valid_pid and isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+                try:
+                    # Windows venv python[w].exe is a redirector whose child writes
+                    # the report. The root process remains alive until that child exits.
+                    child = psutil.Process(pid)
+                    valid_pid = any(parent.pid == self.process.pid for parent in child.parents())
+                    if valid_pid:
+                        self.worker_pid = pid
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    # A fast terminal result can precede the first poll. This path
+                    # is unique to this launch and must have been written after it.
+                    valid_pid = exited and terminal and stamp is not None and stamp >= self.started - 2
+            if not valid_pid or stamp is None or time.time() - stamp < -2:
                 return {"state": "error", "reason": "Case fan controller status is stale"}
-            if self.process.poll() is not None and status.get("state") not in ("error", "stopped"):
+            if not (exited and terminal) and time.time() - stamp > 10:
+                return {"state": "error", "reason": "Case fan controller status is stale"}
+            if exited and not terminal:
                 return {"state": "error", "reason": "Case fan controller exited unexpectedly; restart Windows if RPM stay abnormal"}
             return status
         except (OSError, ValueError, TypeError, AttributeError):
@@ -130,19 +157,38 @@ def verify_shared_controller(sensors):
             raise RuntimeError(f"Shared controller requires existing fixed 100% on {name}")
 
 
-def verify_full_airflow(baseline, readings):
+def full_rpm_reference(value):
+    if not isinstance(value, dict) or set(value) != set(TARGETS):
+        return None
+    if any(finite(rpm, 200, 10000) is None for rpm in value.values()):
+        return None
+    return dict(value)
+
+
+def verify_full_airflow(baseline, readings, full_rpm=None):
+    reference = full_rpm_reference(full_rpm)
+    if len(baseline) != len(readings) or not readings:
+        raise RuntimeError("Incomplete fan response readings")
     for before, after in zip(baseline, readings):
-        if after["control_pct"] is None or after["control_pct"] < 97:
+        if before["name"] != after["name"]:
+            raise RuntimeError("Fan response channel changed")
+        if finite(after["control_pct"], 97, 100) is None:
             raise RuntimeError(f"{after['name']}: full-speed command was not confirmed")
-        if after["rpm"] is None or after["rpm"] < 200:
+        if finite(after["rpm"], 200, 10000) is None or finite(before["rpm"], 1, 10000) is None:
             raise RuntimeError(f"{after['name']}: no reliable running tachometer")
-        if (before["control_pct"] or 0) < 95 and after["rpm"] < before["rpm"] * 1.08:
+        previously_verified_full = reference and after["rpm"] >= 0.9 * reference[after["name"]]
+        if (before["control_pct"] or 0) < 95 and after["rpm"] < before["rpm"] * 1.08 and not previously_verified_full:
             raise RuntimeError(f"{after['name']}: RPM did not confirm a speed increase; wiring/mode needs checking")
 
 
 def verify_restore(baseline, readings):
+    if len(baseline) != len(readings) or not readings:
+        return ["Incomplete fan restore readings"]
     errors = []
     for before, after in zip(baseline, readings):
+        if before["name"] != after["name"]:
+            errors.append("Fan restore channel changed")
+            continue
         old, new = before["control_pct"], after["control_pct"]
         if (old is None) != (new is None) or (old is not None and abs(old - new) > 3):
             errors.append(f"{before['name']}: original control readback not restored")
@@ -191,7 +237,7 @@ def write_status(path, state, **details):
     os.replace(temporary, path)
 
 
-def worker(status_path, owner_pid, owner_created):
+def worker(status_path, owner_pid, owner_created, full_rpm=None):
     import overlay
     if not overlay._is_admin():
         raise RuntimeError("Administrator sensor access is required; no elevation is launched automatically")
@@ -242,6 +288,7 @@ def worker(status_path, owner_pid, owner_created):
         started = time.monotonic()
         stall_since = {}
         commissioned = False
+        verified_full_rpm = None
         while not stop.is_set() and owner.is_running():
             now = time.monotonic()
             if now - heartbeat[0] > 15:
@@ -267,7 +314,8 @@ def worker(status_path, owner_pid, owner_created):
             if now - started < 15:
                 demand, reason = 100, "Checking full airflow"
             elif not commissioned:
-                verify_full_airflow(baseline, readings)
+                verify_full_airflow(baseline, readings, full_rpm)
+                verified_full_rpm = {fan["name"]: fan["rpm"] for fan in readings}
                 commissioned = True
             if commissioned and any(fan["control_pct"] is None or abs(fan["control_pct"] - session.last_command) > 3
                      for fan in readings):
@@ -277,6 +325,7 @@ def worker(status_path, owner_pid, owner_created):
                 session.apply(command)
             write_status(status_path, "active" if commissioned else "checking",
                          command_pct=command, reason=reason, fans=readings, baseline=baseline,
+                         verified_full_rpm=verified_full_rpm,
                          temperatures={key: data.get(key) for key in (
                              "cpu_temp", "gpu_core_temp", "gpu_hotspot_temp", "gpu_memory_temp")})
             stop.wait(2)
@@ -306,7 +355,8 @@ def worker(status_path, owner_pid, owner_created):
             restore_errors.append(f"Close: {exc}")
         write_status(status_path, "error" if error or restore_errors else "stopped",
                      reason=error or ("Restore unconfirmed: restart Windows" if restore_errors else "Returned to firmware control"),
-                     restore_errors=restore_errors, baseline=baseline)
+                     restore_errors=restore_errors, baseline=baseline,
+                     restore_confirmed=bool(session and baseline and not restore_errors))
     return 1 if error or restore_errors else 0
 
 
@@ -315,10 +365,11 @@ def main():
     parser.add_argument("--status", required=True)
     parser.add_argument("--owner-pid", required=True, type=int)
     parser.add_argument("--owner-created", required=True, type=float)
+    parser.add_argument("--full-rpm", type=json.loads, default=None)
     args = parser.parse_args()
     try:
         with WorkerMutex():
-            return worker(args.status, args.owner_pid, args.owner_created)
+            return worker(args.status, args.owner_pid, args.owner_created, args.full_rpm)
     except Exception as exc:
         write_status(args.status, "error", reason=str(exc))
         return 1

@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.1 — 2026-09-05
+
+- Accept the real worker process behind Windows virtualenv redirectors; a valid
+  native report no longer fails because its PID differs from the launcher PID.
+- Preserve terminal restore/error reports after shutdown instead of marking them
+  stale after ten seconds. Reject malformed active-status data and report directory
+  write failures without crashing the UI.
+- Persist verified full-speed RPM for safe restart checks when fans are already
+  spinning fast. Validate complete channel correspondence for response/restore.
+- Distinguish a failed control operation from a failed restoration in activation
+  diagnostics. Require verified RPM evidence before saving automatic activation.
+- Real B550 AORUS PRO AC activation, command/RPM response, original-control
+  restoration and subsequent automatic regulation verified; see the linked report
+  in README. This does not establish gaming temperature improvement.
+
+
 ## 1.0.0 — 2026-09-05
 
 - GPU Core, Hotspot, memory temperature and Hotspot–Core are separate primary rows.
