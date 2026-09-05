@@ -2573,6 +2573,7 @@ class OverlayApp:
         self.sensor_thread.start()
 
         # --- Start UI update loop ---
+        self.root.protocol("WM_DELETE_WINDOW", self.quit)
         if self.config.get("case_fans_enabled", False):
             self.fan_worker.start()
         self.update_ui()
@@ -3689,6 +3690,8 @@ class OverlayApp:
                 label.config(text=text, fg=color)
 
     def quit(self):
+        if not self.running:
+            return
         self._cancel_scheduled_embed()
         if hasattr(self, "fan_worker"):
             self.fan_worker.stop()

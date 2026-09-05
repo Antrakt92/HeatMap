@@ -255,6 +255,16 @@ class StartupDiagnosticsTests(unittest.TestCase):
                 app.root.destroy.assert_called_once_with()
                 release.assert_called_once_with()
 
+    def test_quit_stops_case_controller_before_destroy_and_is_idempotent(self):
+        app = self.shutdown_app()
+        app.fan_worker = mock.Mock()
+        app.root.destroy.side_effect = lambda: app.fan_worker.stop.assert_called_once_with()
+        with mock.patch.object(overlay, "release_single_instance") as release:
+            app.quit()
+            app.quit()
+        app.root.destroy.assert_called_once_with()
+        release.assert_called_once_with()
+
     def test_diagnostics_thread_start_failure_returns_to_idle(self):
         app = self.diagnostics_app()
         with (
