@@ -129,8 +129,10 @@ SWP_NOSIZE = 0x0001
 SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 SWP_FRAMECHANGED = 0x0020
+SWP_SHOWWINDOW = 0x0040
 HWND_BOTTOM = 1
 HWND_TOP = 0
+SW_HIDE = 0
 SW_SHOWNOACTIVATE = 4
 GW_HWNDPREV = 3
 WS_EX_TOPMOST = 0x00000008
@@ -542,6 +544,14 @@ def _position_above_desktop(hwnd):
     return bool(user32.SetWindowPos(
         hwnd, preceding or HWND_TOP, 0, 0, 0, 0,
         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+    ))
+
+
+def _show_without_reordering(hwnd):
+    """Map an already positioned HWND without raising it or taking focus."""
+    return bool(user32.SetWindowPos(
+        hwnd, 0, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
     ))
 
 
@@ -2982,6 +2992,11 @@ class OverlayApp:
         if not self._can_embed_now():
             return
         hwnd = self._get_hwnd()
+        # Keep the HWND unmapped while Tk flushes geometry/style changes. Alpha
+        # alone leaves a composed surface alive during the topmost transition.
+        user32.ShowWindow(hwnd, SW_HIDE)
+        self.root.wm_attributes("-alpha", 0.88)
+        self.root.update_idletasks()
         set_tool_window(hwnd)
         if embed_in_desktop(hwnd):
             self.embedded = True
@@ -2991,8 +3006,8 @@ class OverlayApp:
             if not _position_above_desktop(hwnd):
                 user32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0,
                                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
-        # Restore opacity (window was hidden with alpha=0, not withdraw)
-        self.root.wm_attributes("-alpha", 0.88)
+        # No Tk attribute/geometry changes after placement: show in that layer.
+        _show_without_reordering(hwnd)
 
     def _schedule_embed(self, delay=50):
         """Schedule a generation-guarded embed; stale callbacks become no-ops."""
@@ -3110,7 +3125,8 @@ class OverlayApp:
             desktop = self._desktop_foreground()
             if desktop and (self.peek_visible or self._peek_animating):
                 self._restore_desktop_mode()
-            if self.embedded or self.peek_visible or self._peek_animating:
+            if (self.embedded or self.peek_visible or self._peek_animating
+                    or getattr(self, "_embed_after_id", None) is not None):
                 return
             hwnd = self._get_hwnd()
             if user32.IsIconic(hwnd) or not user32.IsWindowVisible(hwnd):
@@ -3171,6 +3187,7 @@ class OverlayApp:
         self._peek_animating = False
         self.peek_visible = False
         self.root.wm_attributes("-alpha", 0)
+        user32.ShowWindow(self._get_hwnd(), SW_HIDE)
         self.root.wm_attributes("-topmost", False)
         if self._saved_pos:
             x, y = self._saved_pos
@@ -3211,7 +3228,11 @@ class OverlayApp:
         self._saved_pos = (self.config.get("x", 50), self.config.get("y", 50))
 
         self._cancel_scheduled_embed()
+        self.root.wm_attributes("-alpha", 0)
+        user32.ShowWindow(self._get_hwnd(), SW_HIDE)
         if not self._detach_from_desktop():
+            self.root.wm_attributes("-alpha", 0.88)
+            _show_without_reordering(self._get_hwnd())
             self._saved_pos = None
             self._peek_monitor_area = None
             log.warning("Cannot enter peek mode because desktop detach failed")
@@ -3219,8 +3240,7 @@ class OverlayApp:
 
         self._peek_animating = True
 
-        # Make topmost
-        self.root.wm_attributes("-alpha", 0.88)
+        # Prepare the topmost layer while transparent, at the off-screen origin.
         self.root.wm_attributes("-topmost", True)
 
         monitor_rect, work_rect = monitor_area
@@ -3242,6 +3262,8 @@ class OverlayApp:
         # Start off-screen
         self.root.geometry(f"+{screen_right}+{target_y}")
         self.root.update_idletasks()
+        self.root.wm_attributes("-alpha", 0.88)
+        _show_without_reordering(self._get_hwnd())
 
         # Animate slide-in
         self._animate_slide(screen_right, target_x, target_y, step=-20, callback=self._peek_shown)

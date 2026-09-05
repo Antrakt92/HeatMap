@@ -2273,6 +2273,12 @@ class _FakeRoot:
     def update_idletasks(self):
         pass
 
+    def wm_frame(self):
+        return "0x0"
+
+    def winfo_id(self):
+        return 0
+
     def winfo_width(self):
         return self.width
 

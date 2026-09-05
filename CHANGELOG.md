@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Hide the native Peek window during its return to the saved desktop position;
+  finish Tk geometry and opacity changes before desktop placement, then show it
+  without raising it. Prevent visibility recovery from showing a pending return.
+- Prepare Peek entry off-screen before restoring opacity, including a new Peek
+  that interrupts the previous return. Add real off-screen Tk/Win32 regressions
+  for animations, repeated transitions, saved position, z-order and focus.
+
 ## 1.1.0 — 2026-09-05
 
 - Keep expanded metrics reachable with scrolling while the header and warning
