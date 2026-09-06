@@ -60,6 +60,90 @@ def case_fan_demand(data):
     return math.ceil(demands[limiting]), CASE_FAN_LABELS[limiting] + " curve"
 
 
+class CaseAirflowPolicy:
+    """Add bounded, upward-only assistance to the established temperature curves."""
+    # B550 AORUS PRO AC's firmware-owned IT8792E channels; never infer by name alone.
+    _CASE_HEADERS = {
+        "/lpc/it8792e/0/fan/0": ("System Fan #5 / Pump", "System Fan #5"),
+        "/lpc/it8792e/0/fan/1": ("System Fan #6 / Pump", "System Fan #6"),
+        "/lpc/it8792e/0/fan/2": ("System Fan #4",),
+    }
+
+    def __init__(self):
+        self.history = []
+        self.last_time = None
+        self.gpu_id = None
+        self.seen_running = set()
+        self.stopped_since = {}
+
+    def _stalled_header(self, data, now):
+        hot = any((finite(data.get(key), 1) or 0) >= threshold for key, threshold in (
+            ("cpu_temp", 70), ("gpu_core_temp", 80),
+            ("gpu_hotspot_temp", 85), ("gpu_memory_temp", 85)))
+        by_id = {}
+        for fan in data.get("fans", []):
+            by_id.setdefault(fan.get("id"), []).append(fan)
+        pending = {}
+        stalled = None
+        for identifier, names in self._CASE_HEADERS.items():
+            matches = by_id.get(identifier, [])
+            if len(matches) != 1 or matches[0].get("name") not in names:
+                continue
+            fan = matches[0]
+            rpm = finite(fan.get("rpm"), 0, 10000)
+            if rpm is not None and rpm >= 200:
+                self.seen_running.add(identifier)
+            if rpm == 0 and hot and identifier in self.seen_running:
+                start = self.stopped_since.get(identifier, now)
+                pending[identifier] = start
+                if now - start >= 2:
+                    stalled = fan["name"].removesuffix(" / Pump")
+        self.stopped_since = pending
+        return stalled
+
+    def update(self, data, now):
+        demand, reason = case_fan_demand(data)
+        if finite(now, 0, 1e15) is None:
+            self.history.clear()
+            self.last_time = None
+            self.stopped_since.clear()
+            return 100, "Invalid sample time: full airflow"
+        gpu_id = data.get("gpu_id")
+        if (self.last_time is not None and (now <= self.last_time or now - self.last_time > 5)
+                or gpu_id != self.gpu_id):
+            self.history.clear()
+            self.stopped_since.clear()
+        self.last_time, self.gpu_id = now, gpu_id
+        stalled = self._stalled_header(data, now)
+        if demand == 100:
+            self.history.clear()
+            return demand, reason
+        if stalled is not None:
+            self.history.clear()
+            return 100, stalled + ": confirmed 0 RPM under load; airflow assist"
+        temperatures = {key: data[key] for key in CASE_FAN_CURVES}
+        # Bounded even if a caller samples much faster than the normal two seconds.
+        self.history = [(stamp, values) for stamp, values in self.history if now - stamp <= 10][-63:]
+        self.history.append((now, temperatures))
+        duration = now - self.history[0][0]
+        if len(self.history) < 3 or duration < 6:
+            return demand, reason
+        assisted, limiting = demand, None
+        for key, points in CASE_FAN_CURVES.items():
+            values = [values[key] for _, values in self.history]
+            rise = values[-1] - values[0]
+            positive_steps = sum(after > before for before, after in zip(values, values[1:]))
+            if rise < 2 or positive_steps < 2 or values[-1] < values[-2]:
+                continue
+            projected = values[-1] + min(5, 5 * rise / duration)
+            projected_demand = min(100, demand + 10, math.ceil(interpolate(projected, points)))
+            if projected_demand > assisted:
+                assisted, limiting = projected_demand, key
+        if limiting is not None:
+            return assisted, CASE_FAN_LABELS[limiting] + " rising: airflow assist"
+        return demand, reason
+
+
 @dataclass
 class FanRamp:
     value: int = 100
@@ -152,15 +236,21 @@ class ThermalAdvisor:
                 for fan in data.get("fans", [])]
         fans.extend((fan, gpu_hot) for fan in data.get("gpu_fans", []))
         for fan, hot in fans:
+            label = str(fan.get("name", "Fan")).removesuffix(" / Pump")
             key = str(fan.get("id") or fan.get("name"))
             rpm = finite(fan.get("rpm"), 0, 10000)
             if rpm is not None and rpm > 0:
                 self.seen_running_fans.add(key)
-            if rpm == 0 and key in self.seen_running_fans and hot:
-                active.add(key)
-                start = self.since.setdefault(key, now)
+            if (rpm == 0 or rpm is None) and key in self.seen_running_fans and hot:
+                # Missing tach feedback is not proof the fan has physically stopped.
+                timer_key = "tach_missing:" + key if rpm is None else key
+                active.add(timer_key)
+                start = self.since.setdefault(timer_key, now)
                 if now - start >= 10:
-                    findings.append(Finding(key, 2, f"{fan['name']}: 0 RPM under load"))
+                    if rpm is None:
+                        findings.append(Finding(timer_key, 1, f"{label}: tachometer unavailable under load"))
+                    else:
+                        findings.append(Finding(key, 2, f"{label}: 0 RPM under load"))
         for disk in data.get("disks", []):
             value = finite(disk.get("temp"), 1)
             if value is not None and value >= disk_thresholds(disk["name"])[0]:

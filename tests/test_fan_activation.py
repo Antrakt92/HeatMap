@@ -28,6 +28,19 @@ class ActivationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "restore not confirmed"):
             activation.verify_worker(client, [], duration=0)
 
+    def test_startup_refusal_preserves_cause_only_with_explicit_no_command_evidence(self):
+        for attempted in (False, True, None):
+            with self.subTest(attempted=attempted):
+                client = mock.Mock()
+                status = dict(state="error", reason="Case fan channel not ready: SYS1",
+                              control_attempted=attempted, baseline=[], controlled_channels=[],
+                              restore_confirmed=False, restore_errors=[])
+                client.poll.side_effect = [status, status]
+                expected = "Case fan channel not ready: SYS1" if attempted is False else "restore not confirmed"
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    activation.verify_worker(client, [])
+                client.stop.assert_called_once()
+
     def test_close_only_targets_exact_overlay_script(self):
         unrelated = mock.Mock(pid=20, info=dict(name="pythonw.exe", cmdline=["pythonw.exe", "other-overlay.py"]))
         with mock.patch.object(activation.psutil, "process_iter", return_value=[unrelated]), \

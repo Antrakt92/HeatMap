@@ -14,6 +14,7 @@ class SensorRecoveryEdgeTests(unittest.TestCase):
         self.modules, self.hardware_type, self.sensor_type = _fake_lhm_modules()
         contexts = ExitStack()
         self.addCleanup(contexts.close)
+        contexts.enter_context(mock.patch.object(overlay, "require_hardware_access"))
         contexts.enter_context(mock.patch.dict(sys.modules, self.modules))
         contexts.enter_context(mock.patch.object(overlay.psutil, "cpu_percent", return_value=12))
         contexts.enter_context(mock.patch.object(

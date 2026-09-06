@@ -26,10 +26,10 @@ class DisplayAuditTests(TkTestCase):
 
     def test_cpu_reference_percentage_never_replaces_actual_duty(self):
         for rpm, duty, reference, expected in (
-            (1800, 67, 2000, "1800 RPM | 67% ctl"),
-            (1800, None, 2000, "1800 RPM · ~90% ref"),
-            (2060, None, 2000, "2060 RPM · ~103% ref"),
-            (0, None, 2000, "0 RPM · ~0% ref"),
+            (1800, 67, 2000, "1800 RPM · 67%"),
+            (1800, None, 2000, "1800 RPM · ~90%"),
+            (2060, None, 2000, "2060 RPM · ~103%"),
+            (0, None, 2000, "0 RPM · ~0%"),
             (None, None, 2000, "--"),
             (1800, None, None, "1800 RPM"),
             (1800, None, 0, "1800 RPM"),

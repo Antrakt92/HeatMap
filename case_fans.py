@@ -3,6 +3,7 @@ import argparse
 import ctypes
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -11,7 +12,8 @@ import uuid
 
 import psutil
 
-from thermal_policy import FanRamp, case_fan_demand, finite
+from thermal_policy import CaseAirflowPolicy, FanRamp, case_fan_demand, finite
+from hardware_access_guard import require_hardware_access
 
 PROFILE = "b550-aorus-pro-ac-case-124"
 TARGETS = ("System Fan #1", "System Fan #2", "System Fan #4")
@@ -21,7 +23,6 @@ CHANNELS = {
     TARGETS[1]: ("/lpc/it8688e/0", 2),
     TARGETS[2]: ("/lpc/it8792e/0", 2),
 }
-CONFLICTS = {"fancontrol.exe", "siv.exe", "gcc.exe", "easytune.exe"}
 
 
 def open_status_file(path):
@@ -142,6 +143,9 @@ class FanWorkerClient:
                 return {"state": "error", "reason": "Invalid case fan controller status"}
             if status.get("state") == "active" and finite(status.get("command_pct"), 60, 100) is None:
                 return {"state": "error", "reason": "Invalid case fan controller command report"}
+            discovering = (status.get("state") == "checking" and status.get("phase") == "discovering"
+                           and status.get("control_attempted") is False
+                           and status.get("baseline") == [])
             if "controlled_channels" in status or "firmware_channels" in status:
                 controlled, firmware = status.get("controlled_channels"), status.get("firmware_channels")
                 if (not isinstance(controlled, list) or not isinstance(firmware, list)
@@ -149,7 +153,7 @@ class FanWorkerClient:
                         or controlled not in (list(INDEPENDENT_TARGETS), list(TARGETS), [])
                         or firmware != ([name for name in TARGETS if name not in controlled] if controlled else [])):
                     return {"state": "error", "reason": "Invalid case fan controller channel report"}
-                if status.get("state") in ("active", "checking") and not controlled:
+                if status.get("state") in ("active", "checking") and not controlled and not discovering:
                     return {"state": "error", "reason": "Missing case fan controller channels"}
             exited = self.process.poll() is not None
             terminal = status.get("state") in ("error", "stopped")
@@ -208,6 +212,10 @@ class WorkerMutex:
         self.kernel.CloseHandle(self.handle)
 
 
+class ChannelNotReady(RuntimeError):
+    """A missing startup reading can recover before any control command is sent."""
+
+
 def select_controls(computer):
     boards = [hw for hw in computer.Hardware if str(hw.HardwareType) == "Motherboard"]
     # pythonnet wraps Computer.Hardware as IHardware, which does not expose Model.
@@ -216,26 +224,29 @@ def select_controls(computer):
         raise RuntimeError("Case fan profile supports only Gigabyte B550 AORUS PRO AC")
     sources = [(sub, sensor) for sub in boards[0].SubHardware for sensor in sub.Sensors]
     sensors = [sensor for _sub, sensor in sources]
-    try:
-        verify_shared_controller(sensors)
-        targets = TARGETS
-    except RuntimeError:
-        # SYS1/2 have a separate chip. Do not acquire SYS4's shared controller
-        # when firmware is running a pump curve or its baseline is unavailable.
-        targets = INDEPENDENT_TARGETS
+    # LHM disables the whole secondary Gigabyte EC when overriding SYS4.
+    # Even a current 100% pump reading may be a firmware-curve peak, not a
+    # fixed setting. Keep that controller under firmware ownership permanently.
     selected = []
-    for name in targets:
+    for name in INDEPENDENT_TARGETS:
         control = [s for s in sensors if str(s.SensorType) == "Control" and str(s.Name) == name]
         tach = [s for s in sensors if str(s.SensorType) == "Fan" and str(s.Name) == name]
-        if len(control) != 1 or len(tach) != 1 or control[0].Control is None:
-            raise RuntimeError(f"Missing or ambiguous case fan channel: {name}")
+        counts = f"{name}: controls={len(control)}, tachometers={len(tach)}"
+        if len(control) > 1 or len(tach) > 1:
+            raise RuntimeError("Ambiguous case fan channel: " + counts)
+        if not control or not tach:
+            raise ChannelNotReady("Case fan channel not ready: " + counts)
+        if control[0].Control is None:
+            raise RuntimeError(f"Case fan control object unavailable: {name}")
         chip, index = CHANNELS[name]
         for sensor, kind in ((control[0], "control"), (tach[0], "fan")):
             owners = [sub for sub, candidate in sources if candidate is sensor]
             if (str(getattr(sensor, "Identifier", "")) != f"{chip}/{kind}/{index}"
                     or len(owners) != 1 or str(getattr(owners[0], "Identifier", "")) != chip):
                 raise RuntimeError(f"Unexpected controller identity: {name}")
-        if finite(float(tach[0].Value) if tach[0].Value is not None else None, 1, 10000) is None:
+        if tach[0].Value is None:
+            raise ChannelNotReady(f"Case fan tachometer not ready: {name}")
+        if finite(float(tach[0].Value), 1, 10000) is None:
             raise RuntimeError(f"Cannot take control without a running tachometer: {name}")
         c = control[0].Control
         if float(c.MinSoftwareValue) > 60 or float(c.MaxSoftwareValue) < 100:
@@ -244,19 +255,23 @@ def select_controls(computer):
     return selected
 
 
-def verify_selected_shared_controller(computer, controls):
-    if any(item[0] == TARGETS[2] for item in controls):
-        verify_shared_controller([s for hw in computer.Hardware if str(hw.HardwareType) == "Motherboard"
-                                  for sub in hw.SubHardware for s in sub.Sensors])
-
-
-def verify_shared_controller(sensors):
-    # SYS4 shares Gigabyte EC ownership with the pump-capable headers. Only
-    # support the measured fixed-full-speed baseline; never freeze an unknown curve.
-    for name in ("System Fan #5 / Pump", "System Fan #6 / Pump"):
-        siblings = [s for s in sensors if str(s.SensorType) == "Control" and str(s.Name) == name]
-        if len(siblings) != 1 or siblings[0].Value is None or finite(float(siblings[0].Value), 99, 100) is None:
-            raise RuntimeError(f"Shared controller requires existing fixed 100% on {name}")
+def wait_for_controls(computer, read_sensors, stop, owner, heartbeat, status_path):
+    """Retry initial enumeration only; never retry ambiguous identities or writes."""
+    for attempt in range(1, 5):
+        read_sensors(computer)
+        try:
+            return select_controls(computer)
+        except ChannelNotReady as exc:
+            if attempt == 4:
+                raise ChannelNotReady(f"{exc}; unavailable after {attempt} startup reads") from exc
+            write_status(status_path, "checking", phase="discovering", control_attempted=False,
+                         baseline=[], controlled_channels=[], firmware_channels=[],
+                         discovery_attempt=attempt, reason=str(exc))
+            # LHM skips a busy ISA bus read after 10 ms. Its tachometers are not
+            # activated until a successful update; retry the same instance before takeover.
+            if stop.wait(0.5) or not owner.is_running() or time.monotonic() - heartbeat[0] > 15:
+                raise RuntimeError("Overlay owner stopped during case fan discovery") from exc
+            require_hardware_access()
 
 
 def full_rpm_reference(value):
@@ -265,6 +280,45 @@ def full_rpm_reference(value):
     if any(finite(rpm, 200, 10000) is None for rpm in value.values()):
         return None
     return dict(value)
+
+
+def parse_primary_fan_mode(report):
+    """Read register 0x13 from the pinned IT8688E public diagnostic format."""
+    if not isinstance(report, str):
+        raise RuntimeError("Primary fan mode report is unavailable")
+    lines = [line.strip() for line in report.splitlines()]
+    if (lines.count("LPC IT87XX") != 1
+            or [line for line in lines if line.startswith("Chip ID:")] != ["Chip ID: 0x8688"]
+            or lines.count("Environment Controller Registers Bank 0") != 1):
+        raise RuntimeError("Primary fan mode report has missing or ambiguous identity/bank")
+    start = lines.index("Environment Controller Registers Bank 0") + 1
+    bank = []
+    for line in lines[start:]:
+        if line.startswith("Environment Controller Registers Bank ") or line == "GPIO Registers":
+            break
+        if line:
+            bank.append(line.split())
+    header = [f"{index:02X}" for index in range(16)]
+    if len(bank) != 12 or bank[0] != header:
+        raise RuntimeError("Primary fan mode report has incomplete register rows")
+    for index, row in enumerate(bank[1:]):
+        if (len(row) != 17 or row[0] != f"{index * 16:02X}"
+                or any(re.fullmatch(r"[0-9A-Fa-f]{2}", value) is None for value in row[1:])):
+            raise RuntimeError("Primary fan mode report has unreadable or ambiguous registers")
+    return int(bank[2][4], 16)
+
+
+def read_primary_fan_mode(computer):
+    """Use only the primary controller belonging to this opened Computer."""
+    boards = [hw for hw in computer.Hardware if str(hw.HardwareType) == "Motherboard"]
+    primary = [sub for hw in boards for sub in hw.SubHardware
+               if str(getattr(sub, "Identifier", "")) == "/lpc/it8688e/0"]
+    if len(boards) != 1 or len(primary) != 1:
+        raise RuntimeError("Primary fan mode report controller is missing or ambiguous")
+    try:
+        return parse_primary_fan_mode(primary[0].GetReport())
+    except Exception as exc:
+        raise RuntimeError(f"Cannot verify primary fan output mode: {exc}") from exc
 
 
 def verify_full_airflow(baseline, readings, full_rpm=None):
@@ -300,7 +354,14 @@ def verify_restore(baseline, readings):
 
 class CaseFanSession:
     def __init__(self, controls):
-        self.controls = controls
+        self.controls = tuple(controls)
+        if tuple(item[0] for item in self.controls) != INDEPENDENT_TARGETS:
+            raise RuntimeError("Only independent SYS1/SYS2 control is supported; SYS4 and pump headers remain with firmware")
+        for name, _control, sensor, tach in self.controls:
+            chip, index = CHANNELS[name]
+            if (str(getattr(sensor, "Identifier", "")) != f"{chip}/control/{index}"
+                    or str(getattr(tach, "Identifier", "")) != f"{chip}/fan/{index}"):
+                raise RuntimeError(f"Unexpected controller identity: {name}")
         self.touched = []
         self.last_command = None
 
@@ -360,10 +421,6 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None):
     errors = overlay._runtime_dll_errors()
     if errors:
         raise RuntimeError("Hardware runtime verification failed: " + "; ".join(errors))
-    conflicts = [p.info["name"] for p in psutil.process_iter(["name"])
-                 if (p.info["name"] or "").lower() in CONFLICTS]
-    if conflicts:
-        raise RuntimeError("Another fan control application is running: " + ", ".join(conflicts))
 
     import clr
     clr.AddReference(os.path.join(overlay.LIB_DIR, "LibreHardwareMonitorLib.dll"))
@@ -394,16 +451,28 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None):
     baseline = []
     controlled_channels = []
     firmware_channels = []
+    initial_fan_mode = None
+    control_attempted = False
     try:
+        require_hardware_access()
         computer.Open()
-        data = overlay.read_sensors(computer)
-        session = CaseFanSession(select_controls(computer))
+        selected = wait_for_controls(computer, overlay.read_sensors, stop, owner, heartbeat, status_path)
+        mode = read_primary_fan_mode(computer)
+        # LHM saves this whole register as a bool but restores individual bits.
+        # Require both selected outputs already enabled to preserve their modes.
+        if mode & 0x06 != 0x06:
+            raise RuntimeError("Primary SYS1/SYS2 output modes are disabled; firmware configuration needs checking")
+        initial_fan_mode = mode & 0x06
+        session = CaseFanSession(selected)
         controlled_channels = [item[0] for item in session.controls]
         firmware_channels = [name for name in TARGETS if name not in controlled_channels]
         baseline = session.readings()
         if stop.is_set() or not owner.is_running() or time.monotonic() - heartbeat[0] > 15:
             raise RuntimeError("Overlay owner stopped before case fan activation")
         ramp = FanRamp()
+        airflow = CaseAirflowPolicy()
+        require_hardware_access()
+        control_attempted = True
         session.apply(100)
         started = time.monotonic()
         stall_since = {}
@@ -414,12 +483,14 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None):
             if now - heartbeat[0] > 15:
                 # A crashed/frozen UI cannot silently retain ownership indefinitely.
                 break
+            require_hardware_access()
             data = overlay.read_sensors(computer)
             now = time.monotonic()
             if stop.is_set() or not owner.is_running() or now - heartbeat[0] > 15:
                 break
-            verify_selected_shared_controller(computer, session.controls)
-            demand, reason = case_fan_demand(data)
+            thermal_demand, _ = case_fan_demand(data)
+            demand, reason = airflow.update(data, now)
+            policy_demand = demand
             readings = session.readings()
             for fan in readings:
                 if fan["rpm"] is None or fan["rpm"] < 200:
@@ -446,6 +517,11 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None):
                          command_pct=command, demand_pct=demand, reason=reason, fans=readings, baseline=baseline,
                          controlled_channels=controlled_channels, firmware_channels=firmware_channels,
                          verified_full_rpm=verified_full_rpm,
+                         thermal_demand_pct=thermal_demand, policy_demand_pct=policy_demand,
+                         observed_case_fans=[dict(name=fan.get("name"), id=fan.get("id"),
+                                                  rpm=fan.get("rpm"), control_pct=fan.get("control_pct"))
+                                             for fan in data.get("fans", [])
+                                             if str(fan.get("name", "")).startswith("System Fan #")],
                          temperatures={key: data.get(key) for key in (
                              "cpu_temp", "gpu_core_temp", "gpu_hotspot_temp", "gpu_memory_temp")})
             stop.wait(2)
@@ -467,6 +543,8 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None):
                             getattr(sub, "__implementation__", sub).Close()
                             sub.Update()
                 restore_errors.extend(verify_restore(baseline, session.readings()))
+                if read_primary_fan_mode(computer) & 0x06 != initial_fan_mode:
+                    restore_errors.append("Primary SYS1/SYS2 output modes were not restored")
             except Exception as exc:
                 restore_errors.append(f"Restore verification: {exc}")
         try:
@@ -477,6 +555,7 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None):
                      reason=error or ("Restore unconfirmed: restart Windows" if restore_errors else "Returned to firmware control"),
                      restore_errors=restore_errors, baseline=baseline,
                      controlled_channels=controlled_channels, firmware_channels=firmware_channels,
+                     control_attempted=control_attempted,
                      restore_confirmed=bool(session and baseline and not restore_errors))
     return 1 if error or restore_errors else 0
 

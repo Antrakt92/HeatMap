@@ -80,6 +80,8 @@ def verify_worker(client, samples, duration=20):
             except subprocess.TimeoutExpired:
                 raise RuntimeError("Native fan restore did not finish. Restart Windows before retrying.")
     restored = client.poll()
+    if failure and overlay._case_fan_never_acquired(restored):
+        raise failure
     if not restored.get("restore_confirmed") or restored.get("restore_errors"):
         raise RuntimeError("Fan restore not confirmed: " + str(restored))
     if failure:

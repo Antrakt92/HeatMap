@@ -7,6 +7,7 @@ from types import SimpleNamespace as NS
 from unittest import mock
 
 import case_fans as fans
+from hardware_access_guard import HardwareAccessConflict
 
 
 def fixture():
@@ -29,6 +30,11 @@ def fixture():
                                             Identifier=f"{chip}/fan/{index}")])
     subs = [NS(Identifier=chip, Sensors=items, Close=mock.Mock(), Update=mock.Mock())
             for chip, items in chip_sensors.items()]
+    report = "LPC IT87XX\nChip ID: 0x8688\nEnvironment Controller Registers Bank 0\n\n"
+    report += "      " + " ".join(f"{index:02X}" for index in range(16)) + "\n\n"
+    report += "\n".join(f" {row:02X}   " + " ".join("07" if row + col == 0x13 else "00"
+                                               for col in range(16)) for row in range(0, 0xB0, 16))
+    subs[0].GetReport = mock.Mock(return_value=report + "\n\nGPIO Registers\n 00\n")
     board = NS(HardwareType="Motherboard", Model="B550_AORUS_PRO_AC", SubHardware=subs)
     return NS(Hardware=[board], Open=mock.Mock(), Close=mock.Mock()), controls
 
@@ -39,9 +45,9 @@ class CaseFanTests(unittest.TestCase):
         session = fans.CaseFanSession(fans.select_controls(computer))
         before = session.readings()
         session.apply(100)
-        for c in controls[:3]:
+        for c in controls[:2]:
             c.SetSoftware.assert_called_once_with(100)
-        for c in controls[3:]:
+        for c in controls[2:]:
             c.SetSoftware.assert_not_called()
         self.assertEqual(session.restore(), [])
         self.assertEqual(fans.verify_restore(before, session.readings()), [])
@@ -68,7 +74,7 @@ class CaseFanTests(unittest.TestCase):
         board = computer.Hardware[0]
         computer.Hardware[0] = NS(HardwareType="Motherboard", SubHardware=board.SubHardware,
                                   __implementation__=board)
-        self.assertEqual(len(fans.select_controls(computer)), 3)
+        self.assertEqual(len(fans.select_controls(computer)), 2)
 
     def test_partial_native_write_restores_even_the_channel_that_raised(self):
         computer, controls = fixture()
@@ -197,6 +203,69 @@ class CaseFanTests(unittest.TestCase):
         client.process.kill.assert_not_called()
         client.process.terminate.assert_not_called()
 
+    def test_hardware_conflict_before_open_before_write_or_midrun_stops_safely(self):
+        import overlay
+        for phase in ("before_open", "before_write", "midrun"):
+            with self.subTest(phase=phase):
+                computer, controls = fixture()
+                owner = mock.Mock()
+                owner.create_time.return_value = 1
+                owner.is_running.return_value = True
+                completed_checks = {"before_open": 0, "before_write": 1, "midrun": 2}[phase]
+                message = "Other hardware monitoring tools are running: hwinfo64.exe. Restart HeatMap."
+                checks = [None] * completed_checks + [HardwareAccessConflict(message)]
+                modules = {"clr": mock.Mock(), "LibreHardwareMonitor": mock.Mock(),
+                           "LibreHardwareMonitor.Hardware": NS(Computer=lambda: computer)}
+                with (
+                    mock.patch.dict("sys.modules", modules),
+                    mock.patch.object(overlay, "_is_admin", return_value=True),
+                    mock.patch.object(overlay, "_runtime_dll_errors", return_value=[]),
+                    mock.patch.object(fans.psutil, "Process", return_value=owner),
+                    mock.patch.object(fans.threading, "Thread"),
+                    mock.patch.object(fans, "require_hardware_access", side_effect=checks) as guard,
+                    mock.patch.object(overlay, "read_sensors", return_value={}) as read,
+                    mock.patch.object(fans, "write_status") as publish,
+                ):
+                    self.assertEqual(fans.worker("unused-mocked.json", 7, 1), 1)
+                self.assertEqual(guard.call_count, completed_checks + 1)
+                self.assertEqual(computer.Open.call_count, 0 if phase == "before_open" else 1)
+                self.assertEqual(read.call_count, 0 if phase == "before_open" else 1)
+                for control in controls[:2]:
+                    if phase == "midrun":
+                        control.SetSoftware.assert_called_once_with(100.0)
+                        control.SetDefault.assert_called_once_with()
+                    else:
+                        control.SetSoftware.assert_not_called()
+                        control.SetDefault.assert_not_called()
+                for untouched in controls[2:]:
+                    untouched.SetSoftware.assert_not_called()
+                    untouched.SetDefault.assert_not_called()
+                computer.Close.assert_called_once_with()
+                self.assertEqual(publish.call_args.args[1], "error")
+                self.assertEqual(publish.call_args.kwargs["reason"], message)
+                if phase == "midrun":
+                    self.assertTrue(publish.call_args.kwargs["restore_confirmed"])
+
+    def test_process_inventory_failure_is_reported_before_hardware_open(self):
+        import overlay
+        computer, _ = fixture()
+        owner = mock.Mock()
+        owner.create_time.return_value = 1
+        modules = {"clr": mock.Mock(), "LibreHardwareMonitor": mock.Mock(),
+                   "LibreHardwareMonitor.Hardware": NS(Computer=lambda: computer)}
+        with (
+            mock.patch.dict("sys.modules", modules),
+            mock.patch.object(overlay, "_is_admin", return_value=True),
+            mock.patch.object(overlay, "_runtime_dll_errors", return_value=[]),
+            mock.patch.object(fans.psutil, "Process", return_value=owner),
+            mock.patch.object(fans.psutil, "process_iter", side_effect=fans.psutil.AccessDenied()),
+            mock.patch.object(fans.threading, "Thread"),
+            mock.patch.object(fans, "write_status") as publish,
+        ):
+            self.assertEqual(fans.worker("unused-mocked.json", 7, 1), 1)
+        computer.Open.assert_not_called()
+        self.assertIn("Cannot verify which hardware monitoring tools are running", publish.call_args.kwargs["reason"])
+
     def test_worker_restores_after_read_or_status_failure_and_after_owner_dies(self):
         import overlay
         for failure in ("read", "write", None):
@@ -222,7 +291,7 @@ class CaseFanTests(unittest.TestCase):
                 path = os.path.join(directory, "status.json")
                 result = fans.worker(path, 7, 1)
                 self.assertEqual(result, 1 if failure else 0)
-                for control in controls[:3]:
+                for control in controls[:2]:
                     control.SetDefault.assert_called_once()
                 computer.Close.assert_called_once()
                 with fans.open_status_file(path) as stream:

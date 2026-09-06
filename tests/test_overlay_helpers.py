@@ -16,6 +16,11 @@ import overlay
 
 class OverlayHelperTests(unittest.TestCase):
     def setUp(self):
+        # These tests supply fake hardware; desktop process inventory is a
+        # separate integration boundary covered by the access-guard suite.
+        access = mock.patch.object(overlay, "require_hardware_access")
+        access.start()
+        self.addCleanup(access.stop)
         self._old_config_path = overlay.CONFIG_PATH
         self._tmpdir = tempfile.TemporaryDirectory()
         overlay.CONFIG_PATH = os.path.join(self._tmpdir.name, "overlay_config.json")
@@ -1794,12 +1799,14 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(app.rows["detail_peak_temps"].options["text"], "--")
         self.assertEqual(app.rows["detail_peak_usage"].options["text"], "--")
 
-    def test_copy_diagnostics_uses_fresh_monitor_and_clipboard(self):
+    def test_copy_diagnostics_uses_published_data_without_extra_monitor(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
         app.running = True
         app._stop_event = threading.Event()
         app._set_menu_label = mock.Mock()
         app.root = _FakeRoot()
+        app.lock = threading.Lock()
+        app.sensor_data = {"cpu_temp": 58}
         computer = _CloseableComputer()
 
         with (
@@ -1811,11 +1818,11 @@ class OverlayHelperTests(unittest.TestCase):
             app._diagnostics_thread.join(3)
             app._poll_diagnostics()
 
-        init_monitor.assert_called_once_with()
-        read_sensors.assert_called_once_with(computer)
-        build.assert_called_once_with(computer, {"cpu_temp": 58})
-        self.assertTrue(computer.closed)
-        self.assertEqual(app.root.clipboard_value, 'diagnostic dump\nCase fan controller:\n{"state": "off"}')
+        init_monitor.assert_not_called()
+        read_sensors.assert_not_called()
+        build.assert_called_once_with(None, {"cpu_temp": 58})
+        self.assertFalse(computer.closed)
+        self.assertEqual(app.root.clipboard_value, 'diagnostic dump\nSensor inventory: not yet cached; latest published data only.\nCase fan controller:\n{"state": "off"}')
 
     def test_prepare_verified_pawnio_installer_returns_verified_path(self):
         with mock.patch("setup.download_pawnio", return_value=r"C:\verified\PawnIO.exe"):
@@ -2238,6 +2245,7 @@ def _update_ui_app():
         "ram_pct": _FakeLabel(),
     }
     app._GPU_FAN_MAX_RPM = 2200
+    app.fan_percent_labels = {"cpu_fan": _FakeLabel()}
     app._CPU_FAN_MAX_RPM = 1800
     app._config_save_pending = False
     app.peaks = overlay._empty_peak_data()

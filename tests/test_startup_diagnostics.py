@@ -83,23 +83,26 @@ class StartupDiagnosticsTests(unittest.TestCase):
         app.root = mock.Mock()
         app._stop_event = threading.Event()
         app._set_menu_label = mock.Mock()
+        app.lock = threading.Lock()
+        app.sensor_data = {"cpu_temp": 58}
         return app
 
-    def test_diagnostics_return_to_ui_before_slow_hardware_open(self):
+    def test_diagnostics_return_to_ui_before_slow_formatting_without_hardware(self):
         app = self.diagnostics_app()
         opened = threading.Event()
         release = threading.Event()
-        computer = mock.Mock()
-
-        def initialize():
+        def format_snapshot(computer, data):
+            self.assertIsNone(computer)
+            self.assertEqual(data, {"cpu_temp": 58})
             opened.set()
             release.wait(3)
-            return computer
+            return "synthetic diagnostics"
 
         with (
-            mock.patch.object(overlay, "init_hardware_monitor", side_effect=initialize),
-            mock.patch.object(overlay, "read_sensors", return_value={}),
-            mock.patch.object(overlay, "build_sensor_diagnostics", return_value="synthetic diagnostics"),
+            mock.patch.object(overlay, "init_hardware_monitor") as initialize,
+            mock.patch.object(overlay, "read_sensors") as sample,
+            mock.patch.object(overlay, "_close_hardware_monitor") as close,
+            mock.patch.object(overlay, "build_sensor_diagnostics", side_effect=format_snapshot),
         ):
             app.copy_diagnostics()
             try:
@@ -114,29 +117,34 @@ class StartupDiagnosticsTests(unittest.TestCase):
                     app._diagnostics_thread.join(3)
             app._poll_diagnostics()
 
-        computer.Close.assert_called_once_with()
-        app.root.clipboard_append.assert_called_once_with('synthetic diagnostics\nCase fan controller:\n{"state": "off"}')
+        initialize.assert_not_called()
+        sample.assert_not_called()
+        close.assert_not_called()
+        self.assertIn("synthetic diagnostics", app.root.clipboard_append.call_args.args[0])
+        self.assertIn("not yet cached", app.root.clipboard_append.call_args.args[0])
         self.assertFalse(app._diagnostics_running)
 
-    def test_diagnostics_cancelled_during_open_close_without_sampling(self):
+    def test_diagnostics_cancelled_during_formatting_without_hardware(self):
         app = self.diagnostics_app()
-        computer = mock.Mock()
-
-        def initialize():
+        def format_snapshot(computer, data):
             app.running = False
             app._stop_event.set()
-            return computer
+            return "cancelled result"
 
         with (
-            mock.patch.object(overlay, "init_hardware_monitor", side_effect=initialize),
+            mock.patch.object(overlay, "init_hardware_monitor") as initialize,
             mock.patch.object(overlay, "read_sensors") as sample,
+            mock.patch.object(overlay, "_close_hardware_monitor") as close,
+            mock.patch.object(overlay, "build_sensor_diagnostics", side_effect=format_snapshot),
         ):
             app.copy_diagnostics()
             if hasattr(app, "_diagnostics_thread"):
                 app._diagnostics_thread.join(3)
             app._poll_diagnostics()
-        computer.Close.assert_called_once_with()
+        initialize.assert_not_called()
         sample.assert_not_called()
+        close.assert_not_called()
+        self.assertTrue(app._diagnostics_results.empty())
         app.root.clipboard_clear.assert_not_called()
 
     def test_diagnostics_error_resets_menu_and_never_clears_clipboard(self):
@@ -151,6 +159,71 @@ class StartupDiagnosticsTests(unittest.TestCase):
         app.root.clipboard_clear.assert_not_called()
         show.assert_called_once()
 
+    def test_inventory_cache_refreshes_at_30_seconds_on_sensor_owner(self):
+        app = self.diagnostics_app()
+        computer = mock.Mock()
+        owner = threading.get_ident()
+        observed = []
+
+        def format_snapshot(source, data):
+            self.assertIs(source, computer)
+            self.assertFalse(app.lock.locked())
+            observed.append(threading.get_ident())
+            return f"CPU: {data['cpu_temp']}"
+
+        with (
+            mock.patch.object(overlay.time, "monotonic", side_effect=[100, 129.9, 130]),
+            mock.patch.object(overlay, "build_sensor_diagnostics", side_effect=format_snapshot) as build,
+            mock.patch.object(overlay, "init_hardware_monitor") as initialize,
+            mock.patch.object(overlay, "read_sensors") as sample,
+            mock.patch.object(overlay, "_close_hardware_monitor") as close,
+        ):
+            app._cache_sensor_diagnostics(computer, {"cpu_temp": 58})
+            self.assertEqual(app._sensor_diagnostics_snapshot, (100, "CPU: 58"))
+            app._cache_sensor_diagnostics(computer, {"cpu_temp": 60})
+            self.assertEqual(app._sensor_diagnostics_snapshot, (100, "CPU: 58"))
+            app._cache_sensor_diagnostics(computer, {"cpu_temp": 62})
+        self.assertEqual(app._sensor_diagnostics_snapshot, (130, "CPU: 62"))
+        self.assertEqual(build.call_count, 2)
+        self.assertEqual(observed, [owner, owner])
+        initialize.assert_not_called()
+        sample.assert_not_called()
+        close.assert_not_called()
+
+    def test_failed_cache_refresh_preserves_complete_previous_snapshot(self):
+        app = self.diagnostics_app()
+        app._sensor_diagnostics_snapshot = (100, "previous inventory")
+        with (
+            mock.patch.object(overlay.time, "monotonic", return_value=130),
+            mock.patch.object(overlay, "build_sensor_diagnostics", side_effect=RuntimeError("inventory failed")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "inventory failed"):
+                app._cache_sensor_diagnostics(mock.Mock(), {})
+        self.assertEqual(app._sensor_diagnostics_snapshot, (100, "previous inventory"))
+
+    def test_copy_uses_atomic_cached_inventory_and_reports_age_without_hardware(self):
+        app = self.diagnostics_app()
+        app._sensor_diagnostics_snapshot = (100, "cached inventory")
+        app.health_messages = ["Sensors unavailable now"]
+        with (
+            mock.patch.object(overlay.time, "monotonic", return_value=145),
+            mock.patch.object(overlay, "init_hardware_monitor") as initialize,
+            mock.patch.object(overlay, "read_sensors") as sample,
+            mock.patch.object(overlay, "_close_hardware_monitor") as close,
+            mock.patch.object(overlay, "build_sensor_diagnostics") as build,
+        ):
+            app.copy_diagnostics()
+            app._sensor_diagnostics_snapshot = (146, "new inventory")
+            app._diagnostics_thread.join(3)
+            app._poll_diagnostics()
+        detail = app.root.clipboard_append.call_args.args[0]
+        self.assertIn("cached inventory", detail)
+        self.assertNotIn("new inventory", detail)
+        self.assertIn("snapshot age: 45.0s", detail)
+        self.assertIn("Sensors unavailable now", detail)
+        for operation in (initialize, sample, close, build):
+            operation.assert_not_called()
+
     def shutdown_app(self):
         app = self.diagnostics_app()
         app.root.tk.call.return_value = ()
@@ -164,28 +237,23 @@ class StartupDiagnosticsTests(unittest.TestCase):
         app.sensor_thread.is_alive.return_value = False
         return app
 
-    def test_quit_waits_for_diagnostics_worker_to_close_its_monitor(self):
+    def test_quit_waits_for_diagnostics_formatting_worker(self):
         app = self.shutdown_app()
         opened = threading.Event()
         allow_cleanup = threading.Event()
         closed = threading.Event()
-        computer = mock.Mock()
-        close_threads = []
-
-        def initialize():
+        def format_snapshot(computer, data):
             opened.set()
             allow_cleanup.wait(3)
-            return computer
-
-        def close_monitor():
-            close_threads.append(threading.get_ident())
             closed.set()
+            return "cancelled result"
 
-        computer.Close.side_effect = close_monitor
         app.root.destroy.side_effect = lambda: self.assertTrue(closed.is_set())
         with (
-            mock.patch.object(overlay, "init_hardware_monitor", side_effect=initialize),
+            mock.patch.object(overlay, "init_hardware_monitor") as initialize,
             mock.patch.object(overlay, "read_sensors") as sample,
+            mock.patch.object(overlay, "_close_hardware_monitor") as close,
+            mock.patch.object(overlay, "build_sensor_diagnostics", side_effect=format_snapshot),
             mock.patch.object(overlay, "release_single_instance") as release,
         ):
             app.copy_diagnostics()
@@ -202,10 +270,12 @@ class StartupDiagnosticsTests(unittest.TestCase):
                     app.quit()
                 join.assert_called_once()
                 self.assertFalse(worker.is_alive())
-                self.assertEqual(close_threads, [worker.ident])
                 app.root.destroy.assert_called_once_with()
                 release.assert_called_once_with()
                 sample.assert_not_called()
+                initialize.assert_not_called()
+                close.assert_not_called()
+                self.assertTrue(app._diagnostics_results.empty())
                 app.root.clipboard_clear.assert_not_called()
             finally:
                 allow_cleanup.set()

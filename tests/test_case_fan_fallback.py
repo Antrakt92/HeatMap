@@ -67,17 +67,17 @@ class PartialControllerTests(unittest.TestCase):
         self.assert_no_control_calls(channels, (SYS4, PUMP5, PUMP6, "CPU Fan", "System Fan #3"))
         self.assertEqual((channels[PUMP5].sensor.Value, channels[PUMP6].sensor.Value), (82, 81))
 
-    def test_full_profile_includes_sys4_only_with_valid_pump_guard(self):
+    def test_pumps_at_full_duty_never_promote_shared_controller(self):
         computer, channels = controller_topology(pumps=(100, 100))
         selected = fans.select_controls(computer)
-        self.assertEqual([item[0] for item in selected], [SYS1, SYS2, SYS4])
+        self.assertEqual([item[0] for item in selected], [SYS1, SYS2])
         session = fans.CaseFanSession(selected)
         session.apply(100)
         self.assertEqual(session.restore(), [])
-        for name in (SYS1, SYS2, SYS4):
+        for name in (SYS1, SYS2):
             channels[name].control.SetSoftware.assert_called_once_with(100)
             channels[name].control.SetDefault.assert_called_once_with()
-        self.assert_no_control_calls(channels, (PUMP5, PUMP6, "CPU Fan", "System Fan #3"))
+        self.assert_no_control_calls(channels, (SYS4, PUMP5, PUMP6, "CPU Fan", "System Fan #3"))
 
     def test_missing_ambiguous_or_unreadable_pumps_leave_safe_primary_channels(self):
         for fault in ("missing", "duplicate", "unreadable", "nonfinite"):
@@ -94,7 +94,7 @@ class PartialControllerTests(unittest.TestCase):
                 self.assert_no_control_calls(channels, channels)
 
     def test_selected_sensor_and_owner_ids_are_required_even_with_correct_names(self):
-        for pumps, names in (((82, 81), (SYS1, SYS2)), ((100, 100), (SYS1, SYS2, SYS4))):
+        for pumps, names in (((82, 81), (SYS1, SYS2)), ((100, 100), (SYS1, SYS2))):
             for name in names:
                 for part in ("sensor", "tach", "chip"):
                     for identifier in (None, "/lpc/unrecognized/0/control/1"):
@@ -132,23 +132,28 @@ class PartialControllerTests(unittest.TestCase):
         selected = fans.select_controls(computer)
         channels[PUMP5].sensor.Value = None
         channels[PUMP6].sensor.Value = 0
-        with mock.patch.object(fans, "verify_shared_controller", wraps=fans.verify_shared_controller) as guard:
-            fans.verify_selected_shared_controller(computer, selected)
-        guard.assert_not_called()
-        self.assert_no_control_calls(channels, channels)
+        session = fans.CaseFanSession(selected)
+        session.apply(70)
+        self.assertEqual(session.restore(), [])
+        self.assert_no_control_calls(channels, (SYS4, PUMP5, PUMP6, "CPU Fan", "System Fan #3"))
 
-    def test_full_selection_rejects_changed_pump_guard_before_next_command(self):
+    def test_manual_session_cannot_bypass_sys4_exclusion(self):
         computer, channels = controller_topology(pumps=(100, 100))
         selected = fans.select_controls(computer)
-        session = fans.CaseFanSession(selected)
-        session.apply(100)
-        channels[PUMP5].sensor.Value = 82
-        channels[PUMP6].sensor.Value = 81
+        shared = channels[SYS4]
+        selected.append((SYS4, shared.control, shared.sensor, shared.tach))
+        with self.assertRaisesRegex(RuntimeError, "Only independent SYS1/SYS2"):
+            fans.CaseFanSession(selected)
+        self.assert_no_control_calls(channels, channels)
 
-        with self.assertRaises(RuntimeError):
-            fans.verify_selected_shared_controller(computer, selected)
-        self.assertEqual(session.restore(), [])
-        self.assert_no_control_calls(channels, (PUMP5, PUMP6, "CPU Fan", "System Fan #3"))
+    def test_manual_session_rejects_shared_sensor_disguised_as_primary(self):
+        computer, channels = controller_topology(pumps=(100, 100))
+        selected = fans.select_controls(computer)
+        shared = channels[SYS4]
+        selected[0] = (SYS1, shared.control, shared.sensor, shared.tach)
+        with self.assertRaisesRegex(RuntimeError, "Unexpected controller identity"):
+            fans.CaseFanSession(selected)
+        self.assert_no_control_calls(channels, channels)
 
 
 class PartialReferenceTests(unittest.TestCase):

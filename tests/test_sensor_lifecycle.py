@@ -35,6 +35,11 @@ def sensor_app(iterations, computer=None):
 
 
 class SensorLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        access = mock.patch.object(overlay, "require_hardware_access")
+        access.start()
+        self.addCleanup(access.stop)
+
     def test_window_construction_does_not_wait_for_hardware_open(self):
         with (
             mock.patch.object(overlay, "load_config_result", return_value=({}, None)),

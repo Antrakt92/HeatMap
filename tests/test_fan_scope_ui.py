@@ -135,7 +135,7 @@ class FanScopeNativeUiTests(TkTestCase):
                 dialog = app._cooling_dialog
                 label = next(child for child in dialog.winfo_children() if isinstance(child, overlay.tk.Label))
                 self.assertIn("Target: 72%   Command: 77%", label.cget("text"))
-                self.assertIn("Firmware: System Fan #4", label.cget("text"))
+                self.assertIn("Firmware: SYS 3, SYS 4, SYS 5, SYS 6", label.cget("text"))
                 self.assertIsNone(app.root.grab_current())
                 first_callback = schedule.call_args.args[1]
                 first_timer = (set(app.root.tk.call("after", "info")) - callbacks_before).pop()
@@ -178,7 +178,7 @@ class FanScopeNativeUiTests(TkTestCase):
             app.fan_worker.poll = mock.Mock(return_value=status_for(fans.INDEPENDENT_TARGETS))
             app.update_ui()
             self.assertEqual(app.rows["case_fan_control"].cget("text"), "AUTO 77% · SYS 1/2")
-            self.assertEqual(app.rows["case_fan_4"].cget("text"), "900 RPM · Firmware")
+            self.assertEqual(app.rows["case_fan_4"].cget("text"), "900 RPM · FW")
             self.assertNotIn("Firmware", app.rows["case_fan_1"].cget("text"))
             self.assertNotIn("Firmware", app.rows["case_fan_2"].cget("text"))
             app.fan_worker.poll.return_value = status_for(fans.TARGETS)

@@ -115,11 +115,11 @@ class AuditRegressionTests(unittest.TestCase):
         app.root = mock.Mock()
         app._set_menu_label = mock.Mock()
         app._stop_event = threading.Event()
+        app.lock = threading.Lock()
+        app.sensor_data = {}
         app.health_messages = ["warning " + str(n) + "x" * 200 for n in range(5)]
         app._case_fan_status = dict(state="error", reason="complete original error", restore_confirmed=True)
-        with mock.patch.object(overlay, "init_hardware_monitor", return_value=mock.Mock()), \
-             mock.patch.object(overlay, "read_sensors", return_value={}), \
-             mock.patch.object(overlay, "build_sensor_diagnostics", return_value="sensor dump"):
+        with mock.patch.object(overlay, "build_sensor_diagnostics", return_value="sensor dump"):
             app.copy_diagnostics()
             app._diagnostics_thread.join(3)
             self.assertFalse(app._diagnostics_thread.is_alive())

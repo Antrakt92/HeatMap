@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.2.0-rc.3 — 2026-09-06
+
+- Retry missing startup fan sensors up to four reads on the same hardware instance,
+  with cancellable half-second waits before any control command. Reject duplicates,
+  foreign identities, stopped fans and unavailable control objects immediately.
+- Distinguish startup refusal before fan commands from unconfirmed restoration;
+  retain firmware ownership labels when startup explicitly never acquired control.
+  Diagnostics now identify missing control/tachometer counts and exhausted retries.
+- Preserve the original startup failure in the activation wizard when explicit
+  status confirms that no control commands were sent; retain restoration gates.
+
+- Add bounded airflow assistance from sustained temperature rises and confirmed
+  stops of previously running firmware-owned case fans under thermal load.
+  Keep the existing temperature curves, full-airflow safeguards and slow decline.
+- Show all headers as SYS numbers, distinguish firmware/unknown ownership in every
+  controller state, and warn when a previously running fan tachometer disappears.
+- Include observed case-fan readings and base/policy demand in controller diagnostics.
+- Verify primary fan-output mode bits before takeover and after restoration;
+  refuse unsupported or unreadable modes instead of trusting duty readback alone.
+- Keep SYS4 and pump channels under firmware ownership regardless of instantaneous
+  pump duty: LHM's secondary-controller switch affects their shared EC mode.
+- Pause sensor access and restore owned fans when a known competing hardware tool
+  appears; require restart after resolving the conflict. Copy diagnostics uses the
+  sensor owner's cached inventory instead of opening another hardware monitor.
+- Remove the CPU fan `ref` suffix and show an independently colored percentage
+  beside each CPU/case fan: measured channel duty first, verified RPM reference
+  otherwise. Retain `~` for estimates and show `--%` when unavailable.
+- Match motherboard duty by exact chip/channel identifiers; reject ambiguous
+  controls and clear percentages with stale sensor data. Orange from 80% and red
+  from 95% describe fan speed, without changing thermal alerts or fan commands.
+- Reduce unused width and wrap warnings within the content width; retain scaling,
+  scrolling and readable layouts at higher DPI. Shorten the firmware marker to FW.
+
 ## 1.2.0-rc.2 — 2026-09-06
 
 - Keep SYS1/SYS2 automatic cooling available when the separate pump controller
