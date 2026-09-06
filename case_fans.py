@@ -27,6 +27,8 @@ CHANNELS = {
     TARGETS[1]: ("/lpc/it8688e/0", 2),
     TARGETS[2]: ("/lpc/it8792e/0", 2),
 }
+MOTHERBOARD_REDISCOVERY_INTERVAL = 10.0
+MOTHERBOARD_REDISCOVERY_LIMIT = 5
 
 
 def open_status_file(path):
@@ -280,14 +282,22 @@ def select_controls(computer):
     return selected
 
 
-def wait_for_controls(computer, read_sensors, stop, owner, heartbeat, status_path, shared=False, timeout=60.0):
-    """Wait for complete input on the same Computer before sending any commands."""
+def wait_for_controls(computer, read_sensors, stop, owner, heartbeat, status_path,
+                      shared=False, timeout=60.0, discovery=None):
+    """Wait before takeover; rebuild only a positively empty motherboard topology."""
+    discovery = {} if discovery is None else discovery
+    discovery.update(motherboard_reopens=0, controller_ids=[])
+    last_reopen_elapsed = 0.0
+
     def check():
         if stop.is_set() or not owner.is_running() or time.monotonic() - heartbeat[0] > 15:
             raise StartupCancelled("Overlay owner stopped during case fan readiness")
         require_hardware_access()
 
     def probe():
+        boards = [hw for hw in computer.Hardware if str(hw.HardwareType) == "Motherboard"]
+        discovery['controller_ids'] = [str(getattr(sub, 'Identifier', ''))
+                                       for board in boards for sub in board.SubHardware]
         data = read_sensors(computer)
         selected = select_controls(computer)
         if shared:
@@ -303,9 +313,36 @@ def wait_for_controls(computer, read_sensors, stop, owner, heartbeat, status_pat
         return selected
 
     def waiting(reason, elapsed, remaining, attempt):
+        nonlocal last_reopen_elapsed
+        deadline = time.monotonic() + remaining
         write_status(status_path, "checking", phase="waiting", control_attempted=False,
                      baseline=[], controlled_channels=[], firmware_channels=[],
-                     discovery_attempt=attempt, reason=str(reason), remaining_seconds=remaining)
+                     discovery_attempt=attempt, reason=str(reason), remaining_seconds=remaining,
+                     discovery=dict(discovery))
+        if (elapsed - last_reopen_elapsed < MOTHERBOARD_REDISCOVERY_INTERVAL
+                or discovery['motherboard_reopens'] >= MOTHERBOARD_REDISCOVERY_LIMIT):
+            return
+        boards = [hw for hw in computer.Hardware if str(hw.HardwareType) == "Motherboard"]
+        board = getattr(boards[0], '__implementation__', boards[0]) if len(boards) == 1 else None
+        if (board is None or str(getattr(board, 'Model', '')) != 'B550_AORUS_PRO_AC'
+                or list(boards[0].SubHardware)):
+            return
+        # LHM 0.9.5 LpcIO gives up after a 100 ms ISA-mutex wait; Update never
+        # rebuilds that empty list. Recreate only this empty group, retaining CPU,
+        # GPU, the Computer and its preloaded (not software-mode) fan settings.
+        # No existing controller is closed and no fan session exists at this point.
+        def guard_reopen():
+            check()
+            if time.monotonic() >= deadline:
+                raise StartupNotReady('Startup readiness timed out during motherboard rediscovery')
+
+        guard_reopen()
+        discovery['motherboard_reopens'] += 1
+        last_reopen_elapsed = elapsed
+        computer.IsMotherboardEnabled = False
+        guard_reopen()
+        computer.IsMotherboardEnabled = True
+        guard_reopen()
 
     return wait_for_readiness(probe, stop, check, waiting, timeout=timeout)
 
@@ -503,10 +540,12 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False):
     initial_fan_mode = None
     control_attempted = False
     shared_session = None
+    discovery = {}
     try:
         require_hardware_access()
         computer.Open()
-        selected = wait_for_controls(computer, overlay.read_sensors, stop, owner, heartbeat, status_path, shared=shared)
+        selected = wait_for_controls(computer, overlay.read_sensors, stop, owner, heartbeat, status_path,
+                                     shared=shared, discovery=discovery)
         mode = read_primary_fan_mode(computer)
         # LHM saves this whole register as a bool but restores individual bits.
         # Require both selected outputs already enabled to preserve their modes.
@@ -573,6 +612,7 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False):
             if command != session.last_command:
                 session.apply(command)
             write_status(status_path, "active" if commissioned else "checking",
+                         discovery=dict(discovery),
                          command_pct=command, demand_pct=demand, reason=reason, fans=readings, baseline=baseline,
                          controlled_channels=controlled_channels, firmware_channels=firmware_channels,
                          unused_channels=[SHARED_NAMES[2]] if shared else [],
@@ -622,6 +662,7 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False):
             except Exception as exc:
                 restore_errors.append(f'Shared bridge close: {exc}')
         write_status(status_path, "error" if error or restore_errors else "stopped",
+                     discovery=dict(discovery),
                      reason=error or ("Restore unconfirmed: restart Windows" if restore_errors else
                                       "Returned to firmware control" if control_attempted else "Stopped before case fan takeover"),
                      restore_errors=restore_errors, baseline=baseline,

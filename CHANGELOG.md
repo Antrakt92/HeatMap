@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.2.0-rc.6 — 2026-09-06
+
+- Recover an empty motherboard-controller inventory at startup. The pinned LHM
+  can miss discovery while its ISA bus mutex is busy; polling readings alone
+  never rebuilds that inventory. Re-enumerate only the empty supported motherboard
+  group, at most five times ten seconds apart within the existing 60-second budget.
+- Keep CPU/GPU instances, preloaded fan settings and all takeover checks. Never
+  reopen an existing controller or retry identity, conflict or native failures.
+  Check cancellation, owner, heartbeat and deadline between close and reopen.
+- Include controller inventory and rediscovery count in waiting, active and
+  terminal diagnostics. Add regressions for boot recovery, bounded failure,
+  invalid rediscovered hardware and cancellation during native operations.
+- Remain a prerelease pending physical reboot/login and extended hardware checks.
+
 ## 1.2.0-rc.5 — 2026-09-06
 
 - Start at Windows login without the fixed 30-second task delay. Keep ordinary
