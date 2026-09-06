@@ -67,7 +67,7 @@ class FanModeWorkerTests(unittest.TestCase):
             primary.trace.attach_mock(method, label)
         owner = mock.Mock()
         owner.create_time.return_value = 1
-        owner.is_running.side_effect = [True, True, True, False]
+        owner.is_running.side_effect = lambda: not controls[0].SetSoftware.called
         modules = {"clr": mock.Mock(), "LibreHardwareMonitor": mock.Mock(),
                    "LibreHardwareMonitor.Hardware": NS(Computer=lambda: computer)}
         with (mock.patch.dict("sys.modules", modules),

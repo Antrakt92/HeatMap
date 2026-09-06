@@ -157,6 +157,7 @@ class SharedFanSession:
     def apply(self, percent):
         if finite(percent, 60, 100) is None or self.baseline is None or self.restored:
             raise ValueError('Shared fan command requires a prepared session and 60..100%')
+        value = round(percent * 255 / 100)
         with self.bus():
             if not self.touched:
                 if self.bridge.read_mode() != 1:
@@ -173,13 +174,12 @@ class SharedFanSession:
                 # Prime duty before clearing automatic bits; never issue a zero
                 # command from the LHM Control object's initial SoftwareValue.
                 for register in PWM_REGISTERS:
-                    self.backend.write(register, 255)
+                    self.backend.write(register, 255 if register == 0x6B else value)
                 for register in (0x15, 0x16, 0x17):
                     self.backend.write(register, self.baseline[register] & 0x7F)
             elif self.bridge.read_mode() != 0:
                 raise RuntimeError('Shared fan ownership was lost')
             self._check_modes()
-            value = round(percent * 255 / 100)
             self.backend.write(0x63, value)  # SYS5
             self.backend.write(0x6B, 255)    # Unused SYS6; do not leave a stopped output.
             self.backend.write(0x73, value)  # SYS4

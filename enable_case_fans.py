@@ -70,6 +70,8 @@ def verify_worker(client, samples, duration=20):
             if status["state"] in ("error", "stopped", "off"):
                 raise RuntimeError(status.get("reason", "Controller stopped before verification"))
             if status["state"] == "active":
+                if full_rpm_reference(status.get("verified_full_rpm")) is None:
+                    raise RuntimeError("Case fan full-airflow verification evidence is missing or invalid")
                 stamp = finite(status.get("time"), 0, 1e12)
                 if stamp is None or (last_stamp is not None and stamp < last_stamp):
                     raise RuntimeError("Case fan verification timestamp is invalid or moved backward")
@@ -134,7 +136,7 @@ def main():
             if error:
                 raise RuntimeError(error)
             client = FanWorkerClient(overlay.APP_DIR, config.get("case_fan_full_rpm"),
-                                     shared=config.get('case_fans_shared_enabled', False))
+                                     shared=config.get('case_fans_shared_enabled', False), commission=True)
             report["restore"] = verify_worker(client, report["samples"])
             if Path(overlay.CONFIG_PATH).exists():
                 shutil.copy2(overlay.CONFIG_PATH, directory / f"config-before-fans-{time.time_ns()}.json")

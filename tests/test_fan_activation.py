@@ -3,11 +3,13 @@ from unittest import mock
 
 import enable_case_fans as activation
 
+FULL_RPM = {"System Fan #1": 1200, "System Fan #2": 1200}
+
 
 class ActivationTests(unittest.TestCase):
     def test_enable_requires_actual_samples_then_verified_restore(self):
         client = mock.Mock()
-        client.poll.side_effect = [dict(state="active", time=100, fans=[dict(rpm=1200)]), dict(state="stopped", restore_errors=[], restore_confirmed=True)]
+        client.poll.side_effect = [dict(state="active", time=100, verified_full_rpm=FULL_RPM, fans=[dict(rpm=1200)]), dict(state="stopped", restore_errors=[], restore_confirmed=True)]
         samples = []
         activation.verify_worker(client, samples, duration=0)
         self.assertEqual(len(samples), 1)
@@ -59,7 +61,7 @@ class ActivationTests(unittest.TestCase):
             if stopped[0]:
                 return dict(state='stopped', restore_confirmed=True, restore_errors=[])
             current[0] = next(snapshots, current[0])
-            return current[0]
+            return dict(current[0], verified_full_rpm=FULL_RPM)
 
         client.poll.side_effect = poll
         client.stop.side_effect = lambda: stopped.__setitem__(0, True)

@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.2.0-rc.7 — 2026-09-07
+
+- Leave a cool GPU on its saved driver curve, including Zero RPM. Intervene only
+  for GPU heat, preserve the original curve's cooling, and restore it after ten
+  seconds of fresh cool readings. Reserve the 15-second GPU full-airflow sweep
+  for explicit commissioning; reuse exact-profile case-fan calibration at startup.
+- Recover from external GPU fan-setting conflicts through an explicit OFF/ON.
+  Validate the GPU, journal and current settings; archive unknown external states
+  without overwriting them. Automatic starts retain the conflict gate. Include
+  expected and observed settings in diagnostics.
+- Recheck ownership after slow pre-write work, and cancellation after the final
+  native read. Apply the same safeguards before interrupted-session recovery.
+  Preserve external edits and pending journals if recovery is cancelled.
+- Prevent repeated GPU metrics from reducing fan commands or counting toward
+  cooling hold time. Keep missing-sensor and frozen-metrics safeguards.
+- Unload the installed ADLX library after termination, matching AMD's helper
+  lifecycle. Invalidate released interfaces even on native errors, preventing
+  double release. Three successive read-only open/close cycles passed on this PC.
+- Require fresh full-airflow evidence in commissioning tools. Retain original
+  startup errors when explicit no-command evidence proves no restoration is due.
+- Remain a prerelease pending physical reboot/login, prolonged gaming/noise and
+  Explorer/multi-monitor acceptance. No drivers, DLL versions or CPU tuning changed.
+
 ## 1.2.0-rc.6 — 2026-09-06
 
 - Recover an empty motherboard-controller inventory at startup. The pinned LHM

@@ -21,6 +21,7 @@ def verify(client, samples, duration=8):
         raise ValueError('Verification duration must be finite and between 0 and 3600 seconds')
     client.start()
     active_since = None
+    first_report = None
     last_report = None
     failure = None
     try:
@@ -30,18 +31,21 @@ def verify(client, samples, duration=8):
             if status['state'] in ('error', 'stopped', 'off'):
                 raise RuntimeError(status.get('reason', 'GPU fan controller stopped'))
             if status['state'] == 'active':
-                stamp = status.get('time')
-                if type(stamp) not in (int, float) or not 0 < stamp < float('inf'):
-                    raise RuntimeError('GPU verification report has no valid timestamp')
+                if finite(status.get('verified_full_rpm'), 2500, 10000) is None:
+                    raise RuntimeError('GPU full-airflow verification evidence is missing or invalid')
+                stamp = finite(status.get('time'), 0, 1e12)
+                if stamp is None or (last_report is not None and stamp < last_report):
+                    raise RuntimeError('GPU verification timestamp is invalid or moved backward')
                 if last_report is None or stamp > last_report:
                     samples.append(status)
                     last_report = stamp
                     if active_since is None:
-                        active_since = time.monotonic()
-                    elif time.monotonic() - active_since >= duration:
+                        active_since, first_report = time.monotonic(), stamp
+                    if (time.monotonic() - active_since >= duration
+                            and stamp - first_report >= duration):
                         break
             else:
-                active_since = None
+                active_since = first_report = None
             time.sleep(2)
         else:
             raise RuntimeError('GPU fan verification timed out')
@@ -86,7 +90,7 @@ def main():
             backup = directory / f'config-before-{time.time_ns()}.json'
             backup.write_text(json.dumps(config, indent=2), encoding='utf-8')
             report['config_backup'] = str(backup)
-        client = GpuWorkerClient(str(ROOT))
+        client = GpuWorkerClient(str(ROOT), commission=True)
         report['restore'] = verify(client, report['samples'])
         report['state'] = 'commissioned_and_restored'
         if args.enable:

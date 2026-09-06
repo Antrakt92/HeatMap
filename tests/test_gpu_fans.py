@@ -63,16 +63,16 @@ class GpuPolicyTests(unittest.TestCase):
             self.assertEqual(commands[0], 30)
 
     def test_ramp_rises_immediately_and_restarts_cooling_hold(self):
-        ramp = GpuRamp()
+        ramp = GpuRamp(initial=100)
         self.assertEqual(ramp.update(30, 0), 100)
         self.assertEqual(ramp.update(30, 9), 100)
-        self.assertEqual(ramp.update(30, 11), 96)
+        self.assertEqual(ramp.update(30, 11), 98)
         self.assertEqual(ramp.update(100, 12), 100)
         self.assertEqual(ramp.update(30, 13), 100)
         self.assertEqual(ramp.update(30, 22), 100)
 
     def test_long_pause_cannot_drop_speed_abruptly(self):
-        ramp = GpuRamp()
+        ramp = GpuRamp(initial=100)
         ramp.update(30, 0)
         self.assertEqual(ramp.update(30, 1000), 96)
         self.assertEqual(ramp.update(30, 1), 100)
@@ -250,15 +250,16 @@ class AdlxLifetimeTests(unittest.TestCase):
         adapter.system = Mock()
         adapter.dll = Mock()
         adapter.dll.ADLXTerminate.return_value = 0
+        dll = adapter.dll
         with self.assertRaisesRegex(AdlxError, 'release failed'):
             adapter.close()
         first.close.assert_called_once()
-        adapter.dll.ADLXTerminate.assert_called_once()
+        dll.ADLXTerminate.assert_called_once()
         self.assertIsNone(adapter.system)
         adapter.close()
         first.close.assert_called_once()
         last.close.assert_called_once()
-        adapter.dll.ADLXTerminate.assert_called_once()
+        dll.ADLXTerminate.assert_called_once()
 
 
 class GpuClientTests(unittest.TestCase):
@@ -345,7 +346,7 @@ class GpuWorkerTests(unittest.TestCase):
                 simulated_heartbeat = Mock()
                 simulated_heartbeat.expired.return_value = False
                 stack.enter_context(patch.object(gpu_fans, 'OwnerHeartbeat', return_value=simulated_heartbeat))
-            result = gpu_fans.worker(str(Path(directory) / 'status.json'), 1, 1)
+            result = gpu_fans.worker(str(Path(directory) / 'status.json'), 1, 1, commission=True)
         self.assertEqual(adapter.snapshot(), baseline)
         self.assertTrue(reports[-1]['restore_confirmed'])
         self.assertFalse(reports[-1]['restore_errors'])
@@ -405,7 +406,8 @@ class GpuCommissionTests(unittest.TestCase):
         stopped = [False]
         client.stop.side_effect = lambda: stopped.__setitem__(0, True)
         client.poll.side_effect = lambda: ({'state': 'stopped', 'restore_confirmed': True}
-            if stopped[0] else {'state': 'active', 'time': 100 if repeated else 100 + now[0]})
+            if stopped[0] else {'state': 'active', 'time': 100 if repeated else 100 + now[0],
+                               'verified_full_rpm': 3400})
         with patch('tools.commission_gpu_fans.time.monotonic', side_effect=lambda: now[0]), \
                 patch('tools.commission_gpu_fans.time.sleep', side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds)):
             result = verify(client, [])

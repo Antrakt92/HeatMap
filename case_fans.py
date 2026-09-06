@@ -90,13 +90,14 @@ def replace_status_file(temporary, path):
 
 class FanWorkerClient:
     """UI-side heartbeat and status; all hardware ownership stays in the child."""
-    def __init__(self, app_dir, full_rpm=None, shared=False):
+    def __init__(self, app_dir, full_rpm=None, shared=False, commission=False):
         self.app_dir = app_dir
         self.process = None
         self.status_path = None
         self.error = None
         self.full_rpm = full_rpm_reference(full_rpm)
         self.shared = shared is True
+        self.commission = commission is True
         self.worker_pid = None
         self.last_status = None
 
@@ -115,7 +116,8 @@ class FanWorkerClient:
                 [sys.executable, os.path.join(self.app_dir, "case_fans.py"),
                  "--status", self.status_path, "--owner-pid", str(os.getpid()),
                  "--owner-created", str(psutil.Process().create_time()),
-                 "--full-rpm", json.dumps(self.full_rpm)] + (["--shared"] if self.shared else []),
+                 "--full-rpm", json.dumps(self.full_rpm)] + (["--shared"] if self.shared else [])
+                + (["--commission"] if self.commission else []),
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 text=True, bufsize=1, creationflags=subprocess.CREATE_NO_WINDOW,
                 cwd=self.app_dir,
@@ -355,6 +357,15 @@ def full_rpm_reference(value):
     return dict(value)
 
 
+def commissioned_rpm_reference(value, shared=False):
+    """Reuse calibration only when it covers this exact connected-fan profile."""
+    reference = full_rpm_reference(value)
+    expected = set(ALL_TARGETS[:-1] if shared else INDEPENDENT_TARGETS)
+    if reference is None or set(reference) != expected:
+        return None
+    return reference
+
+
 def parse_primary_fan_mode(report):
     """Read register 0x13 from the pinned IT8688E public diagnostic format."""
     if not isinstance(report, str):
@@ -499,7 +510,7 @@ def write_status(path, state, **details):
             time.sleep(delays[attempt])
 
 
-def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False):
+def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, commission=False):
     import overlay
     if not overlay._is_admin():
         raise RuntimeError("Administrator sensor access is required; no elevation is launched automatically")
@@ -541,6 +552,15 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False):
     control_attempted = False
     shared_session = None
     discovery = {}
+
+    def check_before_command():
+        if stop.is_set() or not owner.is_running() or time.monotonic() - heartbeat[0] > 15:
+            raise StartupCancelled("Overlay owner stopped before case fan command")
+        require_hardware_access()
+        # Process inspection may block; recheck the owner after the guard too.
+        if stop.is_set() or not owner.is_running() or time.monotonic() - heartbeat[0] > 15:
+            raise StartupCancelled("Overlay owner stopped before case fan command")
+
     try:
         require_hardware_access()
         computer.Open()
@@ -560,14 +580,18 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False):
         baseline = session.readings()
         if stop.is_set() or not owner.is_running() or time.monotonic() - heartbeat[0] > 15:
             raise StartupCancelled("Overlay owner stopped before case fan activation")
-        ramp = FanRamp()
+        commissioned = not commission and commissioned_rpm_reference(full_rpm, shared) is not None
+        ramp = None if commissioned else FanRamp()
         airflow = CaseAirflowPolicy()
-        require_hardware_access()
-        control_attempted = True
-        session.apply(100)
+        if not commissioned:
+            # A new/changed profile still needs the full-speed response test.
+            # Repeated launches of a commissioned profile verify normal command
+            # feedback below instead of repeating a noisy calibration sweep.
+            check_before_command()
+            control_attempted = True
+            session.apply(100)
         started = time.monotonic()
         stall_since = {}
-        commissioned = False
         verified_full_rpm = None
         while not stop.is_set() and owner.is_running():
             now = time.monotonic()
@@ -598,20 +622,27 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False):
                 else:
                     stall_since.pop(fan["name"], None)
             # Full-airflow startup verifies readable command feedback before ramping down.
-            if now - started < 15:
+            if not commissioned and now - started < 15:
                 demand, reason = 100, "Checking full airflow"
             elif not commissioned:
                 verify_full_airflow(baseline, readings, full_rpm)
                 verified_full_rpm = {fan["name"]: fan["rpm"] for fan in readings if fan['name'] != SHARED_NAMES[2]}
                 commissioned = True
-            if commissioned and any(fan["control_pct"] is None or abs(fan["control_pct"] -
+            command_feedback_verified = commissioned and session.last_command is not None
+            if command_feedback_verified and any(fan["control_pct"] is None or abs(fan["control_pct"] -
                                      (100 if shared and fan['name'] == SHARED_NAMES[2] else session.last_command)) > 3
                      for fan in readings):
                 raise RuntimeError("Fan command readback differs; possible firmware/controller conflict")
+            if ramp is None:
+                # Initialize from the first current sample, without inheriting
+                # FanRamp's fail-safe 100% startup hold on a calibrated profile.
+                ramp = FanRamp(value=demand)
             command = ramp.update(demand, now)
             if command != session.last_command:
+                check_before_command()
+                control_attempted = True
                 session.apply(command)
-            write_status(status_path, "active" if commissioned else "checking",
+            write_status(status_path, "active" if command_feedback_verified else "checking",
                          discovery=dict(discovery),
                          command_pct=command, demand_pct=demand, reason=reason, fans=readings, baseline=baseline,
                          controlled_channels=controlled_channels, firmware_channels=firmware_channels,
@@ -626,7 +657,7 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False):
                              "cpu_temp", "gpu_core_temp", "gpu_hotspot_temp", "gpu_memory_temp")})
             stop.wait(2)
     except StartupCancelled:
-        pass  # Ordinary shutdown before takeover is not a controller failure.
+        pass  # Ordinary owner shutdown is not a controller failure.
     except Exception as exc:
         error = str(exc)
     finally:
@@ -679,10 +710,11 @@ def main():
     parser.add_argument("--owner-created", required=True, type=float)
     parser.add_argument("--full-rpm", type=json.loads, default=None)
     parser.add_argument("--shared", action="store_true", help="Use the commissioned four-fan shared-controller profile")
+    parser.add_argument("--commission", action="store_true", help="Explicitly repeat full-airflow response calibration")
     args = parser.parse_args()
     try:
         with WorkerMutex():
-            return worker(args.status, args.owner_pid, args.owner_created, args.full_rpm, args.shared)
+            return worker(args.status, args.owner_pid, args.owner_created, args.full_rpm, args.shared, args.commission)
     except Exception as exc:
         write_status(args.status, "error", reason=str(exc))
         return 1

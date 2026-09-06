@@ -71,7 +71,7 @@ class FanScopeTests(unittest.TestCase):
                             sensor.Value = 82 if "#5" in sensor.Name else 81
                 owner = mock.Mock()
                 owner.create_time.return_value = 1
-                owner.is_running.side_effect = [True, True, True, True, False] if failure == "owner" else None
+                owner.is_running.side_effect = (lambda: not controls[0].SetSoftware.called) if failure == "owner" else None
                 owner.is_running.return_value = True
                 modules = {"clr": mock.Mock(), "LibreHardwareMonitor": mock.Mock(),
                            "LibreHardwareMonitor.Hardware": NS(Computer=lambda: computer)}

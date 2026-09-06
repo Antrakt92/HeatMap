@@ -275,7 +275,8 @@ class CaseFanTests(unittest.TestCase):
             computer, controls = fixture()
             owner = mock.Mock()
             owner.create_time.return_value = 1
-            owner.is_running.side_effect = [True, True, True, True, False] if not failure else None
+            # Owner dies after takeover, independent of how often safety guards run.
+            owner.is_running.side_effect = (lambda: not controls[0].SetSoftware.called) if not failure else None
             owner.is_running.return_value = True
             modules = {"clr": mock.Mock(), "LibreHardwareMonitor": mock.Mock(),
                        "LibreHardwareMonitor.Hardware": NS(Computer=lambda: computer)}

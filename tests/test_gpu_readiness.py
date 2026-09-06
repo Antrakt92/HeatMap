@@ -103,11 +103,12 @@ class GpuReadinessTests(unittest.TestCase):
             result = gpu_fans.worker(str(Path(directory) / 'status.json'), 1, 1)
         return result, adapter, reports, journal, reads, created
 
-    def test_complete_fresh_metrics_precede_recovery_and_first_write(self):
+    def test_complete_fresh_metrics_precede_recovery_and_cold_standby(self):
         result, adapter, reports, journal, reads, created = self.run_startup('missing')
         self.assertEqual(result, 0)
         self.assertEqual(created, [0])
-        self.assertTrue(adapter.writes)
+        self.assertEqual(adapter.writes, [])
+        self.assertTrue(any(report['state'] == 'standby' for report in reports))
         self.assertEqual([stamp for stamp, strict in reads if strict], [0, 1, 2, 3, 4, 5])
         journal.recover.assert_called_once()
         adapter.close.assert_called_once()

@@ -18,7 +18,10 @@ class ReadinessCommissionTests(unittest.TestCase):
                 def poll():
                     if stopped[0]:
                         return dict(state='stopped', restore_confirmed=True, restore_errors=[])
-                    return dict(state='checking') if now[0] < 76 else dict(state='active', time=100 + now[0])
+                    evidence = (3400 if module is commission_gpu_fans else
+                                {'System Fan #1': 1200, 'System Fan #2': 1200})
+                    return dict(state='checking') if now[0] < 76 else dict(
+                        state='active', time=100 + now[0], verified_full_rpm=evidence)
 
                 client.poll.side_effect = poll
                 with (mock.patch.object(module.time, 'monotonic', side_effect=lambda: now[0]),

@@ -15,6 +15,11 @@ I = c.c_int
 B = c.c_uint8
 
 
+def free_library(handle):
+    from _ctypes import FreeLibrary
+    FreeLibrary(handle)
+
+
 class AdlxError(RuntimeError):
     def __init__(self, message, result=None):
         super().__init__(message)
@@ -66,8 +71,11 @@ class Interface:
 
     def close(self):
         if self.pointer:
-            self.call(1, result=c.c_long)
-            self.pointer = P()
+            try:
+                self.call(1, result=c.c_long)
+            finally:
+                # A failing native Release may already have freed the reference.
+                self.pointer = P()
 
     def __enter__(self):
         return self
@@ -80,6 +88,7 @@ class AmdGpuFan:
     """Construction and reads never change fan settings; mutations are explicit."""
     def __init__(self):
         self.dll = None
+        self.dll_handle = None
         self.system = None
         self.owned = []
         self.initialized = False
@@ -94,6 +103,7 @@ class AmdGpuFan:
             if not 0 < count < len(directory):
                 raise AdlxError('Cannot locate the Windows driver directory')
             self.dll = c.CDLL(os.path.join(directory.value, 'amdadlx64.dll'))
+            self.dll_handle = self.dll._handle
             self.dll.ADLXInitialize.argtypes = (c.c_uint64, c.POINTER(P))
             self.dll.ADLXInitialize.restype = I
             self.dll.ADLXTerminate.argtypes = ()
@@ -218,6 +228,17 @@ class AmdGpuFan:
                 check(self.dll.ADLXTerminate(), 'ADLXTerminate')
             except Exception as exc:
                 errors.append(str(exc))
+        # Match AMD's helper lifecycle: Terminate followed by FreeLibrary.
+        # ctypes does not unload a CDLL when its Python object is discarded.
+        # Keeping the terminated runtime loaded broke subsequent initialization.
+        handle = getattr(self, 'dll_handle', None)
+        self.dll_handle = None
+        self.dll = None
+        if handle is not None:
+            try:
+                free_library(handle)
+            except OSError as exc:
+                errors.append(f'ADLX library unload: {exc}')
         if errors:
             raise AdlxError('; '.join(errors))
 

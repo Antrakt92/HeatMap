@@ -34,7 +34,7 @@ from case_fans import FanWorkerClient, full_rpm_reference
 from gpu_fans import GpuWorkerClient, mode_text as gpu_fan_mode_text
 from hardware_access_guard import HardwareAccessConflict, require_hardware_access
 
-VERSION = "1.2.0-rc.6"
+VERSION = "1.2.0-rc.7"
 
 
 # --- Paths ---
@@ -3589,7 +3589,7 @@ class OverlayApp:
                 if not reason and process is not None and process.poll() is None and process.stdin.closed:
                     reason = "GPU fans: waiting for saved curve restoration"
                 if not reason:
-                    self.gpu_fan_worker.start()
+                    self.gpu_fan_worker.start(accept_external=True)
             if reason:
                 self._set_health_panel([reason], 2)
                 return

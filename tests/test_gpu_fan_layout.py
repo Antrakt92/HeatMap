@@ -5,6 +5,20 @@ from test_ui_layout import TkTestCase, layout_app
 
 
 class GpuFanLayoutTests(TkTestCase):
+    def test_idle_driver_ownership_is_visible_and_preserved_when_sensors_fail(self):
+        with layout_app() as app:
+            app.gpu_fan_worker = Mock()
+            app.gpu_fan_worker.poll.return_value = dict(state='standby', thermal_ready=True,
+                                                      reason='GPU cool; saved driver curve controls fans')
+            app.update_ui()
+            label = app.rows['gpu_fan_control']
+            self.assertIn('Driver', label.cget('text'))
+            self.assertNotIn('100%', label.cget('text'))
+            self.assertNotIn('ERROR', label.cget('text'))
+            before = label.cget('text')
+            app._show_sensor_error()
+            self.assertEqual(label.cget('text'), before)
+
     def test_gpu_startup_failure_is_visible_before_first_sensor_sample(self):
         with layout_app() as app:
             app.sensor_data = {}

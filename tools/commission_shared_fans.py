@@ -42,7 +42,7 @@ def main():
         backup = directory / f'config-before-{time.time_ns()}.json'
         backup.write_text(json.dumps(config, indent=2), encoding='utf-8')
         result['config_backup'] = str(backup)
-        client = FanWorkerClient(str(ROOT), config.get('case_fan_full_rpm'), shared=True)
+        client = FanWorkerClient(str(ROOT), config.get('case_fan_full_rpm'), shared=True, commission=True)
         result['restore'] = verify_worker(client, result['samples'], duration=6)
         result['state'] = 'commissioned_and_restored'
         if args.enable:
