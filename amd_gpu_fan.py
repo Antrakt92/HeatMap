@@ -8,13 +8,17 @@ import ctypes as c
 import os
 from contextlib import contextmanager
 
+from startup_readiness import StartupNotReady
+
 P = c.c_void_p
 I = c.c_int
 B = c.c_uint8
 
 
 class AdlxError(RuntimeError):
-    pass
+    def __init__(self, message, result=None):
+        super().__init__(message)
+        self.result = result
 
 
 class IntRange(c.Structure):
@@ -23,7 +27,14 @@ class IntRange(c.Structure):
 
 def check(result, operation):
     if result != 0:
-        raise AdlxError(f'{operation}: ADLX error {result}')
+        raise AdlxError(f'{operation}: ADLX error {result}', result=result)
+
+
+def require_single_gpu(count):
+    if count == 0:
+        raise StartupNotReady('Waiting for AMD GPU enumeration')
+    if count != 1:
+        raise AdlxError('GPU fan profile requires exactly one AMD GPU')
 
 
 class Interface:
@@ -93,8 +104,7 @@ class AmdGpuFan:
             self.initialized = True
             self.system = Interface(pointer)  # IADLXSystem is not reference-counted.
             with self.system.child(1) as gpus:
-                if gpus.call(3, result=c.c_uint) != 1:
-                    raise AdlxError('GPU fan profile requires exactly one AMD GPU')
+                require_single_gpu(gpus.call(3, result=c.c_uint))
                 self.gpu = self.keep(gpus.child(11, (c.c_uint,), (0,)))
             self.identity = {key: self.gpu.get(slot, c.c_char_p).decode('utf-8') for key, slot in (
                 ('name', 7), ('vendor', 3), ('device', 14), ('subsystem', 16), ('subvendor', 17))}
@@ -120,6 +130,8 @@ class AmdGpuFan:
             try:
                 self.close()
             except Exception as cleanup_error:
+                if isinstance(exc, StartupNotReady):
+                    raise AdlxError(f'ADLX startup cleanup failed: {cleanup_error}') from exc
                 add_note = getattr(exc, 'add_note', None)
                 if callable(add_note):
                     add_note(f'ADLX initialization cleanup: {cleanup_error}')
@@ -162,7 +174,17 @@ class AmdGpuFan:
     def set_zero_rpm(self, enabled):
         check(self.fan.call(10, (B,), (bool(enabled),)), 'Set Zero RPM')
 
-    def readings(self):
+    def readings(self, strict=False):
+        try:
+            return self._readings(strict)
+        except AdlxError as exc:
+            # SDK ADLXDefines.h: 13 = operation in progress, 14 = GPU inactive.
+            # This classification is restricted to pre-takeover, read-only probes.
+            if strict and exc.result in (13, 14):
+                raise StartupNotReady('Waiting for AMD GPU metrics') from exc
+            raise
+
+    def _readings(self, strict):
         with self.metrics_service.child(18, (P,), (self.gpu.pointer,)) as base:
             with base.query('IADLXGPUMetrics1') as metrics:
                 values = {}
@@ -173,6 +195,8 @@ class AmdGpuFan:
                     try:
                         values[key] = metrics.get(slot, kind)
                     except AdlxError:
+                        if strict:
+                            raise
                         values[key] = None
                 values['timestamp_ms'] = metrics.get(3, c.c_int64)
                 return values

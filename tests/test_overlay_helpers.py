@@ -669,6 +669,8 @@ class OverlayHelperTests(unittest.TestCase):
     def test_enable_autostart_replaces_legacy_task_fail_closed(self):
         user_id = r"DESKTOP\Dima"
         legacy = overlay.AutostartTaskDefinition(
+            principal_count=1,
+            principal_user_id=user_id,
             run_level="HighestAvailable",
             command=r'"C:\Python313\pythonw.exe"',
             arguments=r'"C:\HeatMap\overlay.py"',

@@ -211,7 +211,7 @@ class CaseFanTests(unittest.TestCase):
                 owner = mock.Mock()
                 owner.create_time.return_value = 1
                 owner.is_running.return_value = True
-                completed_checks = {"before_open": 0, "before_write": 1, "midrun": 2}[phase]
+                completed_checks = {"before_open": 0, "before_write": 3, "midrun": 4}[phase]
                 message = "Other hardware monitoring tools are running: hwinfo64.exe. Restart HeatMap."
                 checks = [None] * completed_checks + [HardwareAccessConflict(message)]
                 modules = {"clr": mock.Mock(), "LibreHardwareMonitor": mock.Mock(),
@@ -224,7 +224,8 @@ class CaseFanTests(unittest.TestCase):
                     mock.patch.object(fans.psutil, "Process", return_value=owner),
                     mock.patch.object(fans.threading, "Thread"),
                     mock.patch.object(fans, "require_hardware_access", side_effect=checks) as guard,
-                    mock.patch.object(overlay, "read_sensors", return_value={}) as read,
+                    mock.patch.object(overlay, "read_sensors", return_value=dict(
+                        cpu_temp=50, gpu_core_temp=45, gpu_hotspot_temp=60, gpu_memory_temp=60)) as read,
                     mock.patch.object(fans, "write_status") as publish,
                 ):
                     self.assertEqual(fans.worker("unused-mocked.json", 7, 1), 1)
@@ -274,7 +275,8 @@ class CaseFanTests(unittest.TestCase):
             computer, controls = fixture()
             owner = mock.Mock()
             owner.create_time.return_value = 1
-            owner.is_running.side_effect = [True, True, False] if not failure else [True, True, True]
+            owner.is_running.side_effect = [True, True, True, True, False] if not failure else None
+            owner.is_running.return_value = True
             modules = {"clr": mock.Mock(), "LibreHardwareMonitor": mock.Mock(),
                        "LibreHardwareMonitor.Hardware": NS(Computer=lambda: computer)}
             write_status = fans.write_status
@@ -290,7 +292,9 @@ class CaseFanTests(unittest.TestCase):
                  mock.patch.object(fans.psutil, "Process", return_value=owner), \
                  mock.patch.object(fans.threading, "Thread"), \
                  mock.patch.object(fans, "write_status", side_effect=publish), \
-                 mock.patch.object(overlay, "read_sensors", side_effect=[{}, RuntimeError("read failed")] if failure == "read" else [{}, {}]):
+                 mock.patch.object(overlay, "read_sensors", side_effect=[
+                     dict(cpu_temp=50, gpu_core_temp=45, gpu_hotspot_temp=60, gpu_memory_temp=60),
+                     RuntimeError("read failed") if failure == "read" else {}]):
                 path = os.path.join(directory, "status.json")
                 result = fans.worker(path, 7, 1)
                 self.assertEqual(result, 1 if failure else 0)

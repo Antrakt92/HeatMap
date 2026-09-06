@@ -34,7 +34,7 @@ from case_fans import FanWorkerClient, full_rpm_reference
 from gpu_fans import GpuWorkerClient, mode_text as gpu_fan_mode_text
 from hardware_access_guard import HardwareAccessConflict, require_hardware_access
 
-VERSION = "1.2.0-rc.4"
+VERSION = "1.2.0-rc.5"
 
 
 # --- Paths ---
@@ -526,7 +526,7 @@ _CREATE_NO_WINDOW = 0x08000000
 AUTOSTART_TASK = "HWMonitorOverlay"
 AUTOSTART_SCHEMA_VERSION = "2"
 AUTOSTART_SOURCE = "HeatMap"
-AUTOSTART_DELAY = "PT30S"
+AUTOSTART_DELAY = "PT0S"
 AUTOSTART_EXECUTION_TIME_LIMIT = "PT0S"
 RUN_AS_ADMIN_PATH = os.path.join(APP_DIR, "run_as_admin.bat")
 # Legacy registry key — cleaned up when switching to Task Scheduler
@@ -920,7 +920,7 @@ def _classify_autostart_task(
             _normalized_identity(definition.trigger_user_id) == _normalized_identity(identity)
             for identity in accepted_trigger_user_ids
         )
-        and definition.trigger_delay == AUTOSTART_DELAY
+        and definition.trigger_delay in ("", "PT0S", "PT0M", "PT0H", "P0D", "PT0H0M0S", "P0DT0H0M0S")
         and definition.trigger_enabled.casefold() in ("", "true")
         and definition.multiple_instances_policy == "IgnoreNew"
         and definition.disallow_start_on_batteries.casefold() == "false"
@@ -1120,10 +1120,12 @@ def _register_autostart_xml(xml_bytes):
     return True, "task registered"
 
 
-def _remove_autostart_task_fail_closed():
+def _remove_autostart_task_fail_closed(*, expected_existing=None):
     existing, error = _query_autostart_task_definition()
     if error:
         return False, f"could not inspect task before removal: {error}"
+    if expected_existing is not None and existing != expected_existing:
+        return False, "autostart task changed before removal; no task was changed"
     if existing is None:
         return True, "task already absent"
     disabled, message = _disable_autostart_task()
@@ -1147,7 +1149,21 @@ def _remove_autostart_task_fail_closed():
     return True, "task disabled, deleted, and verified absent"
 
 
-def enable_autostart():
+def _autostart_owner_error(definition, user_id, accepted_identities):
+    if definition is None:
+        return None
+    if (definition.principal_count != 1
+            or _normalized_identity(definition.principal_user_id) != _normalized_identity(user_id)):
+        return "existing autostart task belongs to another or unverified Windows user"
+    if definition.trigger_user_id and not any(
+        _normalized_identity(definition.trigger_user_id) == _normalized_identity(identity)
+        for identity in accepted_identities
+    ):
+        return "existing autostart trigger belongs to another Windows user"
+    return None
+
+
+def enable_autostart(*, expected_existing=None):
     """Create a least-privilege task; run_as_admin.bat requests UAC interactively."""
     if "%" in APP_DIR:
         return False, "autostart is unavailable from a checkout path containing '%'"
@@ -1164,12 +1180,17 @@ def enable_autostart():
     )
     if classification == AUTOSTART_COLLISION:
         return False, f"Task {AUTOSTART_TASK} exists but is not owned by HeatMap"
+    owner_error = _autostart_owner_error(existing, user_id, accepted_identities)
+    if owner_error:
+        return False, owner_error
+    if expected_existing is not None and existing != expected_existing:
+        return False, "autostart task changed during migration; no task was changed"
     if classification == AUTOSTART_SAFE_CURRENT:
         return True, "Autostart already enabled"
 
     xml_bytes = _build_autostart_task_xml(user_id)
     if existing is not None:
-        deleted, message = _remove_autostart_task_fail_closed()
+        deleted, message = _remove_autostart_task_fail_closed(expected_existing=existing)
         if not deleted:
             return False, f"failed to remove unsafe/stale task: {message}"
 
@@ -1212,7 +1233,10 @@ def disable_autostart():
         )
         if classification == AUTOSTART_COLLISION:
             return False, f"Task {AUTOSTART_TASK} is not owned by HeatMap"
-        deleted, message = _remove_autostart_task_fail_closed()
+        owner_error = _autostart_owner_error(definition, user_id, accepted_identities)
+        if owner_error:
+            return False, owner_error
+        deleted, message = _remove_autostart_task_fail_closed(expected_existing=definition)
         if not deleted:
             return False, message
 
@@ -1232,7 +1256,7 @@ class AutostartReconcileResult:
 
 
 def reconcile_autostart_security():
-    """Fail-closed migration of legacy HighestAvailable HeatMap tasks."""
+    """Migrate enabled owned tasks while preserving absent/disabled preferences."""
     user_id, accepted_identities, identity_error = _resolve_autostart_identity()
     if identity_error:
         return AutostartReconcileResult(False, False, identity_error, None)
@@ -1247,7 +1271,12 @@ def reconcile_autostart_security():
     if classification == AUTOSTART_SAFE_CURRENT:
         return AutostartReconcileResult(False, True, "safe task already current", True)
     if classification in (AUTOSTART_LEGACY_UNSAFE, AUTOSTART_STALE_HEATMAP):
-        ok, message = enable_autostart()
+        owner_error = _autostart_owner_error(definition, user_id, accepted_identities)
+        if owner_error:
+            return AutostartReconcileResult(False, False, owner_error, None)
+        if definition.enabled.casefold() == "false" or definition.trigger_enabled.casefold() == "false":
+            return AutostartReconcileResult(False, True, "disabled autostart preference preserved", False)
+        ok, message = enable_autostart(expected_existing=definition)
         return AutostartReconcileResult(True, ok, message, True if ok else None)
     return AutostartReconcileResult(
         False, False, f"Task {AUTOSTART_TASK} name collision requires manual review", None
@@ -1257,7 +1286,7 @@ def reconcile_autostart_security():
 def _format_autostart_reconcile_error(changed, message):
     if changed:
         return (
-            "The old elevated autostart task could not be migrated and may be disabled.\n\n"
+            "The previous HeatMap autostart task could not be migrated and may be disabled.\n\n"
             f"{message}\n\nOpen HeatMap and toggle Autostart after resolving the error."
         )
     return (
@@ -2034,6 +2063,8 @@ def _case_fan_advice(status):
 
 def _case_fan_mode(status):
     state = status.get("state", "off")
+    if state == "checking" and status.get("phase") == "waiting":
+        return "Waiting sensors..."
     if state == "active":
         channels = status.get("controlled_channels", [])
         if not isinstance(channels, list) or any(not isinstance(name, str) for name in channels):
@@ -2616,8 +2647,11 @@ class OverlayApp:
         self._add_menu_item("topmost", "Always on top: OFF", self.toggle_topmost, menus["Display"])
         self._add_menu_item("peek", "Raise on edge: " + ("ON" if self.peek_enabled else "OFF"), self.toggle_peek, menus["Display"])
         self._add_menu_item("details", "Details: " + ("ON" if self.details_enabled else "OFF"), self.toggle_details, menus["Display"])
-        autostart_enabled = is_autostart_enabled() if autostart_result is None else autostart_result.enabled
-        self._add_menu_item("autostart", "Autostart: ERROR" if autostart_enabled is None else
+        autostart_enabled = None if autostart_result is None else autostart_result.enabled
+        self._autostart_pending = autostart_result is None or (autostart_result.ok and autostart_enabled is None)
+        self._autostart_warning = (autostart_result.message if autostart_result is not None and not autostart_result.ok else "")
+        self._add_menu_item("autostart", "Autostart: Checking..." if self._autostart_pending else
+                            "Autostart: ERROR" if autostart_enabled is None else
                             "Autostart: ON (UAC)" if autostart_enabled else "Autostart: OFF",
                             self.toggle_autostart, menus["Display"])
         self._add_menu_item("alerts", "Alerts: " + ("ON" if self.alerts_enabled else "OFF"), self.toggle_alerts, menus["Alerts & limits"])
@@ -3460,19 +3494,69 @@ class OverlayApp:
         self._cursor_was_at_peek_edge = False
         self._schedule_peek_poll()
 
+    def start_autostart_check(self):
+        """Run Scheduler inspection/migration without blocking window creation."""
+        if not self.running or getattr(self, "_autostart_thread", None) is not None:
+            return
+        self._autostart_pending = True
+        self._autostart_warning = ""
+        self._set_menu_label("autostart", "Autostart: Checking...")
+        self._autostart_results = queue.Queue(maxsize=1)
+        stop_event, results = self._stop_event, self._autostart_results
+
+        def worker():
+            # Once migration starts, complete its fail-closed transaction even if
+            # the window closes. The worker never touches Tk or shared UI state.
+            try:
+                if stop_event.is_set():
+                    return
+                result = (reconcile_autostart_security() if _is_admin() else
+                          AutostartReconcileResult(False, True, "Read-only autostart check", is_autostart_enabled()))
+            except Exception as exc:
+                log.exception("Autostart background check failed")
+                result = AutostartReconcileResult(False, False, str(exc), None)
+            results.put(result)
+
+        # A daemon thread could be killed between disabling and recreating a task.
+        self._autostart_thread = threading.Thread(target=worker, name="HeatMap-autostart", daemon=False)
+        try:
+            self._autostart_thread.start()
+        except RuntimeError as exc:
+            self._autostart_results.put(AutostartReconcileResult(False, False, str(exc), None))
+        self._poll_autostart_check()
+
+    def _poll_autostart_check(self):
+        if not self.running or not self._autostart_pending:
+            return
+        try:
+            result = self._autostart_results.get_nowait()
+        except queue.Empty:
+            self.root.after(100, self._poll_autostart_check)
+            return
+        self._autostart_pending = False
+        self._autostart_warning = "" if result.ok else f"Autostart: {result.message}"
+        if not result.ok:
+            log.error("%s", _format_autostart_reconcile_error(result.changed, result.message))
+        self._set_menu_label("autostart", "Autostart: ERROR" if not result.ok or result.enabled is None else
+                            "Autostart: ON (UAC)" if result.enabled else "Autostart: OFF")
+
     def toggle_autostart(self):
+        if getattr(self, "_autostart_pending", False):
+            return
         if is_autostart_enabled():
             ok, message = disable_autostart()
         else:
             ok, message = enable_autostart()
         if not ok:
             log.warning("Autostart toggle failed: %s", message)
+            self._autostart_warning = f"Autostart: {message}"
             self._set_menu_label("autostart", "Autostart: ERROR")
             _show_error_message(
                 "Autostart",
                 f"{message}\n\nSee log for details:\n{LOG_PATH}",
             )
             return
+        self._autostart_warning = ""
         self._set_menu_label("autostart",
             "Autostart: ON (UAC)" if is_autostart_enabled() else "Autostart: OFF"
         )
@@ -3562,11 +3646,24 @@ class OverlayApp:
         self._set_health_panel(messages, severity)
 
     def _set_health_panel(self, messages, severity):
+        messages = list(messages)
+        startup_warning = getattr(self, "_autostart_warning", None)
+        if startup_warning and startup_warning not in messages:
+            messages.append(startup_warning)
+            severity = max(severity, 1)
         gpu_status = getattr(self, "_gpu_fan_status", {})
         if gpu_status.get("state") == "error":
             message = "GPU fans: " + gpu_status.get("reason", "control unavailable")
             messages = [message] + [item for item in messages if item != message]
             severity = 2
+        for name, status in (("Case fans", getattr(self, "_case_fan_status", {})),
+                             ("GPU fans", gpu_status)):
+            if status.get("state") == "checking" and status.get("phase") == "waiting":
+                context = "Recovery pending. " if status.get("recovery_pending") else ""
+                message = f"{name}: waiting for sensors. {context}" + status.get("reason", "")
+                if message not in messages:
+                    messages.append(message)
+                severity = max(severity, 1)
         self.health_messages = messages
         if hasattr(self, "health_label"):
             self.health_label.config(
@@ -3818,6 +3915,9 @@ class OverlayApp:
             if any(getattr(self, key, {}).get("state") == "error"
                    for key in ("_case_fan_status", "_gpu_fan_status")):
                 self._show_sensor_error(text="--", color="#888888")
+            else:
+                self._set_health_panel([], 0)
+                self._fit_content()
             self.root.after(500, self.update_ui)
             return
 
@@ -4102,6 +4202,7 @@ class OverlayApp:
         for name, worker in (
             ("Sensor", getattr(self, "sensor_thread", None)),
             ("Diagnostics", getattr(self, "_diagnostics_thread", None)),
+            ("Autostart", getattr(self, "_autostart_thread", None)),
         ):
             if worker is None or not worker.is_alive():
                 continue
@@ -4151,26 +4252,11 @@ def main():
         return
 
     try:
-        autostart_result = None
-        if _is_admin():
-            autostart_result = reconcile_autostart_security()
-            if not autostart_result.ok:
-                operation = (
-                    "migrate insecure autostart task"
-                    if autostart_result.changed
-                    else "verify autostart security"
-                )
-                log.error("Failed to %s: %s", operation, autostart_result.message)
-                _show_error_message(
-                    "HeatMap autostart",
-                    _format_autostart_reconcile_error(
-                        autostart_result.changed, autostart_result.message
-                    ),
-                )
-        else:
+        if not _is_admin():
             log.warning("Running without admin privileges — hardware sensors may be unavailable")
-        app = OverlayApp(autostart_result=autostart_result)
+        app = OverlayApp(autostart_result=AutostartReconcileResult(False, True, "Checking", None))
         try:
+            app.start_autostart_check()
             app.run()
         except KeyboardInterrupt:
             pass

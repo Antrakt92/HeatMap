@@ -319,12 +319,12 @@ class GpuWorkerTests(unittest.TestCase):
         owner.create_time.return_value = 1
         owner.is_running.return_value = True
 
-        def readings():
+        def readings(strict=False):
             if failure == 'read' and now[0] >= 6:
                 raise RuntimeError('driver read failed')
             return dict(gpu_core_temp=40, gpu_hotspot_temp=50, gpu_memory_temp=60,
                         gpu_fan=3400 if adapter.state['points'][0][1] == 100 else 2000,
-                        timestamp_ms=now[0]*1000 if failure != 'stale' else 10)
+                        timestamp_ms=now[0]*1000 if failure != 'stale' else min(now[0]*1000, 6000))
 
         def publish(_path, state, **details):
             if failure == 'status' and state == 'checking' and now[0] >= 6:

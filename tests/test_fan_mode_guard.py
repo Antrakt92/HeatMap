@@ -67,14 +67,15 @@ class FanModeWorkerTests(unittest.TestCase):
             primary.trace.attach_mock(method, label)
         owner = mock.Mock()
         owner.create_time.return_value = 1
-        owner.is_running.side_effect = [True, False]
+        owner.is_running.side_effect = [True, True, True, False]
         modules = {"clr": mock.Mock(), "LibreHardwareMonitor": mock.Mock(),
                    "LibreHardwareMonitor.Hardware": NS(Computer=lambda: computer)}
         with (mock.patch.dict("sys.modules", modules),
               mock.patch.object(fans, "make_shared_computer", return_value=computer),
               mock.patch.object(overlay, "_is_admin", return_value=True),
               mock.patch.object(overlay, "_runtime_dll_errors", return_value=[]),
-              mock.patch.object(overlay, "read_sensors", return_value={}),
+              mock.patch.object(overlay, "read_sensors", return_value=dict(
+                  cpu_temp=50, gpu_core_temp=45, gpu_hotspot_temp=60, gpu_memory_temp=60)),
               mock.patch.object(fans, "require_hardware_access"),
               mock.patch.object(fans.psutil, "Process", return_value=owner),
               mock.patch.object(fans.threading, "Thread"),

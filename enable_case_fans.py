@@ -14,6 +14,7 @@ import psutil
 import overlay
 from case_fans import FanWorkerClient, full_rpm_reference
 from thermal_policy import finite
+from startup_readiness import STARTUP_TIMEOUT_SECONDS
 
 
 def close_previous_overlay():
@@ -54,8 +55,11 @@ def close_previous_overlay():
 
 
 def verify_worker(client, samples, duration=20):
+    if finite(duration, 0, 3600) is None:
+        raise ValueError("Verification duration must be finite and between 0 and 3600 seconds")
     client.start()
-    deadline = time.monotonic() + 60
+    # Allow discovery, the 15-second full-airflow check, then sustained samples.
+    deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS + 30 + duration
     active_since = None
     first_stamp = None
     last_stamp = None

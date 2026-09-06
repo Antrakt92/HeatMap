@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.0-rc.5 — 2026-09-06
+
+- Start at Windows login without the fixed 30-second task delay. Keep ordinary
+  UAC, preserve disabled/absent startup preferences and refuse foreign tasks.
+- Create the overlay before Task Scheduler inspection. Check and migrate startup
+  in the background; show failures without blocking the UI or fan heartbeats.
+- Wait up to 60 seconds for missing case/GPU sensor readings before takeover.
+  Require exact channels, valid temperatures and fresh GPU metrics; reject
+  malformed values, conflicts, unsupported devices and native cleanup failures.
+- Show waiting before the first sensor sample, preserve pending GPU recovery
+  ownership, and treat normal cancellation before takeover as a clean stop.
+- Allow readiness and full-airflow checks within commissioning time budgets.
+  Preserve the original startup failure only with explicit no-command evidence.
+- Keep preview status pending physical reboot/login and extended hardware/UI
+  acceptance. See `docs/immediate-startup-2026-09-06.md` for verified live results.
+
 ## 1.2.0-rc.4 — 2026-09-06
 
 - Add an opt-in, verified four-case-fan profile for the commissioned B550 AORUS

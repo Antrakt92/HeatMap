@@ -3,12 +3,59 @@ import time
 
 from pawnio_shared import IsaBus, SignedEcBridge
 from thermal_policy import finite
+from startup_readiness import StartupNotReady
 
 SHARED_NAMES = ('System Fan #4', 'System Fan #5 / Pump', 'System Fan #6 / Pump')
 CHIP = '/lpc/it8792e/0'
 INDICES = (2, 0, 1)
 REGISTERS = (0x13, 0x15, 0x16, 0x17, 0x63, 0x6B, 0x73)
 PWM_REGISTERS = (0x63, 0x6B, 0x73)
+
+
+def select_shared_sensors(computer):
+    """Validate secondary enumeration without opening another hardware handle."""
+    boards = [h for h in computer.Hardware if str(h.HardwareType) == 'Motherboard']
+    if not boards:
+        raise StartupNotReady('Waiting for motherboard sensors')
+    if len(boards) != 1 or str(getattr(getattr(boards[0], '__implementation__', boards[0]), 'Model', '')) != 'B550_AORUS_PRO_AC':
+        raise RuntimeError('Shared fan control supports only B550 AORUS PRO AC')
+    items = [s for s in boards[0].SubHardware if str(s.Identifier) == CHIP]
+    if len(items) > 1:
+        raise RuntimeError('Ambiguous secondary fan controller')
+    if not items:
+        if any(str(sensor.Name) in SHARED_NAMES for sub in boards[0].SubHardware for sensor in sub.Sensors):
+            raise RuntimeError('Unexpected shared fan controller identity')
+        raise StartupNotReady('Waiting for secondary fan controller')
+    hardware = getattr(items[0], '__implementation__', items[0])
+    sources = [(str(sub.Identifier), sensor) for sub in boards[0].SubHardware for sensor in sub.Sensors]
+    sensors = []
+    for name, index in zip(SHARED_NAMES, INDICES):
+        pair = []
+        for kind in ('Control', 'Fan'):
+            expected = f'{CHIP}/{kind.lower()}/{index}'
+            found = [(owner, s) for owner, s in sources
+                     if str(s.SensorType) == kind and (str(s.Name) == name or str(s.Identifier) == expected)]
+            if len(found) > 1:
+                raise RuntimeError(f'Ambiguous shared channel: {name} {kind}')
+            if not found:
+                raise StartupNotReady(f'Waiting for shared channel: {name} {kind}')
+            owner, sensor = found[0]
+            if (str(sensor.Identifier) != expected or str(sensor.Name) != name
+                    or owner != CHIP):
+                raise RuntimeError(f'Unexpected shared channel identity: {name} {kind}')
+            if kind == 'Control' and sensor.Control is None:
+                raise RuntimeError(f'Shared fan control object unavailable: {name}')
+            if kind == 'Fan' and sensor.Value is None:
+                raise StartupNotReady(f'Waiting for shared channel reading: {name} {kind}')
+            minimum, maximum = (0, 100) if kind == 'Control' else (0 if name == SHARED_NAMES[2] else 200, 10000)
+            if sensor.Value is not None and (isinstance(sensor.Value, (bool, str))
+                                             or finite(float(sensor.Value), minimum, maximum) is None):
+                raise RuntimeError(f'Invalid or stopped shared channel: {name} {kind}')
+            if kind == 'Fan' and name == SHARED_NAMES[2] and float(sensor.Value) != 0:
+                raise RuntimeError('SYS6 is connected; the four-fan profile does not apply')
+            pair.append(sensor)
+        sensors.append((name, *pair))
+    return hardware, sensors
 
 
 def make_shared_computer():
@@ -47,13 +94,7 @@ class LhmSecondary:
         from System import Array, Object, Byte, Boolean
         from System.Reflection import BindingFlags
         self.Array, self.Object, self.Byte, self.Boolean = Array, Object, Byte, Boolean
-        boards = [h for h in computer.Hardware if str(h.HardwareType) == 'Motherboard']
-        if len(boards) != 1 or str(getattr(boards[0], '__implementation__', boards[0]).Model) != 'B550_AORUS_PRO_AC':
-            raise RuntimeError('Shared fan control supports only B550 AORUS PRO AC')
-        items = [s for s in boards[0].SubHardware if str(s.Identifier) == CHIP]
-        if len(items) != 1:
-            raise RuntimeError('Missing or ambiguous secondary fan controller')
-        self.hardware = getattr(items[0], '__implementation__', items[0])
+        self.hardware, self.sensors = select_shared_sensors(computer)
         flags = BindingFlags.Instance | BindingFlags.NonPublic
         field = self.hardware.GetType().GetField('_superIO', flags)
         if field is None:
@@ -65,16 +106,6 @@ class LhmSecondary:
         self.write_method = self.sio.GetType().GetMethod('WriteByte', flags)
         if self.read_method is None or self.write_method is None:
             raise RuntimeError('Pinned secondary register interface is unavailable')
-        self.sensors = []
-        for name, index in zip(SHARED_NAMES, INDICES):
-            pair = []
-            for kind in ('Control', 'Fan'):
-                found = [s for s in self.hardware.Sensors if str(s.SensorType) == kind
-                         and str(s.Identifier) == f'{CHIP}/{kind.lower()}/{index}' and str(s.Name) == name]
-                if len(found) != 1:
-                    raise RuntimeError(f'Missing or ambiguous shared channel: {name} {kind}')
-                pair.append(found[0])
-            self.sensors.append((name, *pair))
 
     def read(self, register):
         if register not in REGISTERS:

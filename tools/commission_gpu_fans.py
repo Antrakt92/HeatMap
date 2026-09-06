@@ -12,15 +12,19 @@ sys.path.insert(0, str(ROOT))
 import overlay
 from enable_case_fans import close_previous_overlay
 from gpu_fans import GpuWorkerClient
+from startup_readiness import STARTUP_TIMEOUT_SECONDS
+from thermal_policy import finite
 
 
 def verify(client, samples, duration=8):
+    if finite(duration, 0, 3600) is None:
+        raise ValueError('Verification duration must be finite and between 0 and 3600 seconds')
     client.start()
     active_since = None
     last_report = None
     failure = None
     try:
-        deadline = time.monotonic() + 65
+        deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS + 30 + duration
         while time.monotonic() < deadline:
             status = client.poll()
             if status['state'] in ('error', 'stopped', 'off'):
@@ -48,6 +52,10 @@ def verify(client, samples, duration=8):
         if client.process is not None:
             client.process.wait(timeout=20)
     restored = client.poll()
+    if (failure and restored.get('control_attempted') is False
+            and restored.get('baseline') is None and restored.get('recovery_pending') is False
+            and not restored.get('restore_errors')):
+        raise failure
     if not restored.get('restore_confirmed') or restored.get('restore_errors'):
         raise RuntimeError('GPU fan restoration not confirmed: ' + str(restored))
     if failure:

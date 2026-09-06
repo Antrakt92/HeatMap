@@ -16,6 +16,7 @@ import psutil
 from case_fans import FanWorkerClient, WorkerMutex, open_status_file, replace_status_file, write_status
 from hardware_access_guard import require_hardware_access
 from thermal_policy import finite, interpolate
+from startup_readiness import StartupCancelled, StartupNotReady, wait_for_readiness
 
 PROFILE = 'gigabyte-rx7900xt-hotspot90'
 CURVES = {
@@ -211,6 +212,9 @@ def status_error(reason):
 
 def mode_text(status):
     state = status.get('state', 'off')
+    if state == 'checking' and status.get('phase') == 'waiting':
+        remaining = finite(status.get('remaining_seconds'), 0, 60)
+        return f'Waiting GPU {math.ceil(remaining)}s' if remaining is not None else 'Waiting GPU...'
     if state == 'active':
         reason = status.get('reason', '')
         reason = reason if reason in LABELS.values() else 'Failsafe'
@@ -315,6 +319,16 @@ class OwnerHeartbeat:
             self.stop.set()
 
 
+def recovery_journal_exists(path):
+    # Path.exists() suppresses access errors on newer Python versions. Unknown
+    # journal state must not become evidence that no prior owner needs recovery.
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def worker(path, owner_pid, owner_created):
     from amd_gpu_fan import AmdGpuFan
     stop = threading.Event()
@@ -324,28 +338,81 @@ def worker(path, owner_pid, owner_created):
     error = None
     restore_errors = []
     baseline_readings = None
-    recovery_pending = False
+    recovery_pending = None
     recovered = False
+    startup_cancelled = False
+    journal_path = Path(path).parent / 'recovery.json'
 
     def publish(state, **details):
         write_status(path, state, profile=PROFILE, **details)
 
     try:
+        recovery_pending = recovery_journal_exists(journal_path)
         owner = psutil.Process(owner_pid)
         if abs(owner.create_time() - owner_created) > 0.01:
             raise RuntimeError('GPU controller owner process changed')
-        require_hardware_access()
-        adapter = AmdGpuFan()
-        journal = RecoveryJournal(Path(path).parent / 'recovery.json', adapter.identity)
-        recovery_pending = journal.path.exists()
+
+        def check_startup():
+            if stop.is_set() or not owner.is_running():
+                raise StartupCancelled('GPU owner stopped before takeover')
+            if heartbeat.expired():
+                raise RuntimeError('GPU owner heartbeat expired before takeover')
+            require_hardware_access()
+
+        last_ready_stamp = None
+        last_observed_stamp = None
+
+        def probe():
+            nonlocal adapter, baseline_readings, last_ready_stamp, last_observed_stamp
+            if adapter is None:
+                adapter = AmdGpuFan()
+            data = adapter.readings(strict=True)
+            if data is None:
+                last_ready_stamp = None
+                raise StartupNotReady('Waiting for AMD GPU metrics')
+            if not isinstance(data, dict):
+                raise RuntimeError('Invalid AMD GPU metrics response')
+            missing = [LABELS[key] for key in CURVES if data.get(key) is None]
+            invalid = [LABELS[key] for key in CURVES if data.get(key) is not None and
+                       finite(data[key], 1, 150) is None]
+            if invalid:
+                raise RuntimeError('Invalid GPU temperature: ' + '/'.join(invalid))
+            raw_stamp = data.get('timestamp_ms')
+            stamp = finite(raw_stamp, 0, 1e15)
+            if raw_stamp is not None and stamp is None:
+                raise RuntimeError('Invalid GPU metrics timestamp')
+            if stamp is not None:
+                if last_observed_stamp is not None and stamp < last_observed_stamp:
+                    raise RuntimeError('GPU metrics timestamp moved backwards')
+                last_observed_stamp = stamp
+            if missing or stamp is None:
+                last_ready_stamp = None
+                raise StartupNotReady('Waiting for GPU ' + ('/'.join(missing) if missing else 'timestamp'))
+            previous, last_ready_stamp = last_ready_stamp, stamp
+            if previous is None or stamp == previous:
+                raise StartupNotReady('Waiting for fresh GPU metrics')
+            baseline_readings = data
+            return True
+
+        def waiting(reason, elapsed, remaining, attempt):
+            publish('checking', phase='waiting', reason=reason, elapsed_seconds=elapsed,
+                    remaining_seconds=remaining, attempt=attempt, baseline=None,
+                    control_attempted=None if recovery_pending is not False else False,
+                    recovery_pending=recovery_pending)
+
+        wait_for_readiness(probe, stop, check_startup, waiting, clock=time.monotonic)
+        check_startup()
+        recovery_pending = None
+        recovery_pending = recovery_journal_exists(journal_path)
+        journal = RecoveryJournal(journal_path, adapter.identity)
+        if recovery_pending:
+            publish('checking', phase='recovering', baseline=None, control_attempted=None,
+                    recovery_pending=True, reason='Restoring interrupted GPU fan session')
         # The named owner mutex covers both recovery and this new session.
         # Never adopt a leftover HeatMap curve as the user's original settings.
         recovered = journal.recover(adapter)
         recovery_pending = False
         session = GpuSession(adapter, journal)
-        baseline_readings = adapter.readings()
-        if any(finite(baseline_readings.get(key), 1, 150) is None for key in CURVES):
-            raise RuntimeError('All three GPU temperatures are required before takeover')
         # Durable rollback is published before the first possible hardware mutation.
         publish('checking', baseline=session.baseline, gpu=adapter.identity, control_attempted=True,
                 reason='Checking GPU full airflow')
@@ -403,6 +470,8 @@ def worker(path, owner_pid, owner_created):
                     readings=data, baseline=session.baseline, control_attempted=True,
                     verified_full_rpm=verified_rpm, recovered_previous_session=recovered, gpu=adapter.identity)
             stop.wait(2)
+    except StartupCancelled:
+        startup_cancelled = True
     except Exception as exc:
         error = str(exc)
     finally:
@@ -418,8 +487,11 @@ def worker(path, owner_pid, owner_created):
             except Exception as exc:
                 restore_errors.append(str(exc))
         publish('error' if error or restore_errors else 'stopped',
-                reason=error or ('GPU fan restore unconfirmed' if restore_errors else 'Saved GPU fan curve restored'),
-                control_attempted=None if recovery_pending else bool(touched or recovered),
+                reason=error or ('GPU fan restore unconfirmed' if restore_errors else
+                                'GPU startup cancelled before takeover' if startup_cancelled else
+                                'Saved GPU fan curve restored'),
+                control_attempted=None if recovery_pending is not False else bool(touched or recovered),
+                recovery_pending=recovery_pending,
                 restore_confirmed=bool((touched or recovered) and not restore_errors),
                 restore_errors=restore_errors, baseline=session.baseline if session else None)
     return 1 if error or restore_errors else 0
@@ -436,7 +508,7 @@ def main():
             return worker(args.status, args.owner_pid, args.owner_created)
     except Exception as exc:
         write_status(args.status, 'error', profile=PROFILE, reason=str(exc), control_attempted=None,
-                     restore_confirmed=False, restore_errors=[])
+                     recovery_pending=None, restore_confirmed=False, restore_errors=[])
         return 1
 
 

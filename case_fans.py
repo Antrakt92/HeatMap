@@ -14,7 +14,9 @@ import psutil
 
 from thermal_policy import CaseAirflowPolicy, FanRamp, case_fan_demand, finite
 from hardware_access_guard import require_hardware_access
-from shared_fans import SHARED_NAMES, open_shared_session, make_shared_computer
+from shared_fans import SHARED_NAMES, open_shared_session, make_shared_computer, select_shared_sensors
+from startup_readiness import StartupNotReady, StartupCancelled, wait_for_readiness
+from thermal_policy import CASE_FAN_LABELS
 
 PROFILE = "b550-aorus-pro-ac-case-124"
 TARGETS = ("System Fan #1", "System Fan #2", "System Fan #4")
@@ -156,7 +158,7 @@ class FanWorkerClient:
                 return {"state": "error", "reason": "Invalid case fan controller status"}
             if status.get("state") == "active" and finite(status.get("command_pct"), 60, 100) is None:
                 return {"state": "error", "reason": "Invalid case fan controller command report"}
-            discovering = (status.get("state") == "checking" and status.get("phase") == "discovering"
+            discovering = (status.get("state") == "checking" and status.get("phase") in ("discovering", "waiting")
                            and status.get("control_attempted") is False
                            and status.get("baseline") == [])
             if "controlled_channels" in status or "firmware_channels" in status:
@@ -229,12 +231,14 @@ class WorkerMutex:
         self.kernel.CloseHandle(self.handle)
 
 
-class ChannelNotReady(RuntimeError):
+class ChannelNotReady(StartupNotReady):
     """A missing startup reading can recover before any control command is sent."""
 
 
 def select_controls(computer):
     boards = [hw for hw in computer.Hardware if str(hw.HardwareType) == "Motherboard"]
+    if not boards:
+        raise ChannelNotReady("Waiting for motherboard sensors")
     # pythonnet wraps Computer.Hardware as IHardware, which does not expose Model.
     board = getattr(boards[0], "__implementation__", boards[0]) if len(boards) == 1 else None
     if board is None or str(getattr(board, "Model", "")) != "B550_AORUS_PRO_AC":
@@ -247,8 +251,11 @@ def select_controls(computer):
     # the commissioned shared profile uses its own verified adapter.
     selected = []
     for name in INDEPENDENT_TARGETS:
-        control = [s for s in sensors if str(s.SensorType) == "Control" and str(s.Name) == name]
-        tach = [s for s in sensors if str(s.SensorType) == "Fan" and str(s.Name) == name]
+        chip, index = CHANNELS[name]
+        control = [s for s in sensors if str(s.SensorType) == "Control"
+                   and (str(s.Name) == name or str(getattr(s, "Identifier", "")) == f"{chip}/control/{index}")]
+        tach = [s for s in sensors if str(s.SensorType) == "Fan"
+                and (str(s.Name) == name or str(getattr(s, "Identifier", "")) == f"{chip}/fan/{index}")]
         counts = f"{name}: controls={len(control)}, tachometers={len(tach)}"
         if len(control) > 1 or len(tach) > 1:
             raise RuntimeError("Ambiguous case fan channel: " + counts)
@@ -256,15 +263,14 @@ def select_controls(computer):
             raise ChannelNotReady("Case fan channel not ready: " + counts)
         if control[0].Control is None:
             raise RuntimeError(f"Case fan control object unavailable: {name}")
-        chip, index = CHANNELS[name]
         for sensor, kind in ((control[0], "control"), (tach[0], "fan")):
             owners = [sub for sub, candidate in sources if candidate is sensor]
-            if (str(getattr(sensor, "Identifier", "")) != f"{chip}/{kind}/{index}"
+            if (str(sensor.Name) != name or str(getattr(sensor, "Identifier", "")) != f"{chip}/{kind}/{index}"
                     or len(owners) != 1 or str(getattr(owners[0], "Identifier", "")) != chip):
                 raise RuntimeError(f"Unexpected controller identity: {name}")
         if tach[0].Value is None:
             raise ChannelNotReady(f"Case fan tachometer not ready: {name}")
-        if finite(float(tach[0].Value), 1, 10000) is None:
+        if isinstance(tach[0].Value, (bool, str)) or finite(float(tach[0].Value), 1, 10000) is None:
             raise RuntimeError(f"Cannot take control without a running tachometer: {name}")
         c = control[0].Control
         if (finite(float(c.MinSoftwareValue), 0, 60) is None
@@ -274,23 +280,34 @@ def select_controls(computer):
     return selected
 
 
-def wait_for_controls(computer, read_sensors, stop, owner, heartbeat, status_path):
-    """Retry initial enumeration only; never retry ambiguous identities or writes."""
-    for attempt in range(1, 5):
-        read_sensors(computer)
-        try:
-            return select_controls(computer)
-        except ChannelNotReady as exc:
-            if attempt == 4:
-                raise ChannelNotReady(f"{exc}; unavailable after {attempt} startup reads") from exc
-            write_status(status_path, "checking", phase="discovering", control_attempted=False,
-                         baseline=[], controlled_channels=[], firmware_channels=[],
-                         discovery_attempt=attempt, reason=str(exc))
-            # LHM skips a busy ISA bus read after 10 ms. Its tachometers are not
-            # activated until a successful update; retry the same instance before takeover.
-            if stop.wait(0.5) or not owner.is_running() or time.monotonic() - heartbeat[0] > 15:
-                raise RuntimeError("Overlay owner stopped during case fan discovery") from exc
-            require_hardware_access()
+def wait_for_controls(computer, read_sensors, stop, owner, heartbeat, status_path, shared=False, timeout=60.0):
+    """Wait for complete input on the same Computer before sending any commands."""
+    def check():
+        if stop.is_set() or not owner.is_running() or time.monotonic() - heartbeat[0] > 15:
+            raise StartupCancelled("Overlay owner stopped during case fan readiness")
+        require_hardware_access()
+
+    def probe():
+        data = read_sensors(computer)
+        selected = select_controls(computer)
+        if shared:
+            select_shared_sensors(computer)
+        if not isinstance(data, dict):
+            raise RuntimeError("Invalid case fan temperature snapshot")
+        for key, label in CASE_FAN_LABELS.items():
+            value = data.get(key)
+            if value is None:
+                raise StartupNotReady(f"Waiting for {label} temperature")
+            if finite(value, 1, 150) is None:
+                raise RuntimeError(f"Invalid {label} temperature before fan activation")
+        return selected
+
+    def waiting(reason, elapsed, remaining, attempt):
+        write_status(status_path, "checking", phase="waiting", control_attempted=False,
+                     baseline=[], controlled_channels=[], firmware_channels=[],
+                     discovery_attempt=attempt, reason=str(reason), remaining_seconds=remaining)
+
+    return wait_for_readiness(probe, stop, check, waiting, timeout=timeout)
 
 
 def full_rpm_reference(value):
@@ -489,7 +506,7 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False):
     try:
         require_hardware_access()
         computer.Open()
-        selected = wait_for_controls(computer, overlay.read_sensors, stop, owner, heartbeat, status_path)
+        selected = wait_for_controls(computer, overlay.read_sensors, stop, owner, heartbeat, status_path, shared=shared)
         mode = read_primary_fan_mode(computer)
         # LHM saves this whole register as a bool but restores individual bits.
         # Require both selected outputs already enabled to preserve their modes.
@@ -503,7 +520,7 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False):
         firmware_channels = [] if shared else [name for name in TARGETS if name not in controlled_channels]
         baseline = session.readings()
         if stop.is_set() or not owner.is_running() or time.monotonic() - heartbeat[0] > 15:
-            raise RuntimeError("Overlay owner stopped before case fan activation")
+            raise StartupCancelled("Overlay owner stopped before case fan activation")
         ramp = FanRamp()
         airflow = CaseAirflowPolicy()
         require_hardware_access()
@@ -568,6 +585,8 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False):
                          temperatures={key: data.get(key) for key in (
                              "cpu_temp", "gpu_core_temp", "gpu_hotspot_temp", "gpu_memory_temp")})
             stop.wait(2)
+    except StartupCancelled:
+        pass  # Ordinary shutdown before takeover is not a controller failure.
     except Exception as exc:
         error = str(exc)
     finally:
@@ -603,7 +622,8 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False):
             except Exception as exc:
                 restore_errors.append(f'Shared bridge close: {exc}')
         write_status(status_path, "error" if error or restore_errors else "stopped",
-                     reason=error or ("Restore unconfirmed: restart Windows" if restore_errors else "Returned to firmware control"),
+                     reason=error or ("Restore unconfirmed: restart Windows" if restore_errors else
+                                      "Returned to firmware control" if control_attempted else "Stopped before case fan takeover"),
                      restore_errors=restore_errors, baseline=baseline,
                      controlled_channels=controlled_channels, firmware_channels=firmware_channels,
                      control_attempted=control_attempted,

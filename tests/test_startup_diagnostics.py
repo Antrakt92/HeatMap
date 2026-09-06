@@ -36,11 +36,12 @@ class StartupDiagnosticsTests(unittest.TestCase):
             enable.assert_not_called()
 
     def test_migration_uses_validated_enable_result(self):
+        definition = overlay.AutostartTaskDefinition(principal_count=1, principal_user_id="user")
         for success in (True, False):
             with (
                 self.subTest(success=success),
                 mock.patch.object(overlay, "_resolve_autostart_identity", return_value=("user", ("user",), None)),
-                mock.patch.object(overlay, "_query_autostart_task_definition", return_value=(object(), None)),
+                mock.patch.object(overlay, "_query_autostart_task_definition", return_value=(definition, None)),
                 mock.patch.object(overlay, "_classify_autostart_task", return_value=overlay.AUTOSTART_LEGACY_UNSAFE),
                 mock.patch.object(overlay, "enable_autostart", return_value=(success, "result")) as enable,
             ):
@@ -48,33 +49,36 @@ class StartupDiagnosticsTests(unittest.TestCase):
             self.assertTrue(result.changed)
             self.assertEqual(result.ok, success)
             self.assertIs(result.enabled, True if success else None)
-            enable.assert_called_once_with()
+            enable.assert_called_once_with(expected_existing=definition)
 
-    def test_main_passes_verified_state_and_releases_instance_on_startup_exception(self):
-        result = mock.Mock(ok=True)
+    def test_main_passes_pending_state_and_releases_instance_on_startup_exception(self):
         with (
             mock.patch.object(overlay, "_runtime_dll_errors", return_value=[]),
             mock.patch.object(overlay, "acquire_single_instance", return_value=True),
             mock.patch.object(overlay, "release_single_instance") as release,
             mock.patch.object(overlay, "_is_admin", return_value=True),
-            mock.patch.object(overlay, "reconcile_autostart_security", return_value=result),
+            mock.patch.object(overlay, "reconcile_autostart_security") as reconcile,
             mock.patch.object(overlay, "OverlayApp", side_effect=RuntimeError("window failed")) as factory,
         ):
             with self.assertRaisesRegex(RuntimeError, "window failed"):
                 overlay.main()
-        factory.assert_called_once_with(autostart_result=result)
+        factory.assert_called_once_with(autostart_result=overlay.AutostartReconcileResult(False, True, "Checking", None))
+        reconcile.assert_not_called()
         release.assert_called_once_with()
 
-    def test_main_releases_instance_when_reconciliation_raises(self):
+    def test_main_starts_background_check_after_window_and_closes_on_check_start_error(self):
+        app = mock.Mock()
+        app.start_autostart_check.side_effect = RuntimeError("start failed")
         with (
             mock.patch.object(overlay, "_runtime_dll_errors", return_value=[]),
             mock.patch.object(overlay, "acquire_single_instance", return_value=True),
             mock.patch.object(overlay, "release_single_instance") as release,
             mock.patch.object(overlay, "_is_admin", return_value=True),
-            mock.patch.object(overlay, "reconcile_autostart_security", side_effect=RuntimeError("query failed")),
+            mock.patch.object(overlay, "OverlayApp", return_value=app),
         ):
-            with self.assertRaisesRegex(RuntimeError, "query failed"):
+            with self.assertRaisesRegex(RuntimeError, "start failed"):
                 overlay.main()
+        app.quit.assert_called_once_with()
         release.assert_called_once_with()
 
     def diagnostics_app(self):

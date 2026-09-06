@@ -15,18 +15,27 @@ class StartupDiscoveryTests(unittest.TestCase):
         self.primary = self.computer.Hardware[0].SubHardware[0]
         self.sensors = list(self.primary.Sensors)
         self.stop = mock.Mock()
+        self.stop.is_set.return_value = False
         self.stop.wait.return_value = False
         self.owner = mock.Mock()
         self.owner.is_running.return_value = True
         self.published = []
+        self.clock = [100.0]
 
     def discover(self, read):
         def publish(path, state, **details):
             self.published.append(dict(state=state, **details))
+        def wait(delay):
+            self.clock[0] += delay
+            return False
+        def snapshot(computer):
+            read(computer)
+            return dict(cpu_temp=50, gpu_core_temp=45, gpu_hotspot_temp=60, gpu_memory_temp=60)
+        self.stop.wait.side_effect = wait
         with (mock.patch.object(fans, "write_status", side_effect=publish),
               mock.patch.object(fans, "require_hardware_access") as guard,
-              mock.patch.object(fans.time, "monotonic", return_value=100)):
-            result = fans.wait_for_controls(self.computer, read, self.stop, self.owner, [100], "unused")
+              mock.patch.object(fans.time, "monotonic", side_effect=lambda: self.clock[0])):
+            result = fans.wait_for_controls(self.computer, snapshot, self.stop, self.owner, [100], "unused", timeout=4)
         return result, guard.call_count
 
     def test_busy_first_read_then_tach_activation_succeeds_without_writes(self):
@@ -37,7 +46,7 @@ class StartupDiscoveryTests(unittest.TestCase):
         result, checks = self.discover(read_mock)
         self.assertEqual([item[0] for item in result], list(fans.INDEPENDENT_TARGETS))
         self.assertEqual(read_mock.call_count, 2)
-        self.assertEqual(checks, 1)
+        self.assertGreaterEqual(checks, 2)
         self.assertIn("tachometers=0", self.published[0]["reason"])
         self.assertFalse(self.published[0]["control_attempted"])
         for control in self.controls:
@@ -51,13 +60,13 @@ class StartupDiscoveryTests(unittest.TestCase):
         self.assertEqual(len(self.discover(read_mock)[0]), 2)
         self.assertEqual(read_mock.call_count, 3)
 
-    def test_missing_channel_exhausts_four_reads_without_commands(self):
+    def test_missing_channel_times_out_without_commands(self):
         self.primary.Sensors = [s for s in self.sensors if s.SensorType != "Fan"]
         read = mock.Mock()
-        with self.assertRaisesRegex(fans.ChannelNotReady, "after 4 startup reads"):
+        with self.assertRaisesRegex(fans.StartupNotReady, "timed out after 4s"):
             self.discover(read)
         self.assertEqual(read.call_count, 4)
-        self.assertEqual(self.stop.wait.call_count, 3)
+        self.assertEqual(self.stop.wait.call_count, 4)
         for control in self.controls:
             control.SetSoftware.assert_not_called()
 
@@ -85,15 +94,15 @@ class StartupDiscoveryTests(unittest.TestCase):
             with self.subTest(cause=cause):
                 self.setUp()
                 self.primary.Sensors = []
-                self.stop.wait.return_value = cause == "cancel"
+                self.stop.is_set.return_value = cause == "cancel"
                 self.owner.is_running.return_value = cause != "owner"
                 read = mock.Mock()
                 with (mock.patch.object(fans, "write_status"),
                       mock.patch.object(fans.time, "monotonic", return_value=120 if cause == "heartbeat" else 100),
-                      mock.patch.object(fans, "require_hardware_access", side_effect=RuntimeError("conflict")),
+                      mock.patch.object(fans, "require_hardware_access", side_effect=RuntimeError("conflict") if cause == "conflict" else None),
                       self.assertRaises(RuntimeError)):
                     fans.wait_for_controls(self.computer, read, self.stop, self.owner, [100], "unused")
-                self.assertEqual(read.call_count, 1)
+                self.assertEqual(read.call_count, 0)
                 for control in self.controls:
                     control.SetSoftware.assert_not_called()
 
@@ -149,6 +158,11 @@ class StartupStatusTests(unittest.TestCase):
         owner.create_time.return_value = 1
         modules = {"clr": mock.Mock(), "LibreHardwareMonitor": mock.Mock(),
                    "LibreHardwareMonitor.Hardware": NS(Computer=lambda: computer)}
+        clock = [100.0]
+        wait_for_controls = fans.wait_for_controls
+        def wait(delay):
+            clock[0] += delay
+            return False
         with (mock.patch.dict("sys.modules", modules),
               mock.patch.object(fans, "make_shared_computer", return_value=computer) as primed_computer,
               mock.patch.object(overlay, "_is_admin", return_value=True),
@@ -157,7 +171,10 @@ class StartupStatusTests(unittest.TestCase):
               mock.patch.object(fans, "require_hardware_access"),
               mock.patch.object(fans.psutil, "Process", return_value=owner),
               mock.patch.object(fans.threading, "Thread"),
-              mock.patch.object(fans.threading.Event, "wait", return_value=False),
+              mock.patch.object(fans.threading.Event, "wait", side_effect=wait),
+              mock.patch.object(fans.time, "monotonic", side_effect=lambda: clock[0]),
+              mock.patch.object(fans, "wait_for_controls", side_effect=lambda *args, **kwargs:
+                                wait_for_controls(*args, **kwargs, timeout=4)),
               mock.patch.object(fans, "write_status") as publish):
             self.assertEqual(fans.worker("unused", 7, 1), 1)
         primed_computer.assert_called_once_with()

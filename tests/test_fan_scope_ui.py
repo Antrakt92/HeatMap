@@ -71,7 +71,8 @@ class FanScopeTests(unittest.TestCase):
                             sensor.Value = 82 if "#5" in sensor.Name else 81
                 owner = mock.Mock()
                 owner.create_time.return_value = 1
-                owner.is_running.side_effect = [True, True, True, False]
+                owner.is_running.side_effect = [True, True, True, True, False] if failure == "owner" else None
+                owner.is_running.return_value = True
                 modules = {"clr": mock.Mock(), "LibreHardwareMonitor": mock.Mock(),
                            "LibreHardwareMonitor.Hardware": NS(Computer=lambda: computer)}
                 reports = []
@@ -81,7 +82,8 @@ class FanScopeTests(unittest.TestCase):
                         raise PermissionError("synthetic status failure")
                     reports.append(dict(state=state, **details))
 
-                readings = [{}, RuntimeError("synthetic sensor failure")] if failure == "sensor" else [{}, {}]
+                ready = dict(cpu_temp=50, gpu_core_temp=45, gpu_hotspot_temp=60, gpu_memory_temp=60)
+                readings = [ready, RuntimeError("synthetic sensor failure")] if failure == "sensor" else [ready, {}]
                 with (
                     mock.patch.dict("sys.modules", modules),
                     mock.patch.object(fans, "make_shared_computer", return_value=computer),

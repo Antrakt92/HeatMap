@@ -29,7 +29,7 @@ def layout_app(scaling=1.333, height=720):
         stack.enter_context(mock.patch.object(overlay, "is_pawnio_driver_installed", return_value=True))
         stack.enter_context(mock.patch.object(overlay, "load_config_result", return_value=(overlay._default_config(), None)))
         stack.enter_context(mock.patch.object(overlay, "save_config", return_value=(True, "")))
-        app = overlay.OverlayApp(SimpleNamespace(enabled=False))
+        app = overlay.OverlayApp(overlay.AutostartReconcileResult(False, True, "disabled", False))
         try:
             yield app
         finally:
