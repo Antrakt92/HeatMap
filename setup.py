@@ -59,7 +59,10 @@ def _is_overlay_running():
     kernel32.CloseHandle.restype = ctypes.c_bool
     handle = kernel32.CreateMutexW(None, False, _OVERLAY_INSTANCE_MUTEX)
     if not handle:
-        return False
+        # An elevated instance may deny access; absence was not established.
+        raise SetupError(
+            f"cannot verify whether HeatMap is running (Windows error {kernel32.GetLastError()})"
+        )
     try:
         return kernel32.GetLastError() == _ERROR_ALREADY_EXISTS
     finally:
@@ -174,7 +177,11 @@ def verify_lib_manifest(lib_dir=LIB_DIR, manifest_path=MANIFEST_PATH, allow_extr
 
     actual = {}
     if os.path.isdir(lib_dir):
-        for name in os.listdir(lib_dir):
+        try:
+            names = os.listdir(lib_dir)
+        except OSError as exc:
+            return False, [f"cannot list DLL directory {lib_dir}: {exc}"]
+        for name in names:
             path = os.path.join(lib_dir, name)
             if os.path.isfile(path) and name.lower().endswith(".dll"):
                 actual[_relative_dll_path(path, lib_dir).lower()] = path
@@ -190,10 +197,14 @@ def verify_lib_manifest(lib_dir=LIB_DIR, manifest_path=MANIFEST_PATH, allow_extr
     for key in sorted(expected_keys & actual_keys):
         entry = entries[key]
         path = actual[key]
-        actual_size = os.path.getsize(path)
+        try:
+            actual_size = os.path.getsize(path)
+            actual_hash = _sha256_file(path)
+        except OSError as exc:
+            messages.append(f"cannot read DLL {entry['file']}: {exc}")
+            continue
         if actual_size != entry["size"]:
             messages.append(f"size mismatch for {entry['file']}: expected {entry['size']}, got {actual_size}")
-        actual_hash = _sha256_file(path)
         if actual_hash != entry["sha256"]:
             messages.append(f"hash mismatch for {entry['file']}: expected {entry['sha256']}, got {actual_hash}")
 
@@ -1074,6 +1085,13 @@ def main(argv=None):
     if args.verify:
         ok, messages = verify_lib_manifest()
         _print_manifest_result(ok, messages)
+        try:
+            from pawnio_shared import verified_module
+            verified_module()
+            print('Shared fan module verification OK')
+        except (OSError, ValueError, KeyError, RuntimeError) as exc:
+            print(f'Shared fan module verification failed: {exc}')
+            ok = False
         return 0 if ok else 1
 
     if args.preflight:

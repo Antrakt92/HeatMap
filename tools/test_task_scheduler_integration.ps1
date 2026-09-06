@@ -51,7 +51,8 @@ xml_bytes = overlay._build_autostart_task_xml(user_id)
 print(user_id)
 print(base64.b64encode(xml_bytes).decode("ascii"))
 '@
-    $generated = @(& $python -c $buildScript)
+    # Windows PowerShell 5 strips embedded quotes in native -c arguments.
+    $generated = @($buildScript | & $python -)
     Assert-IntegrationCondition `
         -Condition ($LASTEXITCODE -eq 0 -and $generated.Count -eq 2) `
         -Message "Failed to generate production HeatMap task XML."
@@ -118,7 +119,7 @@ print(json.dumps({
     "definition": dataclasses.asdict(definition),
 }))
 '@
-    $classificationResult = ((& $python -c $classifyScript) | ConvertFrom-Json)
+    $classificationResult = (($classifyScript | & $python -) | ConvertFrom-Json)
     $classification = $classificationResult.classification
     Remove-Item Env:HEATMAP_INTEGRATION_XML -ErrorAction SilentlyContinue
     Remove-Item Env:HEATMAP_INTEGRATION_TASK_NAME -ErrorAction SilentlyContinue

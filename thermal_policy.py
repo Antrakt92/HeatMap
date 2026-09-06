@@ -192,7 +192,7 @@ class ThermalAdvisor:
     """Immediate temperature alarms; persistent gap/stall warnings avoid one-frame noise."""
     def __init__(self):
         self.since = {}
-        self.seen_running_fans = set()
+        self.seen_running_fans = {}
         self.seen_gpu_temperatures = {}
         self.gpu_id = None
 
@@ -205,6 +205,11 @@ class ThermalAdvisor:
         gpu_id = data.get("gpu_id") or self.gpu_id
         if gpu_id != self.gpu_id:
             self.since.pop("gpu_gap", None)
+            for key, (_label, scope) in list(self.seen_running_fans.items()):
+                if scope == "gpu":
+                    del self.seen_running_fans[key]
+                    self.since.pop(key, None)
+                    self.since.pop("tach_missing:" + key, None)
         self.gpu_id = gpu_id
         seen = self.seen_gpu_temperatures.setdefault(self.gpu_id, set())
         for key, label in (("gpu_hotspot_temp", "GPU Hotspot"), ("gpu_memory_temp", "VRAM temp")):
@@ -232,15 +237,21 @@ class ThermalAdvisor:
         gpu_hot = ((finite(data.get("gpu_hotspot_temp")) or 0) >= 85 or
                    (finite(data.get("gpu_core_temp")) or 0) >= 80 or
                    (finite(data.get("gpu_memory_temp")) or 0) >= 85)
-        fans = [(fan, cpu_hot if any(marker in fan.get("name", "").lower() for marker in ("cpu", "processor")) else cpu_hot or gpu_hot)
+        fans = [(fan, "cpu" if any(marker in fan.get("name", "").lower() for marker in ("cpu", "processor")) else "case")
                 for fan in data.get("fans", [])]
-        fans.extend((fan, gpu_hot) for fan in data.get("gpu_fans", []))
-        for fan, hot in fans:
+        fans.extend((fan, "gpu") for fan in data.get("gpu_fans", []))
+        present = {str(fan.get("id") or fan.get("name")) for fan, _scope in fans}
+        # Reinitialization can remove the sensor object instead of returning a
+        # null RPM. Preserve its label and heat source, never its last speed.
+        fans.extend((dict(id=key, name=label, rpm=None), scope)
+                    for key, (label, scope) in self.seen_running_fans.items() if key not in present)
+        for fan, scope in fans:
+            hot = cpu_hot if scope == "cpu" else gpu_hot if scope == "gpu" else cpu_hot or gpu_hot
             label = str(fan.get("name", "Fan")).removesuffix(" / Pump")
             key = str(fan.get("id") or fan.get("name"))
             rpm = finite(fan.get("rpm"), 0, 10000)
             if rpm is not None and rpm > 0:
-                self.seen_running_fans.add(key)
+                self.seen_running_fans[key] = (label, scope)
             if (rpm == 0 or rpm is None) and key in self.seen_running_fans and hot:
                 # Missing tach feedback is not proof the fan has physically stopped.
                 timer_key = "tach_missing:" + key if rpm is None else key

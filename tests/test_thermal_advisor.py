@@ -158,6 +158,56 @@ class ThermalPolicyTests(unittest.TestCase):
         self.findings(advisor, stopped, 22)
         self.assertTrue(any(f.key == "fan1" and f.severity == 2 for f in self.findings(advisor, stopped, 32)))
 
+    def test_disappearing_running_fan_reports_unavailable_not_stopped(self):
+        for field, name, heat in (('fans', 'CPU Fan', {'cpu_temp': 75}),
+                                  ('fans', 'System Fan #1', {'gpu_hotspot_temp': 86}),
+                                  ('gpu_fans', 'GPU Fan', {'gpu_hotspot_temp': 86})):
+            with self.subTest(name=name):
+                advisor = ThermalAdvisor()
+                self.findings(advisor, sample(**{field: [dict(name=name, id='fan1', rpm=900)]}), 0)
+                hot = sample(**heat)
+                self.assertFalse(any(f.key.startswith('tach_missing:') for f in self.findings(advisor, hot, 1)))
+                result = self.findings(advisor, hot, 11)
+                missing = [f for f in result if f.key == 'tach_missing:fan1']
+                self.assertEqual(len(missing), 1)
+                self.assertEqual(missing[0].severity, 1)
+                self.assertIn(name + ': tachometer unavailable', missing[0].text)
+                self.assertFalse(any('0 RPM' in f.text for f in result))
+
+    def test_disappearing_fan_keeps_device_heat_scope_and_restarts_after_recovery(self):
+        advisor = ThermalAdvisor()
+        fan = dict(name='CPU Fan', id='cpu-fan', rpm=900)
+        self.findings(advisor, sample(fans=[fan]), 0)
+        for now in (1, 20):
+            result = self.findings(advisor, sample(gpu_hotspot_temp=90), now)
+            self.assertFalse(any(f.key.startswith('tach_missing:') for f in result))
+        hot = sample(cpu_temp=75)
+        self.findings(advisor, hot, 21)
+        self.findings(advisor, dict(hot, fans=[fan]), 25)
+        self.findings(advisor, hot, 26)
+        self.assertFalse(any(f.key.startswith('tach_missing:') for f in self.findings(advisor, hot, 35)))
+        self.assertTrue(any(f.key == 'tach_missing:cpu-fan' for f in self.findings(advisor, hot, 36)))
+
+    def test_sensor_reset_keeps_running_baseline_but_restarts_missing_timer(self):
+        advisor = ThermalAdvisor()
+        self.findings(advisor, sample(fans=[dict(name='CPU Fan', id='cpu-fan', rpm=900)]), 0)
+        hot = sample(cpu_temp=75)
+        self.findings(advisor, hot, 1)
+        advisor.reset()
+        self.assertFalse(any(f.key.startswith('tach_missing:') for f in self.findings(advisor, hot, 30)))
+        self.assertTrue(any(f.key == 'tach_missing:cpu-fan' for f in self.findings(advisor, hot, 40)))
+
+    def test_gpu_replacement_discards_old_gpu_fan_without_discarding_cpu_baseline(self):
+        advisor = ThermalAdvisor()
+        self.findings(advisor, sample(gpu_id='old',
+            fans=[dict(name='CPU Fan', id='cpu-fan', rpm=900)],
+            gpu_fans=[dict(name='GPU Fan', id='gpu-fan', rpm=900)]), 0)
+        hot = sample(cpu_temp=75, gpu_hotspot_temp=86, gpu_id='new')
+        self.findings(advisor, hot, 1)
+        result = self.findings(advisor, hot, 11)
+        self.assertTrue(any(f.key == 'tach_missing:cpu-fan' for f in result))
+        self.assertFalse(any('gpu-fan' in f.key for f in result))
+
     def test_storage_uses_primary_temperature_and_reports_full_disk(self):
         data = sample(disks=[dict(name="980 PRO", temp=45, aux_temp=62, used_pct=95)])
         result = self.findings(ThermalAdvisor(), data, 0)

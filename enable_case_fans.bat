@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions DisableDelayedExpansion
 set "HEATMAP_ACTIVATE_PY=%~dp0.venv\Scripts\pythonw.exe"
 set "HEATMAP_ACTIVATE_SCRIPT=%~dp0enable_case_fans.py"
 set "HEATMAP_ACTIVATE_DIR=%~dp0"

@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions DisableDelayedExpansion
 
 set "APP_DIR=%~dp0"
 set "OVERLAY_PATH=%APP_DIR%overlay.py"

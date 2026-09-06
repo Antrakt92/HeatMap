@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.2.0-rc.4 — 2026-09-06
+
+- Add an opt-in, verified four-case-fan profile for the commissioned B550 AORUS
+  PRO AC: SYS1/SYS2/SYS4/SYS5, with the unused SYS6 held at full duty. Use a pinned,
+  signed PawnIO EC module and verify actual shared-controller restoration.
+- Add isolated RX 7900 XT fan control using the installed AMD ADLX runtime.
+  Core, Hotspot and Memory demand cooling independently; Hotspot reaches 100%
+  at 90°C. Retain a driver heat-response curve, freshness checks and slow ramp-down.
+- Journal original GPU fan settings before writes; recover recognized interrupted
+  sessions on next launch. Preserve external fan changes and report ownership
+  conflicts. Attempt all native cleanup operations even after a release failure.
+- Preload full duty before both case profiles enter software mode. Check shared
+  output/manual modes and independently attempt EC and primary-channel restoration.
+  Reject nonfinite control bounds and stale commissioning evidence.
+- Color the GPU fan percentage with the existing 80%/95% intensity thresholds,
+  independently from RPM. Show GPU startup failures before the first sensor sample.
+  Warn when a previously running fan disappears from enumeration under heat;
+  preserve its temperature scope and retire obsolete channels after GPU replacement.
+  Remove obsolete CPU combined-format and config-loader wrappers.
+- Preserve exclamation marks in launcher paths, fail closed on inaccessible
+  runtime ownership checks, and report filesystem races during DLL verification.
+  Repair native launcher/Task Scheduler integration scripts for Windows PowerShell 5.
+- Keep this release a preview pending real reboot/login, extended cooling/noise,
+  Explorer and physical multi-monitor acceptance. See `docs/audit-1.2.0-rc.4.md`.
+
 ## 1.2.0-rc.3 — 2026-09-06
 
 - Retry missing startup fan sensors up to four reads on the same hardware instance,

@@ -71,6 +71,7 @@ class FanModeWorkerTests(unittest.TestCase):
         modules = {"clr": mock.Mock(), "LibreHardwareMonitor": mock.Mock(),
                    "LibreHardwareMonitor.Hardware": NS(Computer=lambda: computer)}
         with (mock.patch.dict("sys.modules", modules),
+              mock.patch.object(fans, "make_shared_computer", return_value=computer),
               mock.patch.object(overlay, "_is_admin", return_value=True),
               mock.patch.object(overlay, "_runtime_dll_errors", return_value=[]),
               mock.patch.object(overlay, "read_sensors", return_value={}),

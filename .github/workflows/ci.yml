@@ -26,7 +26,7 @@ jobs:
       - run: python tools/check_constraint_ages.py
       - run: python -m pip check
       - run: python -m unittest discover -s tests
-      - run: python -m compileall -q overlay.py thermal_policy.py case_fans.py hardware_access_guard.py enable_case_fans.py setup.py tests
+      - run: python -m compileall -q overlay.py thermal_policy.py case_fans.py gpu_fans.py amd_gpu_fan.py shared_fans.py pawnio_shared.py hardware_access_guard.py enable_case_fans.py tools/commission_shared_fans.py tools/commission_gpu_fans.py setup.py tests
       - run: python tools/sync_runtime_manifest.py --check
       - run: python setup.py --verify
       - run: python setup.py --preflight
@@ -68,7 +68,7 @@ jobs:
       - run: python -m pip install -r requirements.txt
       - run: python -m pip check
       - run: python -m unittest discover -s tests
-      - run: python -m compileall -q overlay.py thermal_policy.py case_fans.py hardware_access_guard.py enable_case_fans.py setup.py tests
+      - run: python -m compileall -q overlay.py thermal_policy.py case_fans.py gpu_fans.py amd_gpu_fan.py shared_fans.py pawnio_shared.py hardware_access_guard.py enable_case_fans.py tools/commission_shared_fans.py tools/commission_gpu_fans.py setup.py tests
       - run: python tools/sync_runtime_manifest.py --check
       - run: python setup.py --verify
       - run: python setup.py --preflight

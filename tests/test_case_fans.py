@@ -218,6 +218,7 @@ class CaseFanTests(unittest.TestCase):
                            "LibreHardwareMonitor.Hardware": NS(Computer=lambda: computer)}
                 with (
                     mock.patch.dict("sys.modules", modules),
+                    mock.patch.object(fans, "make_shared_computer", return_value=computer),
                     mock.patch.object(overlay, "_is_admin", return_value=True),
                     mock.patch.object(overlay, "_runtime_dll_errors", return_value=[]),
                     mock.patch.object(fans.psutil, "Process", return_value=owner),
@@ -255,6 +256,7 @@ class CaseFanTests(unittest.TestCase):
                    "LibreHardwareMonitor.Hardware": NS(Computer=lambda: computer)}
         with (
             mock.patch.dict("sys.modules", modules),
+            mock.patch.object(fans, "make_shared_computer", return_value=computer),
             mock.patch.object(overlay, "_is_admin", return_value=True),
             mock.patch.object(overlay, "_runtime_dll_errors", return_value=[]),
             mock.patch.object(fans.psutil, "Process", return_value=owner),
@@ -281,6 +283,7 @@ class CaseFanTests(unittest.TestCase):
                     raise PermissionError("status remains locked after retries")
                 return write_status(path, state, **details)
             with tempfile.TemporaryDirectory() as directory, mock.patch.dict("sys.modules", modules), \
+                 mock.patch.object(fans, "make_shared_computer", return_value=computer), \
                  mock.patch.object(overlay, "_is_admin", return_value=True), \
                  mock.patch.object(overlay, "_runtime_dll_errors", return_value=[]), \
                  mock.patch.object(fans.psutil, "process_iter", return_value=[]), \

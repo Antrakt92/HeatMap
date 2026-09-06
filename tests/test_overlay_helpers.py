@@ -57,7 +57,7 @@ class OverlayHelperTests(unittest.TestCase):
             }, f)
 
         with self.assertLogs("HeatMap", level="WARNING"):
-            cfg = overlay.load_config()
+            cfg = overlay.load_config_result()[0]
 
         self.assertEqual(cfg["x"], 50)
         self.assertEqual(cfg["y"], 50)
@@ -139,7 +139,7 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(message, "Config saved")
         self.assertFalse(os.path.exists(f"{overlay.CONFIG_PATH}.tmp"))
-        self.assertEqual(overlay.load_config(), cfg)
+        self.assertEqual(overlay.load_config_result()[0], cfg)
 
     def test_load_config_result_valid_config_has_no_warning(self):
         cfg = {
@@ -1822,7 +1822,7 @@ class OverlayHelperTests(unittest.TestCase):
         read_sensors.assert_not_called()
         build.assert_called_once_with(None, {"cpu_temp": 58})
         self.assertFalse(computer.closed)
-        self.assertEqual(app.root.clipboard_value, 'diagnostic dump\nSensor inventory: not yet cached; latest published data only.\nCase fan controller:\n{"state": "off"}')
+        self.assertEqual(app.root.clipboard_value, 'diagnostic dump\nSensor inventory: not yet cached; latest published data only.\nCase fan controller:\n{"state": "off"}\nGPU fan controller:\n{"state": "off"}')
 
     def test_prepare_verified_pawnio_installer_returns_verified_path(self):
         with mock.patch("setup.download_pawnio", return_value=r"C:\verified\PawnIO.exe"):
@@ -2245,7 +2245,7 @@ def _update_ui_app():
         "ram_pct": _FakeLabel(),
     }
     app._GPU_FAN_MAX_RPM = 2200
-    app.fan_percent_labels = {"cpu_fan": _FakeLabel()}
+    app.fan_percent_labels = {"cpu_fan": _FakeLabel(), "gpu_fan": _FakeLabel()}
     app._CPU_FAN_MAX_RPM = 1800
     app._config_save_pending = False
     app.peaks = overlay._empty_peak_data()

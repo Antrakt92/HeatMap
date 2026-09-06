@@ -158,13 +158,13 @@ class PartialControllerTests(unittest.TestCase):
 
 class PartialReferenceTests(unittest.TestCase):
     def test_only_exact_partial_and_full_reference_channel_sets_are_valid(self):
-        for keys in ((SYS1, SYS2), (SYS1, SYS2, SYS4)):
+        for keys in ((SYS1, SYS2), (SYS1, SYS2, SYS4), (SYS1, SYS2, SYS4, PUMP5)):
             reference = {name: 1200 for name in keys}
             result = fans.full_rpm_reference(reference)
             self.assertEqual(result, reference)
             self.assertIsNot(result, reference)
         for keys in ((), (SYS1,), (SYS2,), (SYS4,), (SYS1, SYS4), (SYS2, SYS4),
-                     (SYS1, SYS2, "CPU Fan"), (SYS1, SYS2, SYS4, PUMP5)):
+                     (SYS1, SYS2, "CPU Fan"), (SYS1, SYS2, SYS4, PUMP5, PUMP6)):
             with self.subTest(keys=keys):
                 self.assertIsNone(fans.full_rpm_reference({name: 1200 for name in keys}))
         for bad in (None, True, "1200", 199, 10001, float("nan"), float("inf")):

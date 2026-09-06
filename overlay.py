@@ -31,9 +31,10 @@ import psutil
 
 from thermal_policy import ThermalAdvisor, gpu_delta, delta_severity, finite
 from case_fans import FanWorkerClient, full_rpm_reference
+from gpu_fans import GpuWorkerClient, mode_text as gpu_fan_mode_text
 from hardware_access_guard import HardwareAccessConflict, require_hardware_access
 
-VERSION = "1.2.0-rc.3"
+VERSION = "1.2.0-rc.4"
 
 
 # --- Paths ---
@@ -1984,13 +1985,6 @@ def _format_fan_reading(rpm, control_pct=None):
     return reading
 
 
-def _format_cpu_fan(rpm, control_pct, reference_rpm):
-    percent, estimated = _fan_percent(rpm, control_pct, reference_rpm)
-    if percent is not None:
-        return f"{_format_rpm(rpm)} · {'~' if estimated else ''}{round(percent)}%"
-    return _format_rpm(rpm)
-
-
 def _fan_percent(rpm, control_pct, reference_rpm=None):
     duty = finite(control_pct, 0, 100)
     if duty is not None:
@@ -2044,6 +2038,10 @@ def _case_fan_mode(status):
         channels = status.get("controlled_channels", [])
         if not isinstance(channels, list) or any(not isinstance(name, str) for name in channels):
             return "ERROR"
+        unused = status.get('unused_channels', [])
+        if not isinstance(unused, list) or any(not isinstance(name, str) or name not in channels for name in unused):
+            return 'ERROR'
+        channels = [name for name in channels if name not in unused]
         scope = "/".join(str(_fan_number(name.lower())) for name in channels)
         return f"AUTO {status.get('command_pct')}%" + (f" · SYS {scope}" if scope else "")
     return {"off": "Firmware", "stopped": "Firmware", "checking": "Checking..."}.get(state, "ERROR")
@@ -2305,7 +2303,7 @@ def _normalize_config(cfg, defaults):
             invalid_keys.append(key)
         else:
             normalized[key] = int(value)
-    for key in ("peek_enabled", "alerts_enabled", "details_enabled", "case_fans_enabled"):
+    for key in ("peek_enabled", "alerts_enabled", "details_enabled", "case_fans_enabled", "case_fans_shared_enabled", "gpu_fans_enabled"):
         if key not in provided_keys:
             continue
         if not isinstance(normalized.get(key), bool):
@@ -2379,11 +2377,6 @@ def load_config_result():
         log.warning("%s in %s", message, CONFIG_PATH)
         return cfg, message
     return cfg, None
-
-
-def load_config():
-    cfg, _message = load_config_result()
-    return cfg
 
 
 def save_config(cfg):
@@ -2468,8 +2461,11 @@ class OverlayApp:
         self.peaks = _empty_peak_data()
         self.advisor = ThermalAdvisor()
         self.thermal_findings = []
-        self.fan_worker = FanWorkerClient(APP_DIR, self.config.get("case_fan_full_rpm"))
+        self.fan_worker = FanWorkerClient(APP_DIR, self.config.get("case_fan_full_rpm"),
+                                         shared=self.config.get("case_fans_shared_enabled", False))
         self._case_fan_status = {"state": "off"}
+        self.gpu_fan_worker = GpuWorkerClient(APP_DIR)
+        self._gpu_fan_status = {"state": "off"}
         self._seen_case_fans = set()
 
         # --- tkinter setup ---
@@ -2560,6 +2556,7 @@ class OverlayApp:
         self._make_row("gpu_memory_temp", "Memory temp", parent=gpu)
         self._make_row("vram", "VRAM", parent=gpu)
         self._make_row("gpu_fan", "Fans", parent=gpu)
+        self._make_row("gpu_fan_control", "Cooling", parent=gpu)
 
         cooling = self._make_group("CASE COOLING", "#a7f3d0")
         for number in range(1, 7):
@@ -2628,6 +2625,8 @@ class OverlayApp:
         menus["Alerts & limits"].add_command(label="Reset recorded peaks", command=self.reset_peaks)
         self._add_menu_item("case_fans", "Automatic case fans: " + ("ON" if self.config.get("case_fans_enabled", False) else "OFF"),
                             self.toggle_case_fans, menus["Cooling"])
+        self._add_menu_item("gpu_fans", "Automatic GPU fans: " + ("ON" if self.config.get("gpu_fans_enabled", False) else "OFF"),
+                            self.toggle_gpu_fans, menus["Cooling"])
         self._add_menu_item("cpu_reference", self._cpu_reference_label(), self.configure_cpu_reference, menus["Cooling"])
         menus["Cooling"].add_command(label="Cooling status and policy...", command=self.show_cooling_status)
         self._add_menu_item("diagnostics", "Copy diagnostics", self.copy_diagnostics, menus["Diagnostics"])
@@ -2656,6 +2655,8 @@ class OverlayApp:
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
         if self.config.get("case_fans_enabled", False):
             self.fan_worker.start()
+        if self.config.get("gpu_fans_enabled", False):
+            self.gpu_fan_worker.start()
 
         # --- Start sensor thread ---
         self.sensor_thread = threading.Thread(target=self.sensor_loop, daemon=True)
@@ -2844,6 +2845,8 @@ class OverlayApp:
         health_context = "\nWarnings at request:\n" + "\n".join(messages) if messages else ""
         health_context += "\nCase fan controller:\n" + json.dumps(
             getattr(self, "_case_fan_status", {"state": "off"}), ensure_ascii=False)
+        health_context += "\nGPU fan controller:\n" + json.dumps(
+            getattr(self, "_gpu_fan_status", {"state": "off"}), ensure_ascii=False)
 
         def worker():
             result = None
@@ -2916,7 +2919,7 @@ class OverlayApp:
             ownership = {number: _case_fan_owner(status, f"System Fan #{number}") for number in range(1, 7)}
             owner_names = lambda owner: ", ".join(f"SYS {number}" for number, value in ownership.items() if value == owner) or "None"
             shared_note = (
-                "SYS4/5/6 remain with the motherboard: independent firmware restoration of their shared controller is not verified.\n"
+                "SYS4/5/6 are firmware-owned. The four-fan profile requires successful commissioning.\n"
                 if all(ownership[number] == "FW" for number in (4, 5, 6)) else ""
             )
             label.configure(text=(
@@ -2937,7 +2940,16 @@ class OverlayApp:
                 "Bare %: controller duty readback. ~%: RPM / reference RPM, not duty.\n"
                 "SYS numbers identify motherboard headers, not the connected device.\n"
                 + shared_note +
-                "CPU and GPU fan settings remain with firmware or their driver."
+                ("Unused SYS6 is held at 100% while the shared controller is owned.\n" if status.get('unused_channels') else "") +
+                "CPU fans remain with firmware. GPU fan control has its own switch.\n\n"
+                f"GPU cooling: {getattr(self, '_gpu_fan_status', {}).get('state', 'off')}\n"
+                f"GPU reason: {getattr(self, '_gpu_fan_status', {}).get('reason', 'Driver curve')}\n"
+                "GPU: highest Core / Hotspot / Memory speed demand wins.\n"
+                "100% at Core 75°C, Hotspot 90°C or Memory 90°C; minimum 30%.\n"
+                "GPU increases immediately; decreases wait 10 seconds, then at most 2 points/second.\n"
+                "AUTO N%+ is the requested floor; the driver may run faster.\n"
+                "Switching GPU control OFF restores the saved fan curve and Zero RPM state.\n"
+                "Clocks, voltage and power limits are not adjusted."
             ))
             callback = self.root.after(1000, refresh)
 
@@ -3201,7 +3213,7 @@ class OverlayApp:
             row, text=label_text, font=("Segoe UI", 9),
             fg=label_fg, bg="#1a1a2e", width=max(6, len(label_text) + 1), anchor="w"
         ).pack(side="left")
-        if key in ("cpu_fan", "cpu_optional_fan") or (key.startswith("case_fan_") and key != "case_fan_control"):
+        if key in ("gpu_fan", "cpu_fan", "cpu_optional_fan") or (key.startswith("case_fan_") and key != "case_fan_control"):
             if not hasattr(self, "fan_percent_labels"):
                 self.fan_percent_labels = {}
             percent = tk.Label(row, text="", font=("Segoe UI", 9), bg="#1a1a2e", fg="#888888", anchor="e")
@@ -3484,6 +3496,25 @@ class OverlayApp:
             "Details: ON" if self.details_enabled else "Details: OFF"
         )
 
+    def toggle_gpu_fans(self):
+        enabled = not self.config.get("gpu_fans_enabled", False)
+        if enabled:
+            with self.lock:
+                reason = getattr(self, "_hardware_pause_reason", None)
+                process = self.gpu_fan_worker.process
+                if not reason and process is not None and process.poll() is None and process.stdin.closed:
+                    reason = "GPU fans: waiting for saved curve restoration"
+                if not reason:
+                    self.gpu_fan_worker.start()
+            if reason:
+                self._set_health_panel([reason], 2)
+                return
+        else:
+            self.gpu_fan_worker.stop()
+        self.config["gpu_fans_enabled"] = enabled
+        self._save_config()
+        self._set_menu_label("gpu_fans", "Automatic GPU fans: " + ("ON" if enabled else "OFF"))
+
     def toggle_case_fans(self):
         enabled = not self.config.get("case_fans_enabled", False)
         if enabled:
@@ -3531,6 +3562,11 @@ class OverlayApp:
         self._set_health_panel(messages, severity)
 
     def _set_health_panel(self, messages, severity):
+        gpu_status = getattr(self, "_gpu_fan_status", {})
+        if gpu_status.get("state") == "error":
+            message = "GPU fans: " + gpu_status.get("reason", "control unavailable")
+            messages = [message] + [item for item in messages if item != message]
+            severity = 2
         self.health_messages = messages
         if hasattr(self, "health_label"):
             self.health_label.config(
@@ -3579,6 +3615,8 @@ class OverlayApp:
             alerts.append("Thermal health warning")
         if getattr(self, "_case_fan_status", {}).get("state") == "error":
             alerts.append("Case fan controller error")
+        if getattr(self, "_gpu_fan_status", {}).get("state") == "error":
+            alerts.append("GPU fan controller error")
 
         if alerts:
             self._last_alert_time = now
@@ -3729,6 +3767,8 @@ class OverlayApp:
                 self._sensor_sample_time = time.monotonic()
             if hasattr(self, "fan_worker"):
                 self.fan_worker.stop()
+            if hasattr(self, "gpu_fan_worker"):
+                self.gpu_fan_worker.stop()
         finally:
             # The worker closes its own handle once native calls return.
             _close_hardware_monitor(computer)
@@ -3738,6 +3778,16 @@ class OverlayApp:
     def update_ui(self):
         if not self.running:
             return
+
+        if hasattr(self, "gpu_fan_worker"):
+            status = self.gpu_fan_worker.poll()
+            if self.config.get("gpu_fans_enabled", False) and status.get("state") == "stopped":
+                status = dict(status, state="error", reason="Controller stopped; toggle GPU fans OFF then ON")
+            self._gpu_fan_status = status
+            state = status.get("state", "off")
+            text = gpu_fan_mode_text(status)
+            self.rows["gpu_fan_control"].config(text=text, fg="#f87171" if state == "error" else
+                                               "#facc15" if state == "checking" else "#4ade80")
 
         if hasattr(self, "fan_worker"):
             self._case_fan_status = self.fan_worker.poll()
@@ -3765,7 +3815,8 @@ class OverlayApp:
             sample_time = getattr(self, "_sensor_sample_time", None)
 
         if not data:
-            if getattr(self, "_case_fan_status", {}).get("state") == "error":
+            if any(getattr(self, key, {}).get("state") == "error"
+                   for key in ("_case_fan_status", "_gpu_fan_status")):
                 self._show_sensor_error(text="--", color="#888888")
             self.root.after(500, self.update_ui)
             return
@@ -3862,7 +3913,14 @@ class OverlayApp:
             if key == "cpu_fan":
                 self._set_fan_reading(key, rpm, data.get(key + "_pct"), self.config.get("cpu_fan_reference_rpm"), stalled)
             else:
-                self.rows[key].config(text=_format_gpu_fans(data), fg="#f87171" if stalled else "#4ade80" if rpm else "#888888")
+                self.rows[key].config(text=_format_gpu_fans(dict(data, gpu_fan_pct=None)),
+                                      fg="#f87171" if stalled else "#4ade80" if rpm else "#888888")
+                percent = finite(data.get("gpu_fan_pct"), 0, 100)
+                # A single control percentage must not be attributed to several tachometers.
+                text = (f" | {round(percent)}% ctl" if percent is not None else " | --% ctl")
+                self.fan_percent_labels[key].config(
+                    text=text if len(data.get("gpu_fans", [])) <= 1 else "",
+                    fg=_fan_percent_color(percent))
         if "cpu_optional_fan" in self.rows:
             rpm = data.get("cpu_optional_fan")
             self._set_fan_reading("cpu_optional_fan", rpm, data.get("cpu_optional_fan_pct"),
@@ -3978,7 +4036,7 @@ class OverlayApp:
             controller_error = status.get("state") == "error"
             messages = ([_case_fan_advice(status)] if controller_error else []) + ["Fresh sensor data unavailable"]
             self._set_health_panel(messages, 2 if controller_error else 1)
-            if controller_error:
+            if controller_error or getattr(self, "_gpu_fan_status", {}).get("state") == "error":
                 self._check_alerts({})
         for child in list(self.disk_frame.winfo_children()):
             child.destroy()
@@ -3989,7 +4047,7 @@ class OverlayApp:
         self._last_disk_names = []
 
         for key, label in self.rows.items():
-            if key != "case_fan_control":
+            if key not in ("case_fan_control", "gpu_fan_control"):
                 label.config(text=text, fg=color)
         for label in getattr(self, "fan_percent_labels", {}).values():
             label.config(text=" · --%", fg="#888888")
@@ -4003,6 +4061,11 @@ class OverlayApp:
         self.running = False
         self._stop_event.set()
         self._cancel_scheduled_embed()
+        if hasattr(self, "gpu_fan_worker"):
+            try:
+                self.gpu_fan_worker.stop()
+            except (OSError, ValueError):
+                log.exception("Failed to close GPU controller heartbeat pipe")
         if hasattr(self, "fan_worker"):
             try:
                 self.fan_worker.stop()

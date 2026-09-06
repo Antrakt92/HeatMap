@@ -44,7 +44,7 @@ class FanScopeTests(unittest.TestCase):
                 self.assertEqual(overlay._case_fan_mode(status), "ERROR")
 
     def test_config_accepts_both_supported_full_rpm_reference_schemas(self):
-        for channels in (fans.INDEPENDENT_TARGETS, fans.TARGETS):
+        for channels in (fans.INDEPENDENT_TARGETS, fans.TARGETS, fans.ALL_TARGETS[:-1]):
             with self.subTest(channels=channels):
                 reference = {name: 1200 for name in channels}
                 config, errors = overlay._normalize_config(
@@ -54,7 +54,7 @@ class FanScopeTests(unittest.TestCase):
 
     def test_config_rejects_unsupported_partial_or_foreign_reference_schemas(self):
         for channels in ((fans.TARGETS[0],), (fans.TARGETS[0], fans.TARGETS[2]),
-                         (*fans.TARGETS, "System Fan #5 / Pump")):
+                         fans.ALL_TARGETS):
             with self.subTest(channels=channels):
                 config, errors = overlay._normalize_config(
                     dict(case_fan_full_rpm={name: 1200 for name in channels}), overlay._default_config())
@@ -84,6 +84,7 @@ class FanScopeTests(unittest.TestCase):
                 readings = [{}, RuntimeError("synthetic sensor failure")] if failure == "sensor" else [{}, {}]
                 with (
                     mock.patch.dict("sys.modules", modules),
+                    mock.patch.object(fans, "make_shared_computer", return_value=computer),
                     mock.patch.object(overlay, "_is_admin", return_value=True),
                     mock.patch.object(overlay, "_runtime_dll_errors", return_value=[]),
                     mock.patch.object(fans.psutil, "process_iter", return_value=[]),

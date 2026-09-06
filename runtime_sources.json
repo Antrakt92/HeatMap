@@ -3,6 +3,18 @@
   "libre_hardware_monitor": {
     "version": "0.9.5"
   },
+  "shared_fan_module": {
+    "version": "0.2.10",
+    "source_commit": "c683032770575d7705d1149f9d7fa7fd381766fc",
+    "published_at": "2026-07-27T17:19:38Z",
+    "url": "https://github.com/namazso/PawnIO.Modules/releases/download/0.2.10/release_0_2_10.zip",
+    "archive_sha256": "971c7c974c538b62ac020e0442fa99d0423417bfb496dfe9a4a43ccc0abc0e63",
+    "file": "hardware_modules/IsaBridgeEC.bin",
+    "size": 51164,
+    "sha256": "2c5ec9d09ba42c980c917f83f528e9643ceee386c84ffa8765c521cd1bbba304",
+    "license": "LGPL-2.1-or-later",
+    "compatible_driver": "2.0.1"
+  },
   "pawnio": {
     "version": "2.0.1",
     "compatible_lhm": "0.9.5",

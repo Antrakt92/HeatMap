@@ -2,6 +2,15 @@
   "schema_version": 1,
   "target_framework": "net472",
   "source_commit": "30395c48a7f912894a7c392db8c11e1b97859658",
+  "supplemental_modules": [
+    {
+      "file": "hardware_modules/IsaBridgeEC.bin",
+      "version": "0.2.10",
+      "size": 51164,
+      "sha256": "2c5ec9d09ba42c980c917f83f528e9643ceee386c84ffa8765c521cd1bbba304",
+      "source_key": "shared_fan_module"
+    }
+  ],
   "files": [
     {"file":"lib/BlackSharp.Core.dll","package":"BlackSharp.Core","version":"1.0.7","package_path":"lib/net472/BlackSharp.Core.dll","nupkg_sha256":"4f713fe18ee7c85a7c49f28309adaa815714333326aa81fd4d4a81619ecaa0ab","license":"MPL-2.0"},
     {"file":"lib/DiskInfoToolkit.dll","package":"DiskInfoToolkit","version":"1.1.1","package_path":"lib/net472/DiskInfoToolkit.dll","nupkg_sha256":"756fec316dc707d4d5ed146d0221850a763c96fe01137763aace3d8cc371c840","license":"MPL-2.0"},

@@ -115,7 +115,7 @@ class FanOwnershipUiTests(TkTestCase):
             self.assertIn("Firmware: SYS 3, SYS 4, SYS 5, SYS 6", text)
             self.assertIn("Bare %: controller duty readback", text)
             self.assertIn("~%: RPM / reference RPM, not duty", text)
-            self.assertIn("independent firmware restoration", text)
+            self.assertIn("four-fan profile requires successful commissioning", text)
             self.assertNotIn("pumps", text.lower())
             close = next(child for child in dialog.winfo_children() if isinstance(child, overlay.tk.Button))
             close.invoke()
@@ -124,7 +124,7 @@ class FanOwnershipUiTests(TkTestCase):
                 app.show_cooling_status()
             label = next(child for child in app._cooling_dialog.winfo_children() if isinstance(child, overlay.tk.Label))
             self.assertIn("HeatMap: SYS 1, SYS 4", label.cget("text"))
-            self.assertNotIn("SYS4/5/6 remain", label.cget("text"))
+            self.assertNotIn("SYS4/5/6 are firmware-owned", label.cget("text"))
 
 
 if __name__ == "__main__":

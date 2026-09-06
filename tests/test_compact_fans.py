@@ -49,11 +49,6 @@ class FanPercentTests(unittest.TestCase):
             with self.subTest(rpm=rpm, duty=duty, reference=reference):
                 self.assertEqual(overlay._fan_percent(rpm, duty, reference), expected)
 
-    def test_cpu_compact_format_preserves_estimation_marker(self):
-        self.assertEqual(overlay._format_cpu_fan(1800, None, 2000), "1800 RPM · ~90%")
-        self.assertEqual(overlay._format_cpu_fan(1800, 67, 2000), "1800 RPM · 67%")
-        self.assertEqual(overlay._format_cpu_fan(1800, None, None), "1800 RPM")
-
     def test_percent_intensity_boundaries_and_unavailable_values(self):
         for percent, expected in ((0, "#4ade80"), (79.9, "#4ade80"), (80, "#fb923c"),
                                   (94.9, "#fb923c"), (95, "#f87171"), (103, "#f87171"),

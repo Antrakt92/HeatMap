@@ -24,19 +24,6 @@ class DisplayAuditTests(TkTestCase):
         for value in (None, float("nan"), 101, True):
             self.assertEqual(overlay.load_color(value), "#888888")
 
-    def test_cpu_reference_percentage_never_replaces_actual_duty(self):
-        for rpm, duty, reference, expected in (
-            (1800, 67, 2000, "1800 RPM · 67%"),
-            (1800, None, 2000, "1800 RPM · ~90%"),
-            (2060, None, 2000, "2060 RPM · ~103%"),
-            (0, None, 2000, "0 RPM · ~0%"),
-            (None, None, 2000, "--"),
-            (1800, None, None, "1800 RPM"),
-            (1800, None, 0, "1800 RPM"),
-        ):
-            with self.subTest(rpm=rpm, duty=duty, reference=reference):
-                self.assertEqual(overlay._format_cpu_fan(rpm, duty, reference), expected)
-
     def test_reference_configuration_rejects_bad_values_without_using_old_peak(self):
         for value in (float("nan"), float("inf"), True, -1, 10001, "2000"):
             cfg, errors = overlay._normalize_config({"cpu_fan_reference_rpm": value}, overlay._default_config())

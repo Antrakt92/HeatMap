@@ -44,6 +44,13 @@ upstream notices contained in each locked NuGet package.
 
 ## Reproducible provenance check
 
+The optional shared-fan profile also distributes the unmodified signed
+PawnIO.Modules 0.2.10 `IsaBridgeEC.bin`, copyright namazso and contributors,
+under LGPL-2.1-or-later. Its license is in `hardware_modules/COPYING`; immutable
+source/build links and reproduction details are in `hardware_modules/README.md`.
+This supplemental module is locked in `runtime-lock.json` and checked by
+`python setup.py --verify`; the NuGet license checker below covers the DLL bundle.
+
 Run:
 
 ```powershell

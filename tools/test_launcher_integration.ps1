@@ -223,7 +223,7 @@ public static class BrokenPython
         -Condition ($warningExitCode -eq 0) `
         -Message "Warning-only launcher fixture exited with $warningExitCode."
 
-    $warningRecords = Read-CaptureRecords -Path $capturePath
+    $warningRecords = @(Read-CaptureRecords -Path $capturePath)
     Assert-IntegrationCondition `
         -Condition ($warningRecords.Count -eq 1) `
         -Message "Warning-only fixture expected one fake PowerShell call, got $($warningRecords.Count)."
@@ -268,7 +268,7 @@ public static class BrokenPython
         -Condition ($failureExitCode -eq 1) `
         -Message "Dependency-failure launcher fixture exited with $failureExitCode instead of 1."
 
-    $failureRecords = Read-CaptureRecords -Path $capturePath
+    $failureRecords = @(Read-CaptureRecords -Path $capturePath)
     Assert-IntegrationCondition `
         -Condition ($failureRecords.Count -eq 1) `
         -Message "Dependency-failure fixture expected one fake error-display call, got $($failureRecords.Count)."
@@ -297,7 +297,7 @@ public static class BrokenPython
         -Condition ($noPythonExitCode -eq 1) `
         -Message "Missing-interpreter launcher fixture exited with $noPythonExitCode instead of 1."
 
-    $noPythonRecords = Read-CaptureRecords -Path $capturePath
+    $noPythonRecords = @(Read-CaptureRecords -Path $capturePath)
     Assert-IntegrationCondition `
         -Condition ($noPythonRecords.Count -eq 1) `
         -Message "Missing-interpreter fixture expected one fake error-display call, got $($noPythonRecords.Count)."

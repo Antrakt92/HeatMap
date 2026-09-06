@@ -13,6 +13,7 @@ import psutil
 
 import overlay
 from case_fans import FanWorkerClient, full_rpm_reference
+from thermal_policy import finite
 
 
 def close_previous_overlay():
@@ -56,6 +57,8 @@ def verify_worker(client, samples, duration=20):
     client.start()
     deadline = time.monotonic() + 60
     active_since = None
+    first_stamp = None
+    last_stamp = None
     failure = None
     try:
         while time.monotonic() < deadline:
@@ -63,10 +66,21 @@ def verify_worker(client, samples, duration=20):
             if status["state"] in ("error", "stopped", "off"):
                 raise RuntimeError(status.get("reason", "Controller stopped before verification"))
             if status["state"] == "active":
-                samples.append(status)
-                active_since = active_since or time.monotonic()
-                if time.monotonic() - active_since >= duration:
-                    break
+                stamp = finite(status.get("time"), 0, 1e12)
+                if stamp is None or (last_stamp is not None and stamp < last_stamp):
+                    raise RuntimeError("Case fan verification timestamp is invalid or moved backward")
+                if last_stamp is None or stamp > last_stamp:
+                    # The client can return a recent cached snapshot on a busy
+                    # status file. Re-reading it is not another hardware sample.
+                    samples.append(status)
+                    if active_since is None:
+                        active_since, first_stamp = time.monotonic(), stamp
+                    last_stamp = stamp
+                    if (time.monotonic() - active_since >= duration
+                            and stamp - first_stamp >= duration):
+                        break
+            else:
+                active_since = first_stamp = None
             time.sleep(2)
         else:
             raise RuntimeError("Case fan verification timed out")
@@ -115,7 +129,8 @@ def main():
             config, error = overlay.load_config_result()
             if error:
                 raise RuntimeError(error)
-            client = FanWorkerClient(overlay.APP_DIR, config.get("case_fan_full_rpm"))
+            client = FanWorkerClient(overlay.APP_DIR, config.get("case_fan_full_rpm"),
+                                     shared=config.get('case_fans_shared_enabled', False))
             report["restore"] = verify_worker(client, report["samples"])
             if Path(overlay.CONFIG_PATH).exists():
                 shutil.copy2(overlay.CONFIG_PATH, directory / f"config-before-fans-{time.time_ns()}.json")
