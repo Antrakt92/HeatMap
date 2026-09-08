@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.1 — 2026-09-08
+
+- Use ordinary version numbers for published releases. This release contains the
+  same runtime fixes as 1.2.0-rc.8; only the version label and documentation change.
+- Keep known limitations and unperformed hardware checks explicit in AUDIT.md
+  and release notes. A new version number does not certify those checks.
+
 ## 1.2.0-rc.8 — 2026-09-08
 
 - Check CLR/LHM compatibility in the candidate-dependency CI lane without
