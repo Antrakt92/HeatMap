@@ -109,7 +109,7 @@ class StartupDiscoveryTests(unittest.TestCase):
 
 class StartupStatusTests(unittest.TestCase):
     def status(self, **fields):
-        return dict(state="checking", phase="discovering", control_attempted=False,
+        return dict(profile=fans.PROFILE, state="checking", phase="discovering", control_attempted=False,
                     baseline=[], controlled_channels=[], firmware_channels=[],
                     pid=7, time=100, **fields)
 
@@ -124,12 +124,16 @@ class StartupStatusTests(unittest.TestCase):
                 elif fault == "baseline":
                     status["baseline"] = [dict(name="System Fan #1")]
                 client = fans.FanWorkerClient(".")
+                client.started = 90
                 client.process = mock.Mock(pid=7, stdin=io.StringIO())
                 client.process.poll.return_value = None
                 client.status_path = "unused"
                 with (mock.patch.object(fans, "open_status_file", return_value=io.StringIO(json.dumps(status))),
                       mock.patch.object(fans.time, "time", return_value=100)):
-                    self.assertEqual(client.poll()["state"], "checking" if fault is None else "error")
+                    report = client.poll()
+                    self.assertEqual(report["state"], "checking" if fault is None else "error")
+                    if fault is not None:
+                        self.assertEqual(report["reason"], "Missing case fan controller channels")
 
     def test_explicit_no_takeover_is_distinct_from_unknown_restore(self):
         status = self.status()

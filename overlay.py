@@ -1690,6 +1690,13 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
                         gpu_load_candidates.append(
                             (priority, _normalized_sensor_name(sensor.Name), val)
                         )
+                elif hw_type == HardwareType.GpuNvidia and _normalized_sensor_name(sensor.Name) == "gpu memory":
+                    # LHM 0.9.5 NVIDIA computes capacity usage here; AMD's same
+                    # sensor name reports memory activity and cannot be used.
+                    val = _safe_percentage(sensor.Value)
+                    if val is not None:
+                        previous = gpu_sample["gpu_vram_pct"]
+                        gpu_sample["gpu_vram_pct"] = max(previous, val) if previous is not None else val
             elif sensor.SensorType == SensorType.Fan:
                 val = _safe_round(sensor.Value, minimum=0)
                 gpu_sample["gpu_fans"].append({
@@ -1810,6 +1817,7 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
         control_sensors = []
         board_fans = []
         controls_by_fan_id = {}
+        optional_fan = None
         for sensor in _iter_hardware_sensors(hw, include_subhardware=True):
             name = sensor.Name.lower()
             if sensor.SensorType == SensorType.Fan:
@@ -1826,6 +1834,7 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
                     if "cpu" in name and "optional" in name:
                         data["cpu_optional_fan"] = val
                         data["cpu_optional_fan_id"] = data["fans"][-1]["id"]
+                        optional_fan = data["fans"][-1]
             elif sensor.SensorType == SensorType.Control:
                 val = _safe_percentage(sensor.Value)
                 identifier = str(getattr(sensor, "Identifier", ""))
@@ -1850,20 +1859,18 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
             selected_fan = _select_cpu_fan(fan_sensors)
             if selected_fan is not None:
                 _name, data["cpu_fan"] = selected_fan
-                data["cpu_fan_id"] = next((fan["id"] for fan in data["fans"]
-                                            if fan["name"].lower() == _name), None)
-        else:
-            selected_fan = None
-        if data["cpu_fan_pct"] is None:
-            fan_name = selected_fan[0] if selected_fan else None
-            data["cpu_fan_pct"] = _select_cpu_fan_control(
-                control_sensors,
-                fan_name,
-                data["cpu_fan"] is not None,
+                cpu_fan = next(fan for fan in board_fans
+                               if fan["name"].lower() == _name and fan["rpm"] == data["cpu_fan"])
+                data["cpu_fan_id"] = cpu_fan["id"]
+                # Native identities disambiguate duplicate names across chips.
+                # Name matching remains a fallback only for unidentified sensors.
+                data["cpu_fan_pct"] = (cpu_fan["control_pct"] if "/fan/" in cpu_fan["id"] else
+                                       _select_cpu_fan_control(control_sensors, _name, True))
+        if optional_fan is not None:
+            data["cpu_optional_fan_pct"] = (
+                optional_fan["control_pct"] if "/fan/" in optional_fan["id"] else
+                next((value for name, value in control_sensors if name == optional_fan["name"].lower()), None)
             )
-        optional_name = next((name for name, _ in fan_sensors if "cpu" in name and "optional" in name), None)
-        if optional_name:
-            data["cpu_optional_fan_pct"] = next((value for name, value in control_sensors if name == optional_name), None)
 
     elif hw_type == HardwareType.Memory:
         for sensor in hw.Sensors:
@@ -3862,10 +3869,7 @@ class OverlayApp:
                 self._hardware_pause_reason = reason
                 self.sensor_data = {"error": reason}
                 self._sensor_sample_time = time.monotonic()
-            if hasattr(self, "fan_worker"):
-                self.fan_worker.stop()
-            if hasattr(self, "gpu_fan_worker"):
-                self.gpu_fan_worker.stop()
+            self._stop_fan_workers()
         finally:
             # The worker closes its own handle once native calls return.
             _close_hardware_monitor(computer)
@@ -4155,24 +4159,25 @@ class OverlayApp:
         if hasattr(self, "canvas"):
             self._clamp_saved_position_to_visible_screen(persist=True)
 
+    def _stop_fan_workers(self):
+        for label, attribute in (("GPU", "gpu_fan_worker"), ("Case", "fan_worker")):
+            worker = getattr(self, attribute, None)
+            if worker is None:
+                continue
+            try:
+                worker.stop()
+            except (OSError, ValueError):
+                # Each child must get its restore request even if another pipe
+                # fails. Never kill it: its finally block owns restoration.
+                log.exception("Failed to close %s controller heartbeat pipe", label)
+
     def quit(self):
         if not self.running:
             return
         self.running = False
         self._stop_event.set()
         self._cancel_scheduled_embed()
-        if hasattr(self, "gpu_fan_worker"):
-            try:
-                self.gpu_fan_worker.stop()
-            except (OSError, ValueError):
-                log.exception("Failed to close GPU controller heartbeat pipe")
-        if hasattr(self, "fan_worker"):
-            try:
-                self.fan_worker.stop()
-            except (OSError, ValueError):
-                # The child also watches owner lifetime and heartbeat expiry.
-                # Never kill it: its finally block owns firmware restoration.
-                log.exception("Failed to close controller heartbeat pipe")
+        self._stop_fan_workers()
         # Cancel all pending after() callbacks to prevent TclError on destroy
         try:
             for after_id in list(self.root.tk.call('after', 'info') or ()):

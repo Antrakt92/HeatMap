@@ -122,8 +122,8 @@ class FanWorkerClient:
                 text=True, bufsize=1, creationflags=subprocess.CREATE_NO_WINDOW,
                 cwd=self.app_dir,
             )
-        except OSError as exc:
-            self.error = str(exc)
+        except (OSError, psutil.Error) as exc:
+            self.error = str(exc) or type(exc).__name__
 
     def poll(self):
         status = self._poll_status()
@@ -157,6 +157,15 @@ class FanWorkerClient:
                 # A busy file must not manufacture an error while the last
                 # verified report is still fresh. All PID/expiry checks still run.
                 status = self.last_status
+            if not isinstance(status, dict) or status.get("profile") != PROFILE:
+                return {"state": "error", "reason": "Invalid case fan controller profile"}
+            if "reason" in status and not isinstance(status["reason"], str):
+                return {"state": "error", "reason": "Invalid case fan controller reason"}
+            if (any(key in status and type(status[key]) is not bool
+                    for key in ("restore_confirmed", "control_attempted"))
+                    or "restore_errors" in status and (not isinstance(status["restore_errors"], list)
+                    or any(not isinstance(item, str) for item in status["restore_errors"]))):
+                return {"state": "error", "reason": "Invalid case fan restoration report"}
             stamp = finite(status.get("time"), 0, 1e12)
             if status.get("state") not in ("checking", "active", "error", "stopped"):
                 return {"state": "error", "reason": "Invalid case fan controller status"}
@@ -192,7 +201,7 @@ class FanWorkerClient:
                     # A fast terminal result can precede the first poll. This path
                     # is unique to this launch and must have been written after it.
                     valid_pid = exited and terminal and stamp is not None and stamp >= self.started - 2
-            if not valid_pid or stamp is None or time.time() - stamp < -2:
+            if not valid_pid or stamp is None or stamp < self.started - 2 or time.time() - stamp < -2:
                 return {"state": "error", "reason": "Case fan controller status is stale"}
             if not (exited and terminal) and time.time() - stamp > 10:
                 return {"state": "error", "reason": "Case fan controller status is stale"}

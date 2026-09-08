@@ -228,8 +228,9 @@ class GpuSession:
             self.journal.before_write(self.baseline, self.expected, expected)
         if before_write is not None:
             before_write()
+        if self.journal is not None or before_write is not None:
             # Filesystem flush and process inspection can take seconds. Recheck
-            # ownership afterward so an intervening external edit survives.
+            # ownership even when the caller needs no extra process guard.
             self.check()
         if check_cancelled is not None:
             check_cancelled()
@@ -336,7 +337,7 @@ class GpuWorkerClient(FanWorkerClient):
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 text=True, bufsize=1, creationflags=subprocess.CREATE_NO_WINDOW, cwd=self.app_dir)
         except (OSError, psutil.Error) as exc:
-            self.error = str(exc)
+            self.error = str(exc) or type(exc).__name__
 
     def poll(self):
         if self.error:

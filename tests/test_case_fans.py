@@ -137,11 +137,12 @@ class CaseFanTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             client = fans.FanWorkerClient(directory)
             client.status_path = os.path.join(directory, "state.json")
+            client.started = 5
             client.process = mock.Mock(pid=7)
             client.process.poll.return_value = 0
             for state in ("stopped", "error"):
                 with open(client.status_path, "w") as stream:
-                    json.dump(dict(pid=7, time=10, state=state, reason="original reason"), stream)
+                    json.dump(dict(profile=fans.PROFILE, pid=7, time=10, state=state, reason="original reason"), stream)
                 with mock.patch.object(fans.time, "time", return_value=100):
                     self.assertEqual(client.poll()["reason"], "original reason")
 
@@ -155,7 +156,7 @@ class CaseFanTests(unittest.TestCase):
             child = mock.Mock()
             child.parents.return_value = [NS(pid=7)]
             with open(client.status_path, "w") as stream:
-                json.dump(dict(pid=8, time=100, state="active", command_pct=100), stream)
+                json.dump(dict(profile=fans.PROFILE, pid=8, time=100, state="active", command_pct=100), stream)
             with mock.patch.object(fans.time, "time", return_value=100), \
                  mock.patch.object(fans.psutil, "Process", return_value=child):
                 self.assertEqual(client.poll()["state"], "active")
@@ -165,12 +166,13 @@ class CaseFanTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             client = fans.FanWorkerClient(directory)
             client.status_path = os.path.join(directory, "state.json")
+            client.started = 90
             client.process = mock.Mock(pid=7, stdin=io.StringIO())
             client.process.poll.return_value = None
             for fields in (dict(state="unknown", pid=7), dict(state="active", pid=None, command_pct=80),
                            dict(state="active", pid=7, command_pct=float("nan"))):
                 with open(client.status_path, "w") as stream:
-                    json.dump(dict(time=100, **fields), stream)
+                    json.dump(dict(profile=fans.PROFILE, time=100, **fields), stream)
                 with mock.patch.object(fans.time, "time", return_value=100):
                     self.assertEqual(client.poll()["state"], "error")
 
@@ -190,7 +192,7 @@ class CaseFanTests(unittest.TestCase):
             client.process = mock.Mock(pid=7, stdin=io.StringIO())
             for pid, stamp, exitcode in ((7, 100, 1), (7, 80, None), (8, 100, None), (7, 110, None)):
                 with open(client.status_path, "w") as stream:
-                    json.dump(dict(pid=pid, time=stamp, state="active"), stream)
+                    json.dump(dict(profile=fans.PROFILE, pid=pid, time=stamp, state="active", command_pct=80), stream)
                 client.process.poll.return_value = exitcode
                 with mock.patch.object(fans.time, "time", return_value=100):
                     self.assertEqual(client.poll()["state"], "error")

@@ -539,7 +539,7 @@ launcher retry policy создавала бы повторяющиеся consent
 - **Python** + **tkinter** — интерфейс
 - **LibreHardwareMonitor** — чтение датчиков через .NET interop (pythonnet)
 - **psutil** — дополнительные системные метрики
-- **Windows API (ctypes)** — встраивание в рабочий стол
+- **Windows API (ctypes)** — размещение окна под приложениями и поднятие без захвата фокуса
 
 ## Зачем нужны права администратора?
 

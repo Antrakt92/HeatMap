@@ -902,7 +902,9 @@ def _recover_runtime_transaction(lib_dir=LIB_DIR, manifest_path=MANIFEST_PATH):
 
 @contextmanager
 def _runtime_restore_lock(app_dir=APP_DIR):
-    lock_id = hashlib.sha256(os.path.abspath(app_dir).encode("utf-8")).hexdigest()[:16]
+    # Windows casing and junction aliases must share one restore transaction.
+    canonical_dir = os.path.normcase(os.path.realpath(app_dir))
+    lock_id = hashlib.sha256(canonical_dir.encode("utf-8")).hexdigest()[:16]
     lock_path = os.path.join(tempfile.gettempdir(), f"HeatMap-runtime-{lock_id}.lock")
     lock_file = open(lock_path, "a+b")
     try:

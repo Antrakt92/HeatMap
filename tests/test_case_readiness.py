@@ -135,10 +135,11 @@ class CaseReadinessTests(unittest.TestCase):
 
     def test_client_accepts_waiting_with_explicit_no_takeover_evidence(self):
         client = case_fans.FanWorkerClient('.', shared=True)
+        client.started = 90
         client.process = mock.Mock(pid=7, stdin=io.StringIO())
         client.process.poll.return_value = None
         client.status_path = 'unused'
-        status = dict(state='checking', phase='waiting', control_attempted=False,
+        status = dict(profile=case_fans.PROFILE, state='checking', phase='waiting', control_attempted=False,
                       baseline=[], controlled_channels=[], firmware_channels=[],
                       pid=7, time=100, remaining_seconds=45)
         with (mock.patch.object(case_fans, 'open_status_file', return_value=io.StringIO(json.dumps(status))),

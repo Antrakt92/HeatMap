@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- Keep CPU fan readings and control percentages associated with the same board
+  and channel. Show valid NVIDIA memory usage when VRAM capacity is unavailable;
+  never interpret AMD memory activity as fullness.
+- Request both fan workers to stop even if one heartbeat pipe cannot close;
+  share the guarded stop sequence between hardware pause and normal shutdown.
+- Reject wrong-profile, previous-launch and malformed case-controller reports.
+  Surface owner-process lookup failures as startup errors for both controllers.
+- Recheck GPU ownership after recovery-journal writes even without an additional
+  caller callback, preserving an external fan-curve edit during the flush.
+- Use one runtime restore lock across Windows path aliases. Preserve settings
+  saved during commissioning shutdown, use the running Python environment for
+  restart, and retain restart errors in the commissioning report.
+- Require explicit restoration evidence before commissioning restarts HeatMap.
+  See `docs/audit-cleanup-2026-09-08.md` for validation and remaining manual checks.
+
 ## 1.2.0-rc.7 — 2026-09-07
 
 - Leave a cool GPU on its saved driver curve, including Zero RPM. Intervene only

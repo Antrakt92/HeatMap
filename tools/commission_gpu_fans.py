@@ -105,12 +105,20 @@ def main():
         if client is not None:
             report['status_path'] = client.status_path
             report['terminal'] = client.poll()
-            if not report['terminal'].get('restore_confirmed'):
+            terminal = report['terminal']
+            if terminal.get('restore_confirmed') is not True or terminal.get('restore_errors') != []:
                 closed = False
+                report.setdefault('reason', 'GPU fan restoration not confirmed by final status')
+                report['state'] = 'error'
         if closed:
-            process = subprocess.Popen([str(ROOT / '.venv/Scripts/pythonw.exe'), str(ROOT / 'overlay.py')],
-                                       cwd=str(ROOT), creationflags=subprocess.CREATE_NO_WINDOW)
-            report['overlay_restarted_pid'] = process.pid
+            try:
+                process = subprocess.Popen([str(Path(sys.executable).with_name('pythonw.exe')), str(ROOT / 'overlay.py')],
+                                           cwd=str(ROOT), creationflags=subprocess.CREATE_NO_WINDOW)
+                report['overlay_restarted_pid'] = process.pid
+            except OSError as exc:
+                report['restart_error'] = str(exc)
+                report.setdefault('reason', 'HeatMap restart failed: ' + str(exc))
+                report['state'] = 'error'
         report['finished'] = time.time()
         report_path.write_text(json.dumps(report, indent=2), encoding='utf-8')
         print(str(report_path))

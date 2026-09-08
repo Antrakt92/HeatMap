@@ -10,7 +10,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import overlay
-from case_fans import FanWorkerClient, open_status_file
+from case_fans import FanWorkerClient
 from enable_case_fans import close_previous_overlay, verify_worker
 from hardware_access_guard import require_hardware_access
 from pawnio_shared import verified_module
@@ -34,11 +34,12 @@ def main():
             raise RuntimeError('Administrator access is required; this tool never elevates itself')
         verified_module()
         require_hardware_access()
+        close_previous_overlay()
+        closed = True
+        # Closing the overlay can persist its latest settings and position.
         config, error = overlay.load_config_result()
         if error:
             raise RuntimeError(error)
-        close_previous_overlay()
-        closed = True
         backup = directory / f'config-before-{time.time_ns()}.json'
         backup.write_text(json.dumps(config, indent=2), encoding='utf-8')
         result['config_backup'] = str(backup)
@@ -61,17 +62,24 @@ def main():
             result['worker_status_path'] = client.status_path
             terminal = client.poll()
             result['terminal'] = terminal
-            if not terminal.get('restore_confirmed') and terminal.get('control_attempted') is not False:
+            restored = terminal.get('restore_confirmed') is True and terminal.get('restore_errors') == []
+            never_acquired = (result['state'] == 'error' and terminal.get('restore_errors') == []
+                              and overlay._case_fan_never_acquired(terminal))
+            if not restored and not never_acquired:
                 # Do not start another hardware owner on top of uncertain restoration.
                 closed = False
+                result.setdefault('reason', 'Case fan restoration not confirmed by final status')
+                result['state'] = 'error'
         if closed:
             try:
                 require_hardware_access()
-                process = subprocess.Popen([str(ROOT / '.venv/Scripts/pythonw.exe'), str(ROOT / 'overlay.py')],
+                process = subprocess.Popen([str(Path(sys.executable).with_name('pythonw.exe')), str(ROOT / 'overlay.py')],
                     cwd=str(ROOT), creationflags=subprocess.CREATE_NO_WINDOW)
                 result['overlay_restarted_pid'] = process.pid
             except Exception as exc:
                 result['restart_error'] = str(exc)
+                result.setdefault('reason', 'HeatMap restart failed: ' + str(exc))
+                result['state'] = 'error'
         result['finished'] = time.time()
         save()
     return 1 if result['state'] == 'error' else 0
