@@ -20,6 +20,20 @@ embedding.
 - Tests are under `tests/`; many WinAPI/tkinter behaviors still need targeted
   fake-object tests or manual Windows smoke checks.
 
+## Release Policy
+
+- A user request to release HeatMap means a normal public GitHub release with
+  an ordinary `X.Y.Z` version, not a release candidate or prerelease.
+- Do not add `rc`, alpha or beta suffixes. The published result must not remain
+  a draft or have GitHub's prerelease flag enabled.
+- Physical reboot/login, gaming, fan/noise, Explorer and multi-monitor checks
+  are informational follow-ups, not publication gates. Do not delay a requested
+  release, ask for their approval or invent a candidate stage because they are open.
+- Keep the automated verification and runtime-integrity checks below. Describe
+  actual evidence honestly; publication does not imply unperformed checks passed.
+- This policy supersedes candidate/physical-acceptance publication conditions
+  in historical audit reports and release notes. Keep old tags as history.
+
 ## Risk Areas
 
 - Do not change admin/elevation behavior, DLL verification, or bundled runtime
