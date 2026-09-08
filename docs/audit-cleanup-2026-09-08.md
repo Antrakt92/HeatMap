@@ -1,7 +1,8 @@
 # HeatMap reliability and repository cleanup audit
 
-This audit covers the current main revision after 1.2.0-rc.7. Changes remain
-unreleased; the existing prerelease and physical acceptance gates are unchanged.
+This audit covers the fixes released in 1.2.0-rc.8 after 1.2.0-rc.7. The existing
+prerelease and physical acceptance gates are unchanged. Package, GitHub CI and
+installed restart evidence are recorded in the release notes after verification.
 
 ## Confirmed defects
 

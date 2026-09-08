@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.0-rc.8 — 2026-09-08
 
 - Check CLR/LHM compatibility in the candidate-dependency CI lane without
   incorrectly requiring production's exact pins; retain strict launcher preflight.
