@@ -71,4 +71,16 @@ jobs:
       - run: python -m compileall -q overlay.py startup_readiness.py thermal_policy.py case_fans.py gpu_fans.py amd_gpu_fan.py shared_fans.py pawnio_shared.py hardware_access_guard.py enable_case_fans.py tools/commission_shared_fans.py tools/commission_gpu_fans.py setup.py tests
       - run: python tools/sync_runtime_manifest.py --check
       - run: python setup.py --verify
-      - run: python setup.py --preflight
+      # Production preflight deliberately requires the exact known-good pins.
+      # This lane probes candidate dependencies without changing that policy.
+      - name: Check candidate CLR and LHM compatibility
+        shell: python
+        run: |
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path.cwd()))
+          import setup
+          messages = setup._check_staged_lhm_bridge(setup.LIB_DIR)
+          for message in messages:
+              print(message)
+          raise SystemExit(1 if messages else 0)

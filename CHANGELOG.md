@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Check CLR/LHM compatibility in the candidate-dependency CI lane without
+  incorrectly requiring production's exact pins; retain strict launcher preflight.
 - Keep CPU fan readings and control percentages associated with the same board
   and channel. Show valid NVIDIA memory usage when VRAM capacity is unavailable;
   never interpret AMD memory activity as fullness.

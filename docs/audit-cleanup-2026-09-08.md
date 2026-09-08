@@ -83,6 +83,18 @@ temporary Windows directories and casing aliases, not a live runtime swap.
 No driver installation, dependency upgrade, fan command, UAC prompt, production
 Task Scheduler modification or live overlay restart is part of this audit.
 
+## CI follow-up
+
+The previous scheduled candidate-dependency run failed after installing cffi
+2.1.1 because production preflight requires the known-good 2.0.0 pin. That step
+rejected version drift before reaching CLR/LHM, so it was not a compatibility
+test. Only the `latest-compatible` final step now calls the existing isolated
+CLR/LHM bridge probe. Candidate unit tests, dependency consistency, manifest and
+DLL checks remain; every known-good job and the launcher retain strict preflight.
+No package version, lockfile or local installation changed. The replacement
+probe is checked locally with the existing environment; future candidate
+versions still require their own CI evidence and the dependency promotion gate.
+
 ## Manual acceptance
 
 - Restart HeatMap normally; compare CPU tachometer/duty and GPU VRAM with the
