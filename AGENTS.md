@@ -71,10 +71,19 @@ manual elevated Windows smoke checklist because automated coverage is partial.
 - Use fake LHM objects for sensor parsing tests.
 - Keep color/alert/sensor policy changes synchronized across read, render, and
   alert paths.
-- Update `AUDIT.md` when confirmed backlog items are closed or when a new
-  concrete risk is found.
+- During authorized implementation, update `AUDIT.md` for in-scope closures
+  or confirmed risks; read-only reviews report findings without editing it.
 
 ## Git
 
 - Stage only files changed for the current task.
 - Do not add AI co-author trailers.
+
+## Runtime Maintenance Boundary
+
+Keep `runtime-lock.json`, `runtime_sources.json`, `constraints-known-good.txt`
+and DLL manifests consistent when the authorized change touches their runtime.
+Use the dependency gate before downloads or dependency changes. `setup.py --verify`
+checks integrity; setup/download modes and elevated launchers are different
+operations. Do not launch UAC or the live overlay for an instruction-only edit.
+Report unperformed hardware/elevated checks separately from automated results.
