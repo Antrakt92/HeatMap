@@ -19,6 +19,15 @@ Verified fixes for sensors, controller reports, and commissioning:
 `docs/audit-cleanup-2026-09-08.md`. This software audit does not close the hardware
 checks listed below.
 
+## P2 - Extended operation after a low-space failure
+
+Low-space recovery follow-up: a controller reported `ENOSPC` while C: was nearly
+full. Automated fault injection now covers full and compact terminal-report
+failures, preserving verified restoration or explicitly leaving it unknown.
+These tests do not simulate a physically full system volume. Extended operation
+after the user frees disk space remains to be checked; do not fill C: deliberately
+or treat successful report publication as evidence of hardware restoration.
+
 ## P2 - Physical reboot/login acceptance
 
 The new audit removed the forced prolonged GPU test at 100% during normal startup

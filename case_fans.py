@@ -533,6 +533,39 @@ def write_status(path, state, **details):
             time.sleep(delays[attempt])
 
 
+class TerminalStatusWriteError(OSError):
+    """Rollback finished, but both terminal reports failed to reach the owner."""
+
+
+def write_terminal_status(path, state, *, publisher=None, **details):
+    """Publish rollback evidence, with one smaller report if full publication fails."""
+    publisher = publisher or write_status
+    try:
+        publisher(path, state, **details)
+        return None
+    except OSError as exc:
+        publication_error = str(exc) or type(exc).__name__
+    # Disk exhaustion can reject the full diagnostic payload while a smaller
+    # report still fits. Retain actual rollback/ownership evidence, never infer it
+    # from publication success. A persistence fault must disable watchdog retry.
+    compact = {key: details[key] for key in (
+        "profile", "restore_confirmed", "restore_errors", "control_attempted",
+        "controlled_channels", "firmware_channels", "recovery_pending", "settings_conflict",
+    ) if key in details}
+    if details.get("baseline") == []:
+        compact["baseline"] = []  # Preserve positive evidence of no case fan takeover.
+    original_reason = details.get("reason", "Controller stopped")
+    compact["reason"] = f"{original_reason}; final status publication failed: {publication_error}"
+    compact["status_publication_error"] = publication_error
+    try:
+        publisher(path, "error", **compact)
+    except OSError as exc:
+        # Do not let main replace this with an error that discards rollback state.
+        # Without a published terminal report, the client keeps restoration unknown.
+        raise TerminalStatusWriteError(f"{compact['reason']}; compact report failed: {exc}") from exc
+    return publication_error
+
+
 def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, commission=False):
     import overlay
     if not overlay._is_admin():
@@ -711,7 +744,7 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
                 shared_session.close()
             except Exception as exc:
                 restore_errors.append(f'Shared bridge close: {exc}')
-        write_status(status_path, "error" if error or restore_errors else "stopped",
+        publication_error = write_terminal_status(status_path, "error" if error or restore_errors else "stopped",
                      discovery=dict(discovery),
                      reason=error or ("Restore unconfirmed: restart Windows" if restore_errors else
                                       "Returned to firmware control" if control_attempted else "Stopped before case fan takeover"),
@@ -720,6 +753,7 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
                      control_attempted=control_attempted,
                      restore_confirmed=bool(session and baseline and not restore_errors),
                      **({"stop_cause": stop_cause} if stop_cause else {}))
+        error = error or publication_error
     return 1 if error or restore_errors else 0
 
 
@@ -735,6 +769,8 @@ def main():
     try:
         with WorkerMutex():
             return worker(args.status, args.owner_pid, args.owner_created, args.full_rpm, args.shared, args.commission)
+    except TerminalStatusWriteError:
+        return 1
     except Exception as exc:
         write_status(args.status, "error", reason=str(exc))
         return 1

@@ -93,6 +93,8 @@ SENSOR_STATUS_DRIVER_MISSING = "driver_missing"
 SENSOR_STATUS_CPU_UNAVAILABLE = "cpu_unavailable"
 SENSOR_STATUS_STALE = "stale"
 SENSOR_STALE_SECONDS = 10
+VOLUME_REFRESH_SECONDS = 30
+VOLUME_STALE_SECONDS = VOLUME_REFRESH_SECONDS + SENSOR_STALE_SECONDS
 SENSOR_WARMUP_SECONDS = 60
 SENSOR_INIT_RETRY_SECONDS = 30
 STATUS_CONFIG_SAVE_ERROR = "config_save_error"
@@ -1433,6 +1435,45 @@ def _empty_sensor_data():
     }
 
 
+def _read_volume_usage():
+    """Read mounted fixed volumes; physical-device LHM percentages can hide a full C:."""
+    result = {"volumes": [], "volume_errors": []}
+    try:
+        partitions = psutil.disk_partitions(all=False)
+    except (OSError, psutil.Error) as exc:
+        result["volume_errors"].append(f"Cannot enumerate local volumes: {exc}")
+        return result
+    seen = set()
+    for partition in partitions:
+        mount = partition.mountpoint
+        if "fixed" not in partition.opts.split(",") or not re.fullmatch(r"[A-Za-z]:[\\/]", mount):
+            continue  # Do not poll network shares, optical drives, or empty removable drives.
+        name = mount[:2].upper()
+        if name in seen:
+            continue
+        seen.add(name)
+        try:
+            usage = psutil.disk_usage(mount)
+            total, free = finite(usage.total, 1, 2**64 - 1), finite(usage.free, 0, 2**64 - 1)
+            if total is None or free is None or free > total:
+                raise ValueError("invalid volume capacity")
+            result["volumes"].append(dict(name=name, total_bytes=int(total), free_bytes=int(free),
+                                          used_pct=100 * (total - free) / total))
+        except (OSError, psutil.Error, ValueError) as exc:
+            result["volume_errors"].append(f"{name} {exc}")
+    return result
+
+
+def _fresh_volume_data(snapshot, now):
+    """Volume freshness is independent of the slower native hardware inventory."""
+    if snapshot is None:
+        return None
+    stamp, data = snapshot
+    if finite(stamp, 0, 1e15) is None or not 0 <= now - stamp <= VOLUME_STALE_SECONDS:
+        return None
+    return data
+
+
 def _empty_peak_data():
     return {
         "cpu_temp": None,
@@ -2284,7 +2325,7 @@ def build_sensor_diagnostics(computer, sensor_data=None, is_admin=None, pawnio_i
             "gpu_temp", "gpu_temp_label", "gpu_core_temp", "gpu_hotspot_temp", "gpu_memory_temp",
             "gpu_load", "gpu_clock", "gpu_fan", "gpu_fan_pct",
             "gpu_vram_pct", "gpu_vram_used_gb", "gpu_vram_total_gb",
-            "ram_pct", SENSOR_STATUS_KEY, SENSOR_REINIT_KEY,
+            "ram_pct", "volumes", "volume_errors", SENSOR_STATUS_KEY, SENSOR_REINIT_KEY,
         ):
             if key in sensor_data:
                 lines.append(f"  {key}={_format_diag_value(sensor_data.get(key))}")
@@ -2877,6 +2918,16 @@ class OverlayApp:
         with self.lock:
             snapshot = getattr(self, "_sensor_diagnostics_snapshot", None)
             data = dict(getattr(self, "sensor_data", {}))
+            volume_snapshot = getattr(self, "_volume_snapshot", None)
+        now = time.monotonic()
+        volumes = _fresh_volume_data(volume_snapshot, now)
+        if volumes is None:
+            volume_context = ("\nLatest volume space: unavailable or not current."
+                              if volume_snapshot is not None or "volumes" in data or "volume_errors" in data else "")
+            data = {key: value for key, value in data.items() if key not in ("volumes", "volume_errors")}
+        else:
+            volume_context = (f"\nLatest volume space (age: {now - volume_snapshot[0]:.1f}s):\n"
+                              + json.dumps(volumes, ensure_ascii=False))
         if snapshot is None:
             cache_context = "\nSensor inventory: not yet cached; latest published data only."
         else:
@@ -2896,7 +2947,7 @@ class OverlayApp:
                     return
                 detail = snapshot[1] if snapshot is not None else build_sensor_diagnostics(None, data)
                 if not self._stop_event.is_set():
-                    result = (True, detail + cache_context + health_context)
+                    result = (True, detail + cache_context + volume_context + health_context)
             except Exception as e:
                 log.warning("Failed to collect diagnostics: %s", e, exc_info=True)
                 result = (False, str(e))
@@ -3786,12 +3837,20 @@ class OverlayApp:
         consecutive_reinit_hints = 0
         next_init_retry = 0
         next_storage_update = 0
+        next_volume_update = 0
+        volume_data = {}
         storage_failed = False
         needs_reinit = computer is None
         first_initialization = computer is None
         try:
             while self.running and not self._stop_event.is_set():
                 require_hardware_access()
+                if time.monotonic() >= next_volume_update:
+                    volume_data = _read_volume_usage()
+                    volume_time = time.monotonic()
+                    next_volume_update = volume_time + VOLUME_REFRESH_SECONDS
+                    with self.lock:
+                        self._volume_snapshot = (volume_time, volume_data)
                 if (computer is None or needs_reinit) and time.monotonic() >= next_init_retry:
                     if computer is not None:
                         log.warning("Reinitializing hardware monitor after incomplete sensor samples or read errors")
@@ -3821,6 +3880,7 @@ class OverlayApp:
                 try:
                     update_storage = time.monotonic() >= next_storage_update
                     data = read_sensors(computer, update_storage=update_storage)
+                    data.update(volume_data)
                     if update_storage:
                         next_storage_update = time.monotonic() + 30
                         storage_failed = bool(data.get(SENSOR_STORAGE_FAILED_KEY))
@@ -3858,7 +3918,7 @@ class OverlayApp:
                     consecutive_reinit_hints = 0
                     log.error("Sensor read error: %s", e, exc_info=True)
                     with self.lock:
-                        self.sensor_data = {"error": str(e)}
+                        self.sensor_data = {"error": str(e), **volume_data}
                         self._sensor_sample_time = time.monotonic()
                     needs_reinit = consecutive_errors >= 3
                 self._stop_event.wait(2)
@@ -3959,6 +4019,7 @@ class OverlayApp:
         with self.lock:
             data = self.sensor_data
             sample_time = getattr(self, "_sensor_sample_time", None)
+            volume_snapshot = getattr(self, "_volume_snapshot", None)
 
         if not data:
             if any(getattr(self, key, {}).get("state") == "error"
@@ -3988,12 +4049,15 @@ class OverlayApp:
 
         if "error" in data:
             self._set_sensor_status(None)
-            self._show_sensor_error()
+            self._show_sensor_error(volume_data=_fresh_volume_data(volume_snapshot, time.monotonic()))
             self.root.after(2000, self.update_ui)
             return
 
         self._set_sensor_status(data.get(SENSOR_STATUS_KEY))
-        self._update_thermal_advice(data)
+        # A slow native read may finish after the volume snapshot has expired.
+        volumes = _fresh_volume_data(volume_snapshot, time.monotonic()) or {}
+        self._update_thermal_advice(dict(data, volumes=volumes.get("volumes", []),
+                                        volume_errors=volumes.get("volume_errors", [])))
 
         # CPU: temp + clock + load%
         cpu_temp = data.get("cpu_temp")
@@ -4176,16 +4240,22 @@ class OverlayApp:
 
         self.root.after(2000, self.update_ui)
 
-    def _show_sensor_error(self, text="ERR", color="#f87171"):
+    def _show_sensor_error(self, text="ERR", color="#f87171", volume_data=None):
         if hasattr(self, "advisor"):
             self.advisor.reset()
-        self.thermal_findings = []
+        # Evaluate only independently fresh Windows volumes, never old thermal
+        # values or the thermal advisor's missing-sensor history on this path.
+        self.thermal_findings = (ThermalAdvisor().evaluate(volume_data, time.monotonic(),
+            _METRIC_THRESHOLDS, _disk_temperature_thresholds) if volume_data is not None else [])
         if hasattr(self, "health_label"):
             status = getattr(self, "_case_fan_status", {})
             controller_error = status.get("state") == "error"
-            messages = ([_case_fan_advice(status)] if controller_error else []) + ["Fresh sensor data unavailable"]
-            self._set_health_panel(messages, 2 if controller_error else 1)
-            if controller_error or getattr(self, "_gpu_fan_status", {}).get("state") == "error":
+            messages = (([_case_fan_advice(status)] if controller_error else [])
+                        + [item.text for item in self.thermal_findings] + ["Fresh sensor data unavailable"])
+            severity = max(2 if controller_error else 1,
+                           max((item.severity for item in self.thermal_findings), default=0))
+            self._set_health_panel(messages, severity)
+            if severity == 2 or getattr(self, "_gpu_fan_status", {}).get("state") == "error":
                 self._check_alerts({})
         for child in list(self.disk_frame.winfo_children()):
             child.destroy()

@@ -13,8 +13,8 @@ import uuid
 
 import psutil
 
-from case_fans import (FanWorkerClient, OwnerHeartbeatExpired, WorkerMutex,
-                       open_status_file, replace_status_file, write_status)
+from case_fans import (FanWorkerClient, OwnerHeartbeatExpired, TerminalStatusWriteError, WorkerMutex,
+                       open_status_file, replace_status_file, write_status, write_terminal_status)
 from hardware_access_guard import require_hardware_access
 from thermal_policy import finite, interpolate
 from startup_readiness import StartupCancelled, StartupNotReady, wait_for_readiness
@@ -638,7 +638,8 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
                 adapter.close()
             except Exception as exc:
                 restore_errors.append(str(exc))
-        publish('error' if error or restore_errors else 'stopped',
+        publication_error = write_terminal_status(path, 'error' if error or restore_errors else 'stopped',
+                publisher=write_status, profile=PROFILE,
                 reason=error or ('GPU fan restore unconfirmed' if restore_errors else
                                 'GPU startup cancelled before takeover' if startup_cancelled else
                                 'Saved GPU fan curve restored' if control_attempted or recovered else
@@ -649,6 +650,7 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
                 restore_errors=restore_errors, baseline=session.baseline if session else None,
                 settings_conflict=session.conflict if session else None,
                 **({'stop_cause': stop_cause} if stop_cause else {}))
+        error = error or publication_error
     return 1 if error or restore_errors else 0
 
 
@@ -665,6 +667,8 @@ def main():
         with WorkerMutex('Global\\HeatMapGpuFanControlV1'):
             return worker(args.status, args.owner_pid, args.owner_created, commission=args.commission,
                           accept_external=args.accept_external)
+    except TerminalStatusWriteError:
+        return 1
     except Exception as exc:
         write_status(args.status, 'error', profile=PROFILE, reason=str(exc), control_attempted=None,
                      recovery_pending=None, restore_confirmed=False, restore_errors=[])

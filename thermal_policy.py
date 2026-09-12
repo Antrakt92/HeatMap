@@ -262,6 +262,15 @@ class ThermalAdvisor:
                         findings.append(Finding(timer_key, 1, f"{label}: tachometer unavailable under load"))
                     else:
                         findings.append(Finding(key, 2, f"{label}: 0 RPM under load"))
+        for volume in data.get("volumes", []):
+            used = finite(volume.get("used_pct"), 0, 100)
+            free = finite(volume.get("free_bytes"), 0, 2**64 - 1)
+            warning, critical = temperature_thresholds["disk_used"]
+            if used is not None and free is not None and used >= warning:
+                findings.append(Finding("volume:" + volume["name"], 2 if used >= critical else 1,
+                                        f"Volume {volume['name']} {round(used)}% full · {free / 2**30:.1f} GiB free"))
+        for error in data.get("volume_errors", []):
+            findings.append(Finding("volume_error:" + error, 1, "Volume space unavailable: " + error))
         for disk in data.get("disks", []):
             value = finite(disk.get("temp"), 1)
             if value is not None and value >= disk_thresholds(disk["name"])[0]:

@@ -13,7 +13,9 @@ A lightweight Windows widget that displays PC temperatures, load, and component 
 | **Case** | RPM and available percentage for each SYS header, plus automatic control status |
 | **Warnings** | Overheating, a large Hotspot–Core difference, a previously spinning fan stopping under load, and memory/disk usage |
 
-CPU/GPU/RAM update every 2 seconds; storage sensors update approximately every 30 seconds to avoid unnecessary I/O. Temperatures and memory/disk usage are color-coded:
+CPU/GPU/RAM update every 2 seconds; storage sensors and local volume capacity update approximately every 30 seconds to avoid unnecessary I/O. The warning panel identifies full drive-letter volumes separately (for example, `Volume C: 99% full · 4.2 GiB free`), using the same 80% warning and 90% critical thresholds. A physical SSD's aggregate percentage can hide a nearly full partition. Volume read failures remain visible in the panel and Copy diagnostics.
+
+Temperatures and memory/disk usage are color-coded:
 
 - **Green** — below the warning threshold
 - **Yellow** — elevated; keep an eye on it
@@ -331,6 +333,10 @@ and temporary write conflicts are retried with a total delay of no more than
 0.63 seconds. A brief read failure uses the last confirmed report while it still
 passes the existing freshness check (10 seconds for a running process).
 A persistent write error still triggers restoration of the original control.
+If the full shutdown report cannot be saved, the worker tries one compact report
+that retains the actual restoration result. If that also fails, restoration
+remains unknown to the window. Storage failures do not qualify for automatic
+heartbeat recovery; review disk space and diagnostics before re-enabling control.
 WinError 5 fix analysis: [report](docs/fan-status-io-fix-2026-09-05.md).
 
 Hardware validation results and limitations:

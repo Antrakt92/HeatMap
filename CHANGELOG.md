@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Preserve verified fan-restoration results in a compact fallback when the full
+  shutdown report cannot be written. Storage failures remain errors and do not
+  trigger automatic controller recovery.
+- Warn about individual local volumes and show free GiB, so a nearly full C:
+  is visible even when the physical SSD reports a lower overall percentage.
+
 ## 1.2.2 — 2026-09-12
 
 - Recover automatically once after a fan controller loses the window heartbeat,

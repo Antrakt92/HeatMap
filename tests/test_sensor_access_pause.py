@@ -13,13 +13,14 @@ class SensorAccessPauseTests(unittest.TestCase):
         with mock.patch.object(overlay, "require_hardware_access"), \
              mock.patch.object(overlay, "init_hardware_monitor") as initialize, \
              mock.patch.object(overlay, "read_sensors", return_value={"cpu_temp": 50}) as read, \
+             mock.patch.object(overlay, "_read_volume_usage", return_value={"volumes": [], "volume_errors": []}), \
              mock.patch.object(app, "_cache_sensor_diagnostics", side_effect=ValueError("format failed")), \
              mock.patch.object(overlay.psutil, "cpu_percent"), \
              mock.patch.object(overlay, "log"):
             app.sensor_loop()
         self.assertEqual(read.call_count, 5)
         initialize.assert_not_called()
-        self.assertEqual(app.sensor_data, {"cpu_temp": 50})
+        self.assertEqual(app.sensor_data, {"cpu_temp": 50, "volumes": [], "volume_errors": []})
         computer.Close.assert_called_once_with()
 
     def test_pause_layout_fits_final_conflict_explanation_before_returning(self):
