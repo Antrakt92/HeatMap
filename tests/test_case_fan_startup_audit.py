@@ -153,7 +153,7 @@ class CaseFanStartupAuditTests(unittest.TestCase):
         for cancellation in ('read_stop', 'read_expired', 'read_owner'):
             with self.subTest(cancellation=cancellation):
                 result, controls, reports = self.run_worker(reference, cancellation=cancellation)
-                self.assertEqual(result, 0)
+                self.assertEqual(result, 1 if cancellation.endswith('expired') else 0)
                 self.assertFalse(reports[-1]['control_attempted'])
                 for control in controls:
                     control.SetSoftware.assert_not_called()
@@ -162,7 +162,7 @@ class CaseFanStartupAuditTests(unittest.TestCase):
         for cancellation in ('guard_stop', 'guard_expired', 'guard_owner'):
             with self.subTest(cancellation=cancellation):
                 result, controls, reports = self.run_worker(None, cancellation=cancellation)
-                self.assertEqual(result, 0)
+                self.assertEqual(result, 1 if cancellation.endswith('expired') else 0)
                 self.assertFalse(reports[-1]['control_attempted'])
                 for control in controls:
                     control.SetSoftware.assert_not_called()

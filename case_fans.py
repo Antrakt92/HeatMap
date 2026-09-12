@@ -31,6 +31,18 @@ MOTHERBOARD_REDISCOVERY_INTERVAL = 10.0
 MOTHERBOARD_REDISCOVERY_LIMIT = 5
 
 
+class OwnerHeartbeatExpired(StartupCancelled):
+    """Watchdog cancellation, distinct from an intentional owner shutdown."""
+
+
+def _check_case_owner(stop, owner, heartbeat):
+    # An intentional stop or lost owner must never qualify for watchdog recovery.
+    if stop.is_set() or not owner.is_running():
+        raise StartupCancelled("Overlay owner stopped")
+    if time.monotonic() - heartbeat[0] > 15:
+        raise OwnerHeartbeatExpired("Case fan owner heartbeat expired")
+
+
 def open_status_file(path):
     """Read a snapshot without denying Windows rename/delete access."""
     if os.name != "nt":
@@ -161,6 +173,9 @@ class FanWorkerClient:
                 return {"state": "error", "reason": "Invalid case fan controller profile"}
             if "reason" in status and not isinstance(status["reason"], str):
                 return {"state": "error", "reason": "Invalid case fan controller reason"}
+            if "stop_cause" in status and (status["stop_cause"] != "heartbeat_expired"
+                                            or status.get("state") != "error"):
+                return {"state": "error", "reason": "Invalid case fan controller stop cause"}
             if (any(key in status and type(status[key]) is not bool
                     for key in ("restore_confirmed", "control_attempted"))
                     or "restore_errors" in status and (not isinstance(status["restore_errors"], list)
@@ -301,8 +316,7 @@ def wait_for_controls(computer, read_sensors, stop, owner, heartbeat, status_pat
     last_reopen_elapsed = 0.0
 
     def check():
-        if stop.is_set() or not owner.is_running() or time.monotonic() - heartbeat[0] > 15:
-            raise StartupCancelled("Overlay owner stopped during case fan readiness")
+        _check_case_owner(stop, owner, heartbeat)
         require_hardware_access()
 
     def probe():
@@ -554,6 +568,7 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
     if abs(owner.create_time() - owner_created) > 0.01:
         raise RuntimeError("Overlay owner process changed")
     error = None
+    stop_cause = None
     baseline = []
     controlled_channels = []
     firmware_channels = []
@@ -563,12 +578,10 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
     discovery = {}
 
     def check_before_command():
-        if stop.is_set() or not owner.is_running() or time.monotonic() - heartbeat[0] > 15:
-            raise StartupCancelled("Overlay owner stopped before case fan command")
+        _check_case_owner(stop, owner, heartbeat)
         require_hardware_access()
         # Process inspection may block; recheck the owner after the guard too.
-        if stop.is_set() or not owner.is_running() or time.monotonic() - heartbeat[0] > 15:
-            raise StartupCancelled("Overlay owner stopped before case fan command")
+        _check_case_owner(stop, owner, heartbeat)
 
     try:
         require_hardware_access()
@@ -587,8 +600,7 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
         controlled_channels = list(ALL_TARGETS) if shared else [item[0] for item in session.controls]
         firmware_channels = [] if shared else [name for name in TARGETS if name not in controlled_channels]
         baseline = session.readings()
-        if stop.is_set() or not owner.is_running() or time.monotonic() - heartbeat[0] > 15:
-            raise StartupCancelled("Overlay owner stopped before case fan activation")
+        _check_case_owner(stop, owner, heartbeat)
         commissioned = not commission and commissioned_rpm_reference(full_rpm, shared) is not None
         ramp = None if commissioned else FanRamp()
         airflow = CaseAirflowPolicy()
@@ -603,15 +615,11 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
         stall_since = {}
         verified_full_rpm = None
         while not stop.is_set() and owner.is_running():
-            now = time.monotonic()
-            if now - heartbeat[0] > 15:
-                # A crashed/frozen UI cannot silently retain ownership indefinitely.
-                break
+            _check_case_owner(stop, owner, heartbeat)
             require_hardware_access()
             data = overlay.read_sensors(computer)
             now = time.monotonic()
-            if stop.is_set() or not owner.is_running() or now - heartbeat[0] > 15:
-                break
+            _check_case_owner(stop, owner, heartbeat)
             thermal_demand, _ = case_fan_demand(data)
             demand, reason = airflow.update(data, now)
             policy_demand = demand
@@ -665,6 +673,8 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
                          temperatures={key: data.get(key) for key in (
                              "cpu_temp", "gpu_core_temp", "gpu_hotspot_temp", "gpu_memory_temp")})
             stop.wait(2)
+    except OwnerHeartbeatExpired as exc:
+        error, stop_cause = str(exc), "heartbeat_expired"
     except StartupCancelled:
         pass  # Ordinary owner shutdown is not a controller failure.
     except Exception as exc:
@@ -708,7 +718,8 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
                      restore_errors=restore_errors, baseline=baseline,
                      controlled_channels=controlled_channels, firmware_channels=firmware_channels,
                      control_attempted=control_attempted,
-                     restore_confirmed=bool(session and baseline and not restore_errors))
+                     restore_confirmed=bool(session and baseline and not restore_errors),
+                     **({"stop_cause": stop_cause} if stop_cause else {}))
     return 1 if error or restore_errors else 0
 
 

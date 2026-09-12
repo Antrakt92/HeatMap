@@ -3596,6 +3596,7 @@ class OverlayApp:
                 if not reason and process is not None and process.poll() is None and process.stdin.closed:
                     reason = "GPU fans: waiting for saved curve restoration"
                 if not reason:
+                    getattr(self, "_fan_recovery", {}).pop("gpu_fan_worker", None)
                     self.gpu_fan_worker.start(accept_external=True)
             if reason:
                 self._set_health_panel([reason], 2)
@@ -3619,6 +3620,7 @@ class OverlayApp:
                     if process is not None and process.poll() is None and process.stdin.closed:
                         reason, severity = "Case fans: waiting for firmware restore", 1
                     else:
+                        getattr(self, "_fan_recovery", {}).pop("fan_worker", None)
                         self.fan_worker.start()
             if reason:
                 self._set_health_panel([reason], severity)
@@ -3660,7 +3662,7 @@ class OverlayApp:
             severity = max(severity, 1)
         gpu_status = getattr(self, "_gpu_fan_status", {})
         if gpu_status.get("state") == "error":
-            message = "GPU fans: " + gpu_status.get("reason", "control unavailable")
+            message = "GPU fans: " + gpu_status.get("display_reason", gpu_status.get("reason", "control unavailable"))
             messages = [message] + [item for item in messages if item != message]
             severity = 2
         for name, status in (("Case fans", getattr(self, "_case_fan_status", {})),
@@ -3876,14 +3878,60 @@ class OverlayApp:
             with self.lock:
                 self.computer = None
 
+    def _poll_fan_controller(self, attribute, setting):
+        worker = getattr(self, attribute)
+        status = worker.poll()
+        if not hasattr(self, "_fan_recovery"):
+            self._fan_recovery = {}
+        recovery = self._fan_recovery.setdefault(attribute, {"attempts": 0})
+        now = time.monotonic()
+        # WHY: a UI pause must still release hardware. Retry only a positively
+        # identified watchdog stop with verified rollback, never a native fault
+        # or settings conflict. One retry per explicit enable prevents loops.
+        with self.lock:
+            eligible = (
+                self.running and self.config.get(setting, False)
+                and not getattr(self, "_hardware_pause_reason", None)
+                and status.get("state") == "error"
+                and status.get("stop_cause") == "heartbeat_expired"
+                and status.get("restore_confirmed") is True
+                and status.get("restore_errors") == []
+                and not status.get("recovery_pending")
+                and not status.get("settings_conflict")
+                and recovery["attempts"] == 0
+                and worker.process is not None and worker.process.poll() is not None
+            )
+            if eligible:
+                previous_poll = recovery.get("last_poll")
+                if previous_poll is None or not 0 <= now - previous_poll <= 5:
+                    recovery["responsive_since"] = now
+                recovery["last_poll"] = now
+                if now - recovery["responsive_since"] >= 2:
+                    recovery["attempts"] += 1
+                    recovery["previous_stop"] = dict(status)
+                    log.warning("Restarting %s after verified watchdog rollback: %s",
+                                attribute, status.get("reason"))
+                    worker.start()  # GPU recovery must not accept external settings.
+                    status = {"state": "checking", "reason": "Restarting after UI heartbeat timeout"}
+            else:
+                recovery.pop("last_poll", None)
+                recovery.pop("responsive_since", None)
+        if "previous_stop" in recovery:
+            status = dict(status, recovery_attempts=recovery["attempts"],
+                          previous_stop=recovery["previous_stop"])
+        if self.config.get(setting, False) and status.get("state") == "stopped":
+            # Keep the worker's actual reason intact in Copy diagnostics.
+            label = "GPU fans" if attribute == "gpu_fan_worker" else "automatic case fans"
+            status = dict(status, state="error",
+                          display_reason=f"Controller stopped; toggle {label} OFF then ON")
+        return status
+
     def update_ui(self):
         if not self.running:
             return
 
         if hasattr(self, "gpu_fan_worker"):
-            status = self.gpu_fan_worker.poll()
-            if self.config.get("gpu_fans_enabled", False) and status.get("state") == "stopped":
-                status = dict(status, state="error", reason="Controller stopped; toggle GPU fans OFF then ON")
+            status = self._poll_fan_controller("gpu_fan_worker", "gpu_fans_enabled")
             self._gpu_fan_status = status
             state = status.get("state", "off")
             text = gpu_fan_mode_text(status)
@@ -3891,10 +3939,7 @@ class OverlayApp:
                                                "#facc15" if state == "checking" else "#4ade80")
 
         if hasattr(self, "fan_worker"):
-            self._case_fan_status = self.fan_worker.poll()
-            if self.config.get("case_fans_enabled", False) and self._case_fan_status.get("state") == "stopped":
-                self._case_fan_status = dict(self._case_fan_status, state="error",
-                                             reason="Controller stopped; toggle automatic case fans OFF then ON")
+            self._case_fan_status = self._poll_fan_controller("fan_worker", "case_fans_enabled")
             status = self._case_fan_status
             state = status.get("state", "off")
             reference = full_rpm_reference(status.get("verified_full_rpm"))

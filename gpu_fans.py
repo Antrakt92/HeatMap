@@ -13,7 +13,8 @@ import uuid
 
 import psutil
 
-from case_fans import FanWorkerClient, WorkerMutex, open_status_file, replace_status_file, write_status
+from case_fans import (FanWorkerClient, OwnerHeartbeatExpired, WorkerMutex,
+                       open_status_file, replace_status_file, write_status)
 from hardware_access_guard import require_hardware_access
 from thermal_policy import finite, interpolate
 from startup_readiness import StartupCancelled, StartupNotReady, wait_for_readiness
@@ -370,6 +371,8 @@ class GpuWorkerClient(FanWorkerClient):
                 raise ValueError('Invalid GPU fan status fields')
             if 'reason' in status and not isinstance(status['reason'], str):
                 raise ValueError('Invalid GPU fan status reason')
+            if 'stop_cause' in status and (status['stop_cause'] != 'heartbeat_expired' or state != 'error'):
+                raise ValueError('Invalid GPU fan stop cause')
             if ('restore_confirmed' in status and type(status['restore_confirmed']) is not bool or
                     'restore_errors' in status and (not isinstance(status['restore_errors'], list) or
                     any(not isinstance(item, str) for item in status['restore_errors']))):
@@ -434,6 +437,7 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
     threading.Thread(target=heartbeat.listen, daemon=True).start()
     adapter = session = None
     error = None
+    stop_cause = None
     restore_errors = []
     baseline_readings = None
     recovery_pending = None
@@ -455,7 +459,7 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
             if stop.is_set() or not owner.is_running():
                 raise StartupCancelled('GPU owner stopped before takeover')
             if heartbeat.expired():
-                raise RuntimeError('GPU owner heartbeat expired before takeover')
+                raise OwnerHeartbeatExpired('GPU owner heartbeat expired')
 
         def check_startup():
             check_owner()
@@ -534,13 +538,11 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
             takeover_time = started
             ramp = GpuRamp(initial=100)
         while not stop.is_set() and owner.is_running():
-            if heartbeat.expired():
-                raise RuntimeError('GPU owner heartbeat expired')
+            check_owner()
             require_hardware_access()
             data = adapter.readings()
             now = time.monotonic()
-            if stop.is_set() or not owner.is_running() or heartbeat.expired():
-                break
+            check_owner()
             if not isinstance(data, dict):
                 raise RuntimeError('Invalid AMD GPU metrics response')
             if session is not None:
@@ -608,8 +610,7 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
                 ramp.command = command
                 ramp.cool_since = None
             if command != session.command:
-                if stop.is_set() or not owner.is_running() or heartbeat.expired():
-                    break
+                check_owner()
                 require_hardware_access()
                 session.apply(command, before_write=check_startup, check_cancelled=check_owner)
                 control_attempted = True
@@ -618,6 +619,8 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
                     readings=data, baseline=session.baseline, control_attempted=True,
                     verified_full_rpm=verified_rpm, recovered_previous_session=recovered, gpu=adapter.identity)
             stop.wait(2)
+    except OwnerHeartbeatExpired as exc:
+        error, stop_cause = str(exc), 'heartbeat_expired'
     except StartupCancelled:
         startup_cancelled = not (control_attempted or bool(session and session.touched))
     except Exception as exc:
@@ -644,7 +647,8 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
                 recovery_pending=recovery_pending,
                 restore_confirmed=bool((control_attempted or recovered) and not restore_errors),
                 restore_errors=restore_errors, baseline=session.baseline if session else None,
-                settings_conflict=session.conflict if session else None)
+                settings_conflict=session.conflict if session else None,
+                **({'stop_cause': stop_cause} if stop_cause else {}))
     return 1 if error or restore_errors else 0
 
 
