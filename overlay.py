@@ -34,7 +34,7 @@ from case_fans import FanWorkerClient, full_rpm_reference
 from gpu_fans import GpuWorkerClient, mode_text as gpu_fan_mode_text
 from hardware_access_guard import HardwareAccessConflict, require_hardware_access
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 
 
 # --- Paths ---

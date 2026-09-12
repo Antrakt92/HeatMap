@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.2 — 2026-09-12
+
+- Recover automatically once after a fan controller loses the window heartbeat,
+  provided the old process has exited, restoration is verified, and the window
+  is responsive again. Keep manual recovery for repeated failures, conflicts,
+  unknown shutdown causes, and unconfirmed restoration.
+- Preserve the actual controller shutdown reason in Copy diagnostics, including
+  the previous report after recovery. Identify heartbeat expiry consistently
+  during startup, sensor reads, and before fan commands.
+- Keep the 15-second watchdog, verified rollback, and external GPU settings
+  protections. Reject malformed controller stop causes before recovery.
+
 ## 1.2.1 — 2026-09-08
 
 - Use ordinary version numbers for published releases. This release contains the
