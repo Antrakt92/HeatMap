@@ -9,11 +9,13 @@ A lightweight Windows widget that displays PC temperatures, load, and component 
 | **CPU** | Temperature, frequency, load (%), RPM of both fans, and percentage when available |
 | **GPU** | Core, Hotspot, and memory temperatures on separate rows, load (%), VRAM, and fans |
 | **RAM** | Used/total GB and usage (%) |
-| **Drives** | Temperature and space used (%) — multiple drives supported |
+| **Drives** | Physical drive temperatures; separate C:, D:, etc. rows show used/total GiB and volume fullness (%) |
 | **Case** | RPM and available percentage for each SYS header, plus automatic control status |
 | **Warnings** | Overheating, a large Hotspot–Core difference, a previously spinning fan stopping under load, and memory/disk usage |
 
-CPU/GPU/RAM update every 2 seconds; storage sensors and local volume capacity update approximately every 30 seconds to avoid unnecessary I/O. The warning panel identifies full drive-letter volumes separately (for example, `Volume C: 99% full · 4.2 GiB free`), using the same 80% warning and 90% critical thresholds. A physical SSD's aggregate percentage can hide a nearly full partition. Volume read failures remain visible in the panel and Copy diagnostics.
+CPU/GPU/RAM update every 2 seconds; storage sensors and local volume capacity update approximately every 30 seconds to avoid unnecessary I/O. Each local drive-letter volume has its own capacity row, such as `C: 396.0/400.0 GiB 99.0%`: the first number is used space, the second is total capacity. Fullness comes from Windows volume capacity, not the physical drive's LHM aggregate. Drive temperatures remain beside the device model; the app does not guess which device hosts a volume. GiB means 1,073,741,824 bytes.
+
+Capacity rows, warnings, alerts, and usage peaks all use Windows volume readings. The warning panel also shows free GiB, using the same 80% warning and 90% critical thresholds. Volume read failures remain visible in the panel and Copy diagnostics. Expired readings are not displayed as current, and fresh volume rows remain available if hardware-temperature readings fail.
 
 Temperatures and memory/disk usage are color-coded:
 

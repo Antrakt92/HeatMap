@@ -1844,7 +1844,7 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
         disk_data = {
             "name": name,
             "temp": primary_temp if primary_temp is not None else disk_temp,
-            "used_pct": disk_used,
+            "lhm_used_pct": disk_used,  # Raw physical-device aggregate; never volume fullness.
         }
         if len(temperature_readings) > 1:
             disk_data["temperatures"] = temperature_readings
@@ -2245,9 +2245,10 @@ def _update_peak_values(peaks, data):
         temp = disk.get("temp")
         if temp is not None and (peaks.get("disk_temp") is None or temp > peaks["disk_temp"]):
             peaks["disk_temp"] = temp
-        used = disk.get("used_pct")
+    for volume in data.get("volumes", []):
+        used = finite(volume.get("used_pct"), 0, 100)
         if used is not None and (peaks.get("disk_used_pct") is None or used > peaks["disk_used_pct"]):
-            peaks["disk_used_pct"] = used
+            peaks["disk_used_pct"] = round(used, 1)
     return peaks
 
 
@@ -2272,7 +2273,7 @@ def _format_peak_usage(peaks):
     if peaks.get("ram_pct") is not None:
         parts.append(f"RAM {peaks['ram_pct']}%")
     if peaks.get("disk_used_pct") is not None:
-        parts.append(f"DISK {peaks['disk_used_pct']}%")
+        parts.append(f"VOLUME {peaks['disk_used_pct']:g}%")
     return "  ".join(parts) if parts else "--"
 
 
@@ -3764,9 +3765,10 @@ class OverlayApp:
             dtemp = disk.get("temp")
             if dtemp is not None and dtemp >= _disk_temperature_thresholds(disk["name"])[1]:
                 alerts.append(f"{disk['name']} {dtemp}°C")
-            used = disk.get("used_pct")
+        for volume in data.get("volumes", []):
+            used = finite(volume.get("used_pct"), 0, 100)
             if used is not None and used >= _METRIC_THRESHOLDS["disk_used"][1]:
-                alerts.append(f"{disk['name']} {used}%")
+                alerts.append(f"Volume {volume['name']} {used:.1f}%")
 
         if any(item.severity == 2 for item in getattr(self, "thermal_findings", [])):
             alerts.append("Thermal health warning")
@@ -4056,8 +4058,9 @@ class OverlayApp:
         self._set_sensor_status(data.get(SENSOR_STATUS_KEY))
         # A slow native read may finish after the volume snapshot has expired.
         volumes = _fresh_volume_data(volume_snapshot, time.monotonic()) or {}
-        self._update_thermal_advice(dict(data, volumes=volumes.get("volumes", []),
-                                        volume_errors=volumes.get("volume_errors", [])))
+        data = dict(data, volumes=volumes.get("volumes", []),
+                    volume_errors=volumes.get("volume_errors", []))
+        self._update_thermal_advice(data)
 
         # CPU: temp + clock + load%
         cpu_temp = data.get("cpu_temp")
@@ -4172,42 +4175,7 @@ class OverlayApp:
         else:
             self.rows["ram_pct"].config(text="", fg="#888888")
 
-        # Disks: orange name left, temp + usage% right
-        disks = data.get("disks", [])
-        disk_names = [d["name"] for d in disks]
-
-        # Rebuild disk rows if disk list changed
-        disk_rows_changed = disk_names != self._last_disk_names
-        if disk_rows_changed:
-            self._last_disk_names = disk_names
-            # Destroy all children of disk_frame at once (avoids double-destroy)
-            for child in list(self.disk_frame.winfo_children()):
-                child.destroy()
-            for key in list(self.disk_labels):
-                self.rows.pop(key, None)
-                self.rows.pop(key + "_usage", None)
-            self.disk_labels.clear()
-            # Create new rows
-            for idx, disk in enumerate(disks):
-                key = f"disk_{idx}"
-                self._make_disk_row(key, disk["name"], parent=self.disk_frame)
-                self.disk_labels.append(key)
-            self._clamp_saved_position_to_visible_screen(persist=True)
-
-        for i, key in enumerate(self.disk_labels):
-            if i >= len(disks):
-                break
-            disk = disks[i]
-            dtemp = disk.get("temp")
-            if dtemp is not None:
-                self.rows[key].config(text=f"{dtemp}°C", fg=disk_temp_color(dtemp, disk["name"]))
-            else:
-                self.rows[key].config(text="--", fg="#888888")
-            used = disk.get("used_pct")
-            if used is not None:
-                self.rows[key + "_usage"].config(text=f"{used}%", fg=disk_usage_color(used))
-            else:
-                self.rows[key + "_usage"].config(text="", fg="#888888")
+        self._update_storage_rows(data.get("disks", []), volumes)
 
         _update_peak_values(self.peaks, data)
         for key, text in _detail_row_values(data, self.peaks).items():
@@ -4240,6 +4208,43 @@ class OverlayApp:
 
         self.root.after(2000, self.update_ui)
 
+    def _update_storage_rows(self, disks, volume_data):
+        # Device temperature and filesystem capacity have different identities.
+        # Never infer drive letters from device names or LHM enumeration order.
+        entries = [("device", disk["name"], disk) for disk in disks]
+        entries += [("volume", volume["name"], volume)
+                    for volume in (volume_data or {}).get("volumes", [])]
+        identities = [(kind, name) for kind, name, _ in entries]
+        if identities != self._last_disk_names:
+            self._last_disk_names = identities
+            for child in list(self.disk_frame.winfo_children()):
+                child.destroy()
+            for key in self.disk_labels:
+                self.rows.pop(key, None)
+                self.rows.pop(key + "_usage", None)
+            self.disk_labels.clear()
+            for index, (_, name, _) in enumerate(entries):
+                key = f"disk_{index}"
+                self._make_disk_row(key, name, parent=self.disk_frame)
+                self.disk_labels.append(key)
+        for key, (kind, name, entry) in zip(self.disk_labels, entries):
+            if kind == "device":
+                temperature = entry.get("temp")
+                value = f"{temperature}°C" if temperature is not None else "--"
+                color = disk_temp_color(temperature, name) if temperature is not None else "#888888"
+                usage, usage_color = "", "#888888"
+            else:
+                total = finite(entry.get("total_bytes"), 1, 2**64 - 1)
+                free = finite(entry.get("free_bytes"), 0, 2**64 - 1)
+                percent = finite(entry.get("used_pct"), 0, 100)
+                value = (f"{(total - free) / 2**30:.1f}/{total / 2**30:.1f} GiB"
+                         if total is not None and free is not None and free <= total else "--")
+                color = "#cbd5e1" if value != "--" else "#888888"
+                usage = f"{percent:.1f}%" if percent is not None else "--"
+                usage_color = disk_usage_color(percent) if percent is not None else "#888888"
+            self.rows[key].config(text=value, fg=color)
+            self.rows[key + "_usage"].config(text=usage, fg=usage_color)
+
     def _show_sensor_error(self, text="ERR", color="#f87171", volume_data=None):
         if hasattr(self, "advisor"):
             self.advisor.reset()
@@ -4270,6 +4275,7 @@ class OverlayApp:
                 label.config(text=text, fg=color)
         for label in getattr(self, "fan_percent_labels", {}).values():
             label.config(text=" · --%", fg="#888888")
+        self._update_storage_rows([], volume_data)
         self._fit_content()
         if hasattr(self, "canvas"):
             self._clamp_saved_position_to_visible_screen(persist=True)

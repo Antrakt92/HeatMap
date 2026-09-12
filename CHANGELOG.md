@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Replace misleading physical-drive fullness with separate Windows volume rows
+  showing used/total GiB and percentage. Use the same volume source for warnings,
+  alerts, and usage peaks; retain physical-drive temperatures independently.
+
 - Preserve verified fan-restoration results in a compact fallback when the full
   shutdown report cannot be written. Storage failures remain errors and do not
   trigger automatic controller recovery.

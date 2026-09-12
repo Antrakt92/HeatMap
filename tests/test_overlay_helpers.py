@@ -857,7 +857,7 @@ class OverlayHelperTests(unittest.TestCase):
             data = overlay.read_sensors(computer, update_storage=False)
 
         self.assertEqual(storage.update_calls, 0)
-        self.assertEqual(data["disks"], [{"name": "980", "temp": 41, "used_pct": 68}])
+        self.assertEqual(data["disks"], [{"name": "980", "temp": 41, "lhm_used_pct": 68}])
         self.assertEqual(data["cpu_load"], 11)
         self.assertEqual(data["ram_pct"], 22)
 
@@ -884,7 +884,7 @@ class OverlayHelperTests(unittest.TestCase):
         ):
             data = overlay.read_sensors(computer)
 
-        self.assertEqual(data["disks"], [{"name": "980 PRO", "temp": 41, "used_pct": 68, "life_pct": 77,
+        self.assertEqual(data["disks"], [{"name": "980 PRO", "temp": 41, "lhm_used_pct": 68, "life_pct": 77,
                                         "temperatures": [{"name": "Temperature", "temp": 41},
                                                          {"name": "Temperature 2", "temp": 62}], "aux_temp": 62}])
 
@@ -1059,7 +1059,7 @@ class OverlayHelperTests(unittest.TestCase):
             data = overlay.read_sensors(SimpleNamespace(Hardware=[gpu, storage, motherboard]))
 
         self.assertIsNone(data["gpu_temp"])
-        self.assertEqual(data["disks"], [{"name": "SSD", "temp": None, "used_pct": None}])
+        self.assertEqual(data["disks"], [{"name": "SSD", "temp": None, "lhm_used_pct": None}])
         self.assertEqual(data["motherboard_temps"], [])
 
     def test_read_sensors_marks_empty_gpu_hardware_for_reinit(self):
@@ -1551,6 +1551,8 @@ class OverlayHelperTests(unittest.TestCase):
             ],
         })
 
+        first["volumes"] = [{"name": "C:", "used_pct": 68}]
+        second["volumes"] = [{"name": "C:", "used_pct": 67}]
         overlay._update_peak_values(peaks, first)
         overlay._update_peak_values(peaks, second)
 
@@ -1579,7 +1581,7 @@ class OverlayHelperTests(unittest.TestCase):
         values = overlay._detail_row_values(data, peaks)
 
         self.assertEqual(values["detail_peak_temps"], "CPU 66°C  GPU HOT 60°C  DISK 38°C")
-        self.assertEqual(values["detail_peak_usage"], "RAM 42%  DISK 68%")
+        self.assertEqual(values["detail_peak_usage"], "RAM 42%  VOLUME 68%")
 
     def test_build_sensor_diagnostics_includes_status_data_and_sensor_inventory(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
@@ -2246,6 +2248,10 @@ def _update_ui_app():
         "ram_gb": _FakeLabel(),
         "ram_pct": _FakeLabel(),
     }
+    def make_storage_row(key, _name, parent):
+        app.rows[key] = _FakeLabel()
+        app.rows[key + "_usage"] = _FakeLabel()
+    app._make_disk_row = make_storage_row
     app._GPU_FAN_MAX_RPM = 2200
     app.fan_percent_labels = {"cpu_fan": _FakeLabel(), "gpu_fan": _FakeLabel()}
     app._CPU_FAN_MAX_RPM = 1800

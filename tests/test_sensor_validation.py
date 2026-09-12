@@ -61,7 +61,7 @@ class SensorValidationTests(unittest.TestCase):
                 self.assertIsNone(data["gpu_load"])
                 self.assertIsNone(data["gpu_fan_pct"])
                 self.assertIsNone(data["cpu_fan_pct"])
-                self.assertIsNone(data["disks"][0]["used_pct"])
+                self.assertIsNone(data["disks"][0]["lhm_used_pct"])
 
     def test_valid_percentage_boundaries_and_rounding_are_preserved(self):
         for value, expected in ((0, 0), (100, 100), (33.4, 33)):
@@ -69,7 +69,7 @@ class SensorValidationTests(unittest.TestCase):
                 data = self.percentage_sample(value)
                 for key in ("cpu_load", "ram_pct", "gpu_load", "gpu_fan_pct", "cpu_fan_pct"):
                     self.assertEqual(data[key], expected, key)
-                self.assertEqual(data["disks"][0]["used_pct"], expected)
+                self.assertEqual(data["disks"][0]["lhm_used_pct"], expected)
 
     def test_invalid_percentages_cannot_trigger_critical_alerts(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)

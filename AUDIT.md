@@ -28,6 +28,11 @@ These tests do not simulate a physically full system volume. Extended operation
 after the user frees disk space remains to be checked; do not fill C: deliberately
 or treat successful report publication as evidence of hardware restoration.
 
+Storage display follow-up: compare the C:/D: capacity rows with Windows after a
+large file copy or deletion, allowing the 30-second refresh interval. Physical
+drive temperatures and volume fullness are separate; multi-partition devices and
+volumes spanning devices must not be mapped by model name or enumeration order.
+
 ## P2 - Physical reboot/login acceptance
 
 The new audit removed the forced prolonged GPU test at 100% during normal startup

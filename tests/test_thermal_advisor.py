@@ -208,10 +208,24 @@ class ThermalPolicyTests(unittest.TestCase):
         self.assertTrue(any(f.key == 'tach_missing:cpu-fan' for f in result))
         self.assertFalse(any('gpu-fan' in f.key for f in result))
 
-    def test_storage_uses_primary_temperature_and_reports_full_disk(self):
+    def test_storage_uses_primary_temperature_without_treating_lhm_load_as_capacity(self):
         data = sample(disks=[dict(name="980 PRO", temp=45, aux_temp=62, used_pct=95)])
         result = self.findings(ThermalAdvisor(), data, 0)
-        self.assertEqual([(f.key, f.severity) for f in result], [("space:980 PRO", 2)])
+        self.assertEqual(result, [])
+
+    def test_only_actual_volume_fullness_warns_when_physical_used_space_is_misleading(self):
+        data = sample(disks=[dict(name="980 PRO", temp=45, used_pct=95)],
+                      volumes=[dict(name="C:", used_pct=99, free_bytes=4 * 2**30)])
+        result = self.findings(ThermalAdvisor(), data, 0)
+        self.assertEqual([(f.key, f.severity) for f in result], [("volume:C:", 2)])
+        self.assertIn("99% full", result[0].text)
+        self.assertIn("4.0 GiB free", result[0].text)
+
+    def test_physical_drive_temperature_warning_remains_independent_of_volume_usage(self):
+        data = sample(disks=[dict(name="980 PRO", temp=75, used_pct=0)],
+                      volumes=[dict(name="C:", used_pct=50, free_bytes=200 * 2**30)])
+        result = self.findings(ThermalAdvisor(), data, 0)
+        self.assertEqual([(f.key, f.severity) for f in result], [("disk:980 PRO", 2)])
 
     def test_fan_display_never_invents_speed_percentage(self):
         self.assertEqual(overlay._format_fan_reading(1985), "1985 RPM")

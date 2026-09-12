@@ -11,6 +11,51 @@ from test_overlay_helpers import _sample_data, _update_ui_app
 
 
 class VolumeSpaceTests(TestCase):
+    def test_main_rows_show_windows_capacity_separately_from_device_temperature(self):
+        app = _update_ui_app()
+        app.sensor_data = _sample_data()
+        app.sensor_data['disks'] = [dict(name='SSD', temp=38, used_pct=65)]
+        volumes = dict(volumes=[dict(name='C:', total_bytes=400 * 2**30, free_bytes=4 * 2**30,
+                                    used_pct=99)], volume_errors=[])
+        app._volume_snapshot = (100, volumes)
+        with mock.patch.object(overlay.time, 'monotonic', return_value=100):
+            app.update_ui()
+        self.assertEqual(app._last_disk_names, [('device', 'SSD'), ('volume', 'C:')])
+        self.assertEqual(app.rows['disk_0'].options['text'], '38°C')
+        self.assertEqual(app.rows['disk_0_usage'].options['text'], '')
+        self.assertEqual(app.rows['disk_1'].options['text'], '396.0/400.0 GiB')
+        self.assertEqual(app.rows['disk_1_usage'].options['text'], '99.0%')
+        self.assertEqual(app.rows['disk_1_usage'].options['fg'], '#f87171')
+        self.assertEqual(app.peaks['disk_used_pct'], 99)
+
+    def test_volume_rows_refresh_capacity_and_mount_changes_without_device_changes(self):
+        app = _update_ui_app()
+        first = dict(name='C:', total_bytes=100 * 2**30, free_bytes=20 * 2**30, used_pct=80)
+        app._update_storage_rows([], dict(volumes=[first]))
+        first_label = app.rows['disk_0']
+        second = dict(first, free_bytes=10 * 2**30, used_pct=90)
+        app._update_storage_rows([], dict(volumes=[second]))
+        self.assertIs(app.rows['disk_0'], first_label)
+        self.assertEqual(first_label.options['text'], '90.0/100.0 GiB')
+        app._update_storage_rows([], dict(volumes=[dict(second, name='D:')]))
+        self.assertEqual(app._last_disk_names, [('volume', 'D:')])
+        app._update_storage_rows([], dict(volumes=[]))
+        self.assertEqual(app.disk_labels, [])
+        self.assertNotIn('disk_0', app.rows)
+
+    def test_physical_capacity_never_changes_usage_peak_or_plays_fullness_alert(self):
+        data = dict(disks=[dict(name='SSD', temp=30, used_pct=99, lhm_used_pct=99)])
+        peaks = overlay._empty_peak_data()
+        overlay._update_peak_values(peaks, data)
+        self.assertIsNone(peaks['disk_used_pct'])
+        app = _update_ui_app()
+        app.alerts_enabled = True
+        app._last_alert_time = 0
+        app._ALERT_COOLDOWN = 30
+        with mock.patch.object(overlay.threading, 'Thread') as beep:
+            overlay.OverlayApp._check_alerts(app, data)
+        beep.assert_not_called()
+
     def test_volume_freshness_accepts_normal_long_running_windows_uptime(self):
         data = dict(volumes=[], volume_errors=[])
         self.assertIs(overlay._fresh_volume_data((100000, data), 100001), data)
@@ -30,6 +75,8 @@ class VolumeSpaceTests(TestCase):
         self.assertTrue(any('Volume C:' in message for message in app.health_messages))
         self.assertIn('Fresh sensor data unavailable', app.health_messages)
         self.assertEqual(app.rows['cpu_temp'].options['text'], 'ERR')
+        self.assertEqual(app._last_disk_names, [('volume', 'C:')])
+        self.assertEqual(app.rows['disk_0_usage'].options['text'], '99.0%')
         app._check_alerts.assert_called_once_with({})
 
     def test_old_or_unstamped_volume_values_are_not_reused_during_sensor_errors(self):
@@ -57,6 +104,8 @@ class VolumeSpaceTests(TestCase):
         with mock.patch.object(overlay.time, 'monotonic', return_value=100):
             app.update_ui()
         self.assertFalse(any(item.key == 'volume:C:' for item in app.thermal_findings))
+        self.assertIsNone(app.peaks['disk_used_pct'])
+        self.assertFalse(app.disk_labels)
 
     def test_diagnostics_append_latest_volume_sample_independently_of_lhm_cache(self):
         data = dict(volumes=[dict(name='C:', used_pct=99, free_bytes=2**30)], volume_errors=[])
