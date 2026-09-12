@@ -1,62 +1,61 @@
-# HeatMap: отображение, Peek и завершение
+# HeatMap: display, Peek, and shutdown
 
-Проверены `overlay.py`, текущий `AUDIT.md`, тесты и взаимодействие с
-`FanWorkerClient`. Три агента независимо проверяли Peek, компоновку и завершение;
-изменения runtime объединены и проверены в основном процессе работы.
+Reviewed `overlay.py`, the current `AUDIT.md`, tests, and interaction with
+`FanWorkerClient`. Three agents independently reviewed Peek, layout, and shutdown;
+runtime changes were combined and verified in the main work process.
 
-## Исправления
+## Fixes
 
-- Старый таймер проверки курсора больше не обслуживает новую сессию Peek.
-  Наведение на край другого монитора не удерживает прежний Peek открытым.
-  Ошибка чтения положения курсора вызывает повторную попытку вместо ухода
-  к фиктивным координатам `(0, 0)`.
-- Возврат на край во время slide-out не теряется: после возврата в desktop
-  триггер снова готов открыть Peek. Между правым краем Peek и краем рабочей
-  области остаются 6 пикселей для управления окном приложения.
-- Нажатие заголовка отменяет старую анимацию. Пока кнопка удерживается,
-  автоматическое встраивание, скрытие и позиционирование не спорят с drag.
-  Отпускание ограничивает позицию рабочей областью. Если Tk потерял событие
-  отпускания, независимый опрос восстанавливает состояние по кнопке мыши.
-  Повторный ButtonRelease ничего не меняет; простой клик во время slide-in
-  оставляет полностью видимый Peek и сохраняет исходное место на desktop.
-- Details изменяет компоновку сразу в Peek. Панель ошибки остаётся в пределах
-  рабочей области. Длинные детали переносятся по доступной ширине; при переходе
-  на широкий монитор возвращается обычная ширина, без накопительного сжатия.
-- Завершение сначала запрещает новые задания и сигнализирует остановку,
-  затем закрывает heartbeat контроллера. Ошибка pipe или уже уничтоженный Tk
-  не прерывают оставшуюся очистку. Координаты сохраняются только полной парой.
-  Окно скрывается перед ожиданием sensor/diagnostics threads с общим сроком
-  до 5 секунд; mutex освобождается и после уже уничтоженного окна.
-- Обычный выход и исключение из mainloop вызывают cleanup. Результат диалога
-  CPU reference после закрытия приложения не меняет конфигурацию или меню.
-  Ошибка запуска потока подготовки PawnIO обрабатывается существующим путём
-  ошибки, позволяя повторить попытку; закрытое приложение её не запускает.
+- An old cursor-check timer no longer services a new Peek session. Hovering over
+  another monitor's edge does not keep the previous Peek open. Failure to read
+  the cursor position triggers a retry instead of movement toward fictional
+  coordinates `(0, 0)`.
+- Returning to the edge during slide-out is no longer lost: after the return to
+  the desktop, the trigger is ready to open Peek again. Six pixels remain between
+  Peek's right edge and the work-area edge for operating the application window.
+- Pressing the title cancels the old animation. While the button is held,
+  automatic embedding, hiding, and positioning do not compete with dragging.
+  Releasing the button constrains the position to the work area. If Tk loses the
+  release event, independent polling restores the state from the mouse button.
+  A repeated ButtonRelease has no effect; a simple click during slide-in leaves
+  Peek fully visible and preserves the original desktop position.
+- Details changes the layout immediately in Peek. The error panel stays within
+  the work area. Long details wrap to the available width; moving to a wide monitor
+  restores the normal width without cumulative shrinking.
+- Shutdown first prevents new jobs and signals a stop, then closes the controller
+  heartbeat. A pipe error or an already destroyed Tk does not interrupt the rest
+  of cleanup. Coordinates are saved only as a complete pair. The window is hidden
+  before waiting for sensor/diagnostics threads with a shared deadline of up to
+  five seconds; the mutex is released even if the window has already been destroyed.
+- Both normal exit and a mainloop exception trigger cleanup. A CPU reference
+  dialog result received after the application closes does not change configuration
+  or the menu. Failure to start the PawnIO preparation thread uses the existing
+  error path, allowing a retry; a closed application does not start that retry.
 
-Контроллер вентиляторов по-прежнему сам возвращает управление прошивке.
-Процесс контроллера не убивается; ограничение ожидания UI не означает
-подтверждённого завершения native restore. DLL, зависимости и политика UAC
-не изменялись.
+The fan controller still restores firmware control itself. Its process is not
+killed; the bounded UI wait does not confirm completion of native restoration.
+DLLs, dependencies, and UAC policy were unchanged.
 
-## Автоматическая проверка
+## Automated verification
 
-Итог: **367 тестов прошли**, включая 30 регрессий поведения и отдельную
-регрессию очистки тестового Tk в потоке-владельце. `compileall`,
-проверка DLL manifest, проверка синхронизации runtime manifest, native Win32
-smoke и `git diff --check` прошли. Установка пакетов и скачивание runtime
-не выполнялись; сообщения `Downloading Test.Package` в unittest принадлежат
-подменённым тестовым загрузчикам.
+Result: **367 tests passed**, including 30 behavior regressions and a separate
+regression for cleaning up test Tk objects in the owning thread. `compileall`,
+DLL manifest verification, runtime manifest synchronization verification, native
+Win32 smoke checks, and `git diff --check` passed. No packages were installed or
+runtime files downloaded; unittest messages saying `Downloading Test.Package`
+come from mocked test downloaders.
 
-Новые регрессии: `tests/test_peek_lifecycle_audit.py`,
+New regressions: `tests/test_peek_lifecycle_audit.py`,
 `tests/test_layout_audit.py`, `tests/test_shutdown_audit.py`.
-Существующее ожидание позиции Peek скорректировано на намеренный отступ 6px.
-Каждая группа основных ошибок воспроизведена до исправления.
+The existing Peek position expectation was adjusted for the intentional 6px gap.
+Each group of primary defects was reproduced before the fixes.
 
-Компоновка проверяется на настоящем Tk: временное прозрачное окно за пределами
-экрана с отключённой активацией. Проверяются фактические размеры виджетов,
-а не только requested dimensions скрытого Tk. Датчики, звук, конфигурация,
-буфер обмена и пользовательский overlay в этих проверках не используются.
+Layout is tested on real Tk: a temporary transparent off-screen window with
+activation disabled. Actual widget dimensions are checked, rather than only the
+requested dimensions of hidden Tk. These checks do not use sensors, sound,
+configuration, the clipboard, or the user's overlay.
 
-Команды из корня, интерпретатор `.venv/Scripts/python.exe`:
+Commands from the repository root, using `.venv/Scripts/python.exe`:
 
 ```text
 -X utf8 -m unittest discover -s tests
@@ -66,42 +65,43 @@ tools/sync_runtime_manifest.py --check
 tools/test_desktop_window_integration.py
 ```
 
-Последняя команда использует временные Win32 HWND и проверяет DWM attributes,
-размещение под приложениями, восстановление после минимизации и отсутствие
-смены foreground. Она не переключает настоящий Explorer в Show Desktop.
+The last command uses temporary Win32 HWNDs and checks DWM attributes, placement
+below applications, recovery from minimization, and unchanged foreground focus.
+It does not switch the real Explorer shell into Show Desktop.
 
-## Ручная Windows acceptance
+## Manual Windows acceptance
 
-После штатного закрытия старого экземпляра запустить обновлённый через
-`run_as_admin.bat` с обычным UAC, в удобное время вне игры:
+After closing the old instance normally, launch the updated version through
+`run_as_admin.bat` with normal UAC, at a convenient time outside a game:
 
-1. Повторить Peek → уход → немедленный возврат на край; кликнуть заголовок
-   во время появления и перетащить во время появления/ухода. Отпустить вне
-   виджета, затем повторить Peek. Проверить доступность scrollbar приложения.
-2. Проверить меню, CPU reference и Details в Peek; ошибки и длинные строки
-   возле нижнего края, прокрутку и доступность кнопки закрытия.
-3. Проверить Win+D, кнопку возле часов, Peek OFF, Always on top, возврат
-   в приложение и auto-hide taskbar. Оверлей не должен забирать фокус.
-4. На двух физических мониторах проверить разные DPI, отрицательные координаты,
-   внешний край другого монитора, перенос между экранами и отключение экрана
-   во время drag/анимации. Сохранить позицию и перезапустить.
-5. Закрыть во время прогрева/диагностики и при открытом диалоге; проверить
-   отсутствие оставшегося окна и возможность следующего штатного запуска.
-   При включённом управлении вентиляторами отдельно подтвердить firmware restore.
+1. Repeat Peek → leave → immediately return to the edge; click the title during
+   entry and drag during entry/exit. Release outside the widget, then repeat Peek.
+   Check that the application's scrollbar remains accessible.
+2. Check the menu, CPU reference, and Details in Peek; errors and long lines near
+   the bottom edge, scrolling, and access to the close button.
+3. Check Win+D, the button beside the clock, Peek OFF, Always on top, returning
+   to an application, and an auto-hide taskbar. The overlay must not take focus.
+4. On two physical monitors, check different DPI settings, negative coordinates,
+   the outer edge of the other monitor, moving between screens, and disconnecting
+   a screen during dragging/animation. Save the position and restart.
+5. Close during warm-up/diagnostics and with a dialog open; check that no window
+   remains and that the next normal launch works. With fan control enabled,
+   separately confirm firmware restoration.
 
-Эти проверки на пользовательском Explorer, реальном оборудовании и нескольких
-мониторах не выполнены в данном аудите. Автотесты не доказывают работу во всех
-состояниях Windows; открытые acceptance gates в `AUDIT.md` сохранены.
+These checks on the user's Explorer shell, real hardware, and multiple monitors
+were not performed in this audit. Automated tests do not prove operation in every
+Windows state; the open acceptance gates in `AUDIT.md` were retained.
 
-Первая релизная CI-проверка Python 3.10 обнаружила отложенную сборку циклических
-ссылок тестового Tk в потоке файлового теста (`Tcl_AsyncDelete`). Общий teardown
-тестов компоновки теперь собирает их в потоке-владельце после завершения метода.
-Регрессия проверяет освобождение уничтоженного root и поток его финализации;
-она падает при прежнем teardown. Runtime приложения эта правка не меняет.
+The first release CI run on Python 3.10 found deferred garbage collection of test
+Tk reference cycles in a file-test thread (`Tcl_AsyncDelete`). Shared layout-test
+teardown now collects them in the owning thread after the test method finishes.
+The regression checks that the destroyed root is released and identifies its
+finalization thread; it fails with the previous teardown. This fix does not change
+application runtime behavior.
 
-При подготовке релиза выполнен отдельный штатный elevated restart: предыдущий
-контроллер подтвердил возврат управления плате, новый overlay остался запущен,
-а контроллер прошёл стартовую проверку и дал восемь свежих active-отчётов с
-положительными RPM за 14 секунд наблюдения. Это подтверждает перезапуск и
-автоматическое управление после него; перечисленные ручные UI/Explorer/DPI
-сценарии и сравнение температур в игре по-прежнему не подтверждены.
+During release preparation, a separate normal elevated restart was performed: the
+previous controller confirmed restoration of motherboard control, the new overlay
+remained running, and the controller passed its startup check and provided eight
+fresh active reports with positive RPM during 14 seconds of observation. This
+confirms restart and subsequent automatic control; the listed manual UI/Explorer/DPI
+scenarios and game-temperature comparison remain unconfirmed.

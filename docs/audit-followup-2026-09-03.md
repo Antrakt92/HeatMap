@@ -1,84 +1,87 @@
-# HeatMap: повторный аудит запуска, датчиков и lifecycle
+# HeatMap: follow-up audit of startup, sensors, and lifecycle
 
-Дата: 2026-09-03. Базовый commit: `ffaccc84d240c20b55196de6942bfda3982b5cdb`.
-Проверены оставшиеся startup paths, Copy diagnostics, sensor parsing,
-отказ WinAPI после reparent и завершение потоков. Изменения прошли независимую
-проверку агентами; runtime bundle и elevation policy сохранены.
+Date: 2026-09-03. Base commit: `ffaccc84d240c20b55196de6942bfda3982b5cdb`.
+Reviewed the remaining startup paths, Copy diagnostics, sensor parsing, WinAPI
+failure after reparenting, and thread shutdown. Agents independently reviewed the
+changes; the runtime bundle and elevation policy were retained.
 
-## Исправления
+## Fixes
 
-- Elevated startup передаёт проверенное autostart state из reconciliation в
-  конструктор меню. Повторный PowerShell query больше не нужен. Query error
-  отображается как `Autostart: ERROR`, отсутствие задачи — `OFF`; свежие проверки
-  identity, task ownership и созданной задачи при изменениях сохраняются.
-- Reconciliation входит в область `try/finally`, освобождающую single-instance
-  mutex при неожиданном исключении.
-- `Copy diagnostics` открывает собственный LHM Computer в отдельном worker.
-  Поток Tk получает готовый результат через queue; duplicate request не запускает
-  второй сбор. При ошибке или shutdown clipboard не очищается. Computer закрывает
-  создавший его worker, включая отмену во время Open.
-- Shutdown ждёт sensor и diagnostics workers в пределах общего лимита 5 секунд.
-  Отсутствующий или не запустившийся worker не мешает закрытию; нормальное
-  завершение диагностики закрывает Computer до уничтожения окна.
-- Raw проценты CPU/GPU/RAM, fan control, storage utilization и remaining life
-  проверяются на диапазон 0–100 до округления. Отрицательные или нечисловые
-  RPM/clock/VRAM отбрасываются. VRAM usage требует `0 <= used <= total`, `total > 0`.
-- `Percentage Used` у NVMe может превышать 100: это допустимый износ и нулевая
-  оценка remaining life. Такое значение сохранено согласно
+- Elevated startup passes the verified autostart state from reconciliation to the
+  menu constructor. A second PowerShell query is no longer needed. A query error
+  appears as `Autostart: ERROR`, and a missing task as `OFF`; fresh identity, task
+  ownership, and created-task checks are retained when making changes.
+- Reconciliation is inside the `try/finally` scope that releases the single-instance
+  mutex after an unexpected exception.
+- `Copy diagnostics` opens its own LHM Computer in a separate worker. The Tk thread
+  receives the completed result through a queue; a duplicate request does not start
+  a second collection. Errors or shutdown do not clear the clipboard. The worker
+  that created the Computer closes it, including cancellation during Open.
+- Shutdown waits for sensor and diagnostics workers within one shared five-second
+  limit. A missing worker or one that did not start does not prevent closing;
+  normal diagnostics completion closes the Computer before destroying the window.
+- Raw CPU/GPU/RAM percentages, fan control, storage utilization, and remaining life
+  are checked against the 0–100 range before rounding. Negative or nonnumeric
+  RPM/clock/VRAM values are rejected. VRAM usage requires `0 <= used <= total`,
+  `total > 0`.
+- NVMe `Percentage Used` can exceed 100: this represents valid wear and a remaining
+  life estimate of zero. This value is retained in accordance with the
   [Microsoft NVMe health structure](https://learn.microsoft.com/en-us/windows/win32/api/nvme/ns-nvme-nvme_health_info_log).
-- Температура CPU больше не зависит от порядка sensors/CPU blocks. Выбирается
-  максимум в предпочтительной группе Package/Tctl/Tdie; только при её отсутствии
-  — максимум остальных допустимых CPU temperatures. Tctl offsets не переопределяются.
-- Известный CPU Fan #2 больше не получает PWM от Fan #1: вместо ложного OFF
-  остаётся RPM-based отображение без чужого control value.
-- Пустой список LHM Hardware отмечается как fallback и запрашивает восстановление
-  с существующим cooldown 30 секунд.
-- Если SetParent выполнился, а последующий SetWindowPos завершился ошибкой,
-  состояние embedding учитывает фактический живой parent. Последующий detach
-  действительно отсоединяет окно перед Peek/Topmost.
+- CPU temperature no longer depends on sensor/CPU-block ordering. The maximum in
+  the preferred Package/Tctl/Tdie group is selected; only when that group is absent
+  is the maximum of other valid CPU temperatures used. Tctl offsets are not overridden.
+- A known CPU Fan #2 no longer receives PWM from Fan #1: RPM-based display without
+  another fan's control value replaces the false OFF state.
+- An empty LHM Hardware list is marked as fallback and requests recovery with the
+  existing 30-second cooldown.
+- If SetParent succeeds but the subsequent SetWindowPos fails, embedding state
+  reflects the actual live parent. A subsequent detach really detaches the window
+  before Peek/Topmost.
 
-## Проверка производительности
+## Performance checks
 
-Повторный Task Scheduler query устранён по числу вызовов, а не за счёт ослабления
-проверок. Hidden real-Tk constructor проверен для ON/OFF/ERROR с запретом повторного
-query: все три состояния созданы без вызова. Ранее локальный одиночный query занимал
-около 0,88 s; это ориентир стоимости удалённой операции, а не измеренное ускорение
-Windows boot. Нынешний проход не измеряет полный logon или cold-cache запуск.
+The duplicate Task Scheduler query was eliminated by reducing call count, without
+weakening checks. A hidden real-Tk constructor was checked for ON/OFF/ERROR with
+repeat queries prohibited: all three states were created without a query. A single
+local query previously took about 0.88 s; this is a reference for the cost of the
+removed operation, not a measured Windows boot speedup. This pass does not measure
+full logon or cold-cache startup.
 
-Синтетический заблокированный Open подтверждает, что Copy diagnostics возвращает
-управление Tk до завершения hardware initialization. Отдельный poll существует
-только во время активного запроса; частота обычного sensor sampling не увеличена.
+A synthetically blocked Open confirms that Copy diagnostics returns control to Tk
+before hardware initialization finishes. A separate poll exists only during an
+active request; normal sensor sampling frequency was not increased.
 
-## Выполненные проверки
+## Completed checks
 
-Проверки выполняются через существующий `.venv\Scripts\python.exe`:
+Checks run through the existing `.venv\Scripts\python.exe`:
 
-- `python -m unittest discover -s tests`: **222 passed**, исходно 192.
-- Unit regressions: недопустимые raw значения, границы, порядок CPU temperatures,
+- `python -m unittest discover -s tests`: **222 passed**, baseline 192.
+- Unit regressions: invalid raw values, boundaries, CPU temperature ordering,
   fan matching, empty inventory, retained/lost desktop parent, cached autostart,
-  mutex cleanup, slow diagnostics и cancellation.
+  mutex cleanup, slow diagnostics, and cancellation.
 - `python -m compileall -q overlay.py setup.py tests`: passed.
 - `python setup.py --verify`: passed.
 - `python setup.py --preflight`: passed.
 - `python tools/sync_runtime_manifest.py --check`: passed.
 - `pwsh -NoProfile -File tools/test_task_scheduler_integration.ps1`: passed;
-  отдельная disposable task классифицирована как safe_current/LeastPrivilege,
-  затем удалена. Production task, launcher и UAC не запускались.
+  a separate disposable task was classified as safe_current/LeastPrivilege, then
+  deleted. The production task, launcher, and UAC were not started.
 - `git diff --check`: passed.
 
-Новые sensor/native-parent regressions воспроизвели дефекты до исправления.
-DLL/runtime integrity и известные RPC/CLIXML autostart protections проверены
-существующими suites. Установленные DLL, driver, пользовательские настройки и
-работающий экземпляр приложения не менялись.
+The new sensor/native-parent regressions reproduced defects before the fixes.
+DLL/runtime integrity and the known RPC/CLIXML autostart protections were checked
+by the existing suites. Installed DLLs, the driver, user settings, and the running
+application instance were unchanged.
 
-## Ручная проверка
+## Manual checks
 
-После обычного elevated перезапуска проверить реальные CPU/GPU/RAM/storage/fan
-readings, `Copy diagnostics`, закрытие во время сбора и несколько переходов
-Peek/Always on top. После следующего Windows sign-in проверить запуск с прежней
-30-секундной задержкой. Physical multi-monitor/mixed-DPI acceptance остаётся
-отдельным пунктом `AUDIT.md`.
+After a normal elevated restart, check real CPU/GPU/RAM/storage/fan readings,
+`Copy diagnostics`, closing during collection, and several Peek/Always on top
+transitions. After the next Windows sign-in, check startup with the existing
+30-second delay. Physical multi-monitor/mixed-DPI acceptance remains a separate
+item in `AUDIT.md`.
 
-Native Open/Close нельзя безопасно прервать извне. Если driver зависнет дольше
-ограниченного shutdown wait, cleanup daemon worker не гарантирован при завершении
-процесса. Это ограничение не выдаётся за проверенное отсутствие зависаний driver.
+Native Open/Close cannot be safely interrupted externally. If the driver hangs
+beyond the bounded shutdown wait, daemon-worker cleanup is not guaranteed when
+the process exits. This limitation is not presented as proof that the driver
+cannot hang.

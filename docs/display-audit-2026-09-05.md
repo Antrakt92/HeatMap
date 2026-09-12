@@ -17,7 +17,7 @@
 
 ## Color policy
 
-The complete yellow/red table is in [README](../README.md#температуры-и-пороги).
+The complete yellow/red table is in [README](../README.md#temperatures-and-thresholds).
 CPU/GPU utilization and clocks are neutral: high activity alone is not a fault.
 Current temperatures and capacity use share thresholds with the alert policy.
 RAM/VRAM row warnings start at 80/90%; panel and sound start at 95/98%.

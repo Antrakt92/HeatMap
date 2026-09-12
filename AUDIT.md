@@ -1,228 +1,237 @@
 # HeatMap Audit Backlog
 
-Файл содержит только подтверждённые открытые задачи. Закрытые findings удаляются,
-а не сохраняются как история сессий. Приоритет отражает impact и likelihood, а не
-размер изменения.
+This file contains only confirmed open tasks. Closed findings are removed rather
+than retained as session history. Priority reflects impact and likelihood, not
+change size.
 
-Ручные и аппаратные проверки ниже — справочные последующие задачи, а не условия
-публикации. По запросу выпускается обычный релиз `X.Y.Z`, без кандидатов и
-prerelease; открытые reboot/игровые/Explorer/multi-monitor проверки его не
-задерживают. Правило публикации задано в `AGENTS.md` и заменяет прежние условия
-из исторических отчётов. Статусы проверок сохраняются как фактические сведения.
+The manual and hardware checks below are informational follow-up tasks, not
+publication conditions. A release request produces a normal `X.Y.Z` release,
+without candidates or prereleases; open reboot/gaming/Explorer/multi-monitor checks
+do not delay it. The publication rule is defined in `AGENTS.md` and supersedes
+previous conditions in historical reports. Check statuses are retained as factual
+records.
 
-Результаты полного аудита, исправления и границы релиза 1.2.0-rc.4:
+Full audit results, fixes, and the scope of release 1.2.0-rc.4:
 `docs/audit-1.2.0-rc.4.md`.
-Проверки автозапуска и ожидания датчиков в 1.2.0-rc.5:
+Autostart and sensor-readiness waiting checks in 1.2.0-rc.5:
 `docs/immediate-startup-2026-09-06.md`.
-Проверенные исправления датчиков, отчётов контроллеров и commissioning:
-`docs/audit-cleanup-2026-09-08.md`. Перечисленные ниже аппаратные проверки
-этим программным аудитом не закрываются.
+Verified fixes for sensors, controller reports, and commissioning:
+`docs/audit-cleanup-2026-09-08.md`. This software audit does not close the hardware
+checks listed below.
 
-## P2 - Физический reboot/login acceptance
+## P2 - Physical reboot/login acceptance
 
-Новый аудит устранил принудительный длительный тест GPU на 100% при обычном старте
-и повторную корпусную калибровку при совпадении сохранённых каналов. GPU на холодной
-карте теперь остаётся под управлением драйвера. Проверки и ручные сценарии:
-`docs/startup-fan-audit-2026-09-06.md`. Реальный следующий boot/login, шум и
-переход GPU из ожидания в помощь и обратно остаются непроверенными.
+The new audit removed the forced prolonged GPU test at 100% during normal startup
+and repeated case-fan calibration when saved channels match. A cold GPU now stays
+under driver control. Checks and manual scenarios:
+`docs/startup-fan-audit-2026-09-06.md`. The next actual boot/login, noise, and GPU
+transitions from standby to assistance and back remain untested.
 
-После реальной перезагрузки пользователь подтвердил отказ корпусной автоматики
-в rc.5: SYS1 отсутствовал в экземпляре LHM регулятора все 60 секунд, при этом
-основной монитор показывал его RPM. В rc.6 добавлено ограниченное повторное
-обнаружение полностью пустой платы; проверка следующего физического reboot
-остаётся открытой. Причина, границы исправления и проверки:
-`docs/startup-rediscovery-1.2.0-rc.6.md`.
+After an actual reboot, the user confirmed failure of case-fan automation in rc.5:
+SYS1 was absent from the controller's LHM instance for all 60 seconds, while the
+main monitor displayed its RPM. rc.6 added bounded rediscovery of a completely
+empty motherboard; testing the next physical reboot remains open. Cause, fix
+scope, and checks: `docs/startup-rediscovery-1.2.0-rc.6.md`.
 
-Проверить запуск после настоящего перезапуска Windows и входа пользователя:
-задача `HWMonitorOverlay` запускает launcher без заданной задержки и запрашивает UAC.
-После согласия окно должно появиться без ожидания Task Scheduler; временно
-недоступные показания контроллеры ожидают до 60 секунд без новых команд вентиляторам.
-После готовности датчиков корпусный регулятор проверяет текущую команду; полный
-обдув проверяется только при отсутствии подходящей калибровки или явной проверке.
-GPU на холодной карте показывает готовность и оставляет управление драйверу.
-Регистрация и классификация Task Scheduler, launcher и обычный перезапуск
-проверяются отдельно; они не заменяют физический reboot. Silent boot до входа
-пользователя текущая установка из изменяемого checkout не поддерживает.
+Check startup after a real Windows restart and user sign-in: the `HWMonitorOverlay`
+task starts the launcher without a configured delay and requests UAC. After
+approval, the window should appear without waiting for Task Scheduler; controllers
+wait up to 60 seconds for temporarily unavailable readings without sending new fan
+commands. Once sensors are ready, the case-fan controller checks the current
+command; full-speed operation is tested only if suitable calibration is missing
+or an explicit check is requested. On a cold card, the GPU shows readiness and
+leaves control with the driver. Task Scheduler registration and classification,
+the launcher, and an ordinary restart are checked separately; they do not replace
+a physical reboot. The current installation from a mutable checkout does not
+support silent boot before user sign-in.
 
-## P1 - Причина полного зависания Windows пока не установлена
+## P1 - Cause of the complete Windows freeze remains unknown
 
-После принудительной перезагрузки 2026-09-06 журнал содержит Kernel-Power 41 с
-BugcheckCode 0. Нового подтверждённого crash dump нет. Ошибки установки Ryzen Master
-перед событием и повреждение bthmodem.sys требуют отдельной проверки Windows;
-совпадение времени не доказывает причину. Подробности и ограничения доказательств:
-`docs/freeze-and-fan-ownership-2026-09-06.md`.
+After the forced reboot on 2026-09-06, the event log contains Kernel-Power 41 with
+BugcheckCode 0. There is no newly confirmed crash dump. Ryzen Master installation
+errors before the event and bthmodem.sys corruption require a separate Windows
+investigation; coincident timing does not establish causation. Details and evidence
+limitations: `docs/freeze-and-fan-ownership-2026-09-06.md`.
 
-Исправлены независимые риски HeatMap: SYS4 больше не перехватывает общий EC по
-разовому Pump 100%; известные конкурирующие программы приостанавливают датчики;
-Copy diagnostics не открывает дополнительный монитор.
-Обнаружение Ryzen Master учитывает имя `AMD Ryzen Master.exe` из официального MSI,
-включая пробелы; отдельная регрессия проверяет блокировку аппаратного доступа.
-Нужна длительная проверка стабильности после ремонта Windows. Автоматические тесты не доказывают устранение
-зависания ядра и не заменяют эту проверку.
+Independent HeatMap risks were fixed: SYS4 no longer takes over the shared EC based
+on a one-off Pump 100% reading; known competing programs pause sensors; Copy
+diagnostics does not open an additional monitor. Ryzen Master detection recognizes
+`AMD Ryzen Master.exe` from the official MSI, including spaces; a separate
+regression checks that hardware access is blocked. Extended stability testing is
+needed after Windows repair. Automated tests do not prove that the kernel freeze
+is resolved and do not replace this check.
 
-## P2 - Длительная проверка управления вентиляторами RX 7900 XT
+## P2 - Extended RX 7900 XT fan-control testing
 
-Проверить длительную работу обоих регуляторов после исправления watchdog:
-открыть меню и диалог CPU reference более чем на 15 секунд, закрыть их и проверить
-свежие статусы корпуса/GPU. После обычного сна/возобновления проверить возврат
-управления и единственную автоматическую попытку восстановления при подтверждённом
-тайм-ауте. Причина исходной остановки должна сохраняться в Copy diagnostics;
-OFF → ON должен оставаться доступным после повторного сбоя. Не приостанавливать
-и не убивать аппаратные процессы ради теста. Автоматические fake-регрессии
-проверяют тайм-ауты, границы повторного запуска и сохранение диагностики, но не
-заменяют проверку сна, длительной нагрузки и зависаний драйвера.
+Check extended operation of both controllers after the watchdog fix: keep the menu
+and CPU reference dialog open for more than 15 seconds, close them, and check for
+fresh case/GPU statuses. After normal sleep/resume, check restoration of control
+and the single automatic recovery attempt following a confirmed timeout. Copy
+diagnostics must retain the original stop reason; OFF → ON must remain available
+after a repeat failure. Do not suspend or kill hardware processes for this test.
+Automated fake regressions check timeouts, restart boundaries, and diagnostic
+retention, but do not replace sleep, sustained-load, and driver-hang checks.
 
-В диагностике конфликта теперь сохраняются ожидаемые и прочитанные настройки.
-Ручное OFF → ON принимает внешнюю кривую/Zero RPM после проверок и архивирует
-конфликтный журнал; автозапуск сохраняет блокировку. Автоматические регрессии
-покрывают этот путь. Проверить в обновлённом elevated overlay повторное включение
-после конфликта, холодный standby и штатный возврат после игровой нагрузки.
-Короткий фоновый запуск нового worker подтвердил пять свежих standby-отчётов без
-новых команд. Повторная инициализация ADLX исправлена: после Terminate выгружается
-DLL; три последовательных цикла чтения/закрытия прошли на этом ПК. Новые регрессии
-отмены, внешних изменений и устаревших замеров: `docs/reliability-1.2.0-rc.7.md`.
+Conflict diagnostics now retain expected and read-back settings. Manual OFF → ON
+accepts an external curve/Zero RPM after checks and archives the conflict journal;
+autostart keeps the lockout. Automated regressions cover this path. In the updated
+elevated overlay, check re-enabling after a conflict, cold standby, and a normal
+return after gaming load. A short background run of the new worker confirmed five
+fresh standby reports without new commands. ADLX reinitialization was fixed: the
+DLL is unloaded after Terminate; three consecutive read/close cycles passed on
+this PC. New cancellation, external-change, and stale-measurement regressions:
+`docs/reliability-1.2.0-rc.7.md`.
 
-Добавлен отдельный ADLX-регулятор GPU с независимыми кривыми Core/Hotspot/Memory
-и полным обдувом от Hotspot 90°C. Короткий аппаратный тест подтвердил команды
-100% и 55%, изменение RPM и точное восстановление исходной кривой/Zero RPM.
-Нужны длительная игровая проверка, шум и сравнение температур при одинаковой
-нагрузке. Реакция на синтетические температуры проверяется тестами; специально
-нагревать карту до порогов для этого не нужно. Детали: `docs/gpu-fans-2026-09-06.md`.
-Процент GPU-вентиляторов теперь использует общие пороги цвета 80%/95% отдельно
-от RPM; цвет скорости сам по себе не вызывает температурную тревогу.
+A separate ADLX GPU controller was added with independent Core/Hotspot/Memory
+curves and full-speed cooling from Hotspot 90°C. A short hardware test confirmed
+100% and 55% commands, RPM changes, and exact restoration of the original curve/Zero
+RPM. Extended gaming, noise, and temperature comparison under identical loads are
+still needed. Responses to synthetic temperatures are covered by tests; there is
+no need to deliberately heat the card to these thresholds. Details:
+`docs/gpu-fans-2026-09-06.md`. GPU fan percentage now uses the shared 80%/95% color
+thresholds separately from RPM; speed color alone does not trigger a temperature
+alert.
 
-## P2 - Длительная проверка общего профиля четырёх корпусных вентиляторов
+## P2 - Extended testing of the shared four-case-fan profile
 
-Профиль SYS1/SYS2/SYS4/SYS5 с незадействованным SYS6 теперь проверен на этом ПК:
-SYS4 поднялся с 666 до 1188 RPM, возврат фактического EC mode и исходных регистров
-прошёл, после перезапуска все четыре канала следуют общей кривой. Новый подписанный
-модуль и границы аппаратной проверки описаны в `docs/shared-fans-2026-09-06.md`.
-Исторические ограничения прежнего LHM пути: `docs/airflow-audit-2026-09-06.md`.
+The SYS1/SYS2/SYS4/SYS5 profile with unused SYS6 has now been tested on this PC:
+SYS4 rose from 666 to 1188 RPM, restoration of the actual EC mode and original
+registers passed, and all four channels follow the shared curve after restart.
+The new signed module and hardware-test boundaries are described in
+`docs/shared-fans-2026-09-06.md`. Historical limitations of the previous LHM path:
+`docs/airflow-audit-2026-09-06.md`.
 
-Остаются длительная стабильность, шум, физическое направление потока и сравнение
-GPU Core/Hotspot при одинаковой мощности и оборотах GPU. Короткая проверка RPM не
-доказывает устранение перегрева, исходную причину зависания Windows или возможность
-восстановления при зависании ядра/принудительном завершении контроллера.
+Extended stability, noise, physical airflow direction, and GPU Core/Hotspot
+comparison at identical power and GPU fan speeds remain open. A short RPM check
+does not prove that overheating is resolved, establish the original cause of the
+Windows freeze, or demonstrate recovery from a kernel hang/forced controller
+termination.
 
-## P2 - Проверить температуры GPU и новую индикацию после перезапуска
+## P2 - Check GPU temperatures and new indicators after restart
 
-Файлы: `overlay.py`, `tests/test_temperature_policy.py`; пороги: `README.md`.
+Files: `overlay.py`, `tests/test_temperature_policy.py`; thresholds: `README.md`.
 
-Фоновое чтение GPU через текущий LHM без elevation дало три последовательных
-замера RX 7900 XT: Core 54°C, Memory 74°C, Hotspot 108/109/110°C. Это подтверждает
-источник показания, но не является независимой проверкой точности драйвера или
-диагнозом системы охлаждения. Разница Hotspot–Core 54–56°C требует проверки.
+Background GPU reads through the current LHM without elevation produced three
+consecutive RX 7900 XT samples: Core 54°C, Memory 74°C, Hotspot 108/109/110°C. This
+confirms the reading's source, but is not an independent check of driver accuracy
+or a cooling-system diagnosis. The 54–56°C Hotspot–Core difference requires checking.
 
-Парсер, независимые строки и пороги алертов, недоступные/устаревшие значения,
-пики и исключения Samsung покрыты автоматическими регрессиями. Обновлённый elevated
-overlay и автоматический обдув запущены и проверены вне игры; аппаратные результаты
-зафиксированы в `docs/thermal-control-validation-2026-09-05.md`. Сопоставление с
-Adrenalin, звуковая проверка под игровой нагрузкой и Explorer/DPI acceptance остаются
-открытыми. Контролируемое сравнение игровых температур ещё не выполнено.
-Отдельная проверка исправления файлового обмена контроллера описана в
-`docs/fan-status-io-fix-2026-09-05.md`; она не заменяет это сравнение температур.
-В `docs/audit-1.1.0.md` зафиксированы дополнительные регрессии датчиков/предупреждений
-и скрытые native Tk проверки прокрутки/масштаба; physical acceptance остаётся открытым.
-Основная строка VRAM теперь содержит GB и процент; пустой footer схлопывается.
-Native Tk проверки покрывают возврат панели при предупреждении и сохранение
-runtime-ошибок; в игровом smoke проверить обновлённую компактную компоновку.
-Аудит цветов, процентов CPU и сгруппированной компоновки:
-`docs/display-audit-2026-09-05.md`. Подсветка активности теперь нейтральная;
-оценку RPM/reference следует отличать от измеренного duty.
+The parser, separate rows and alert thresholds, unavailable/stale values, peaks,
+and Samsung exceptions are covered by automated regressions. The updated elevated
+overlay and automatic cooling were started and checked outside a game; hardware
+results are recorded in `docs/thermal-control-validation-2026-09-05.md`. Comparison
+with Adrenalin, sound checks under gaming load, and Explorer/DPI acceptance remain
+open. A controlled comparison of gaming temperatures has not yet been performed.
+A separate check of the controller's file-exchange fix is described in
+`docs/fan-status-io-fix-2026-09-05.md`; it does not replace the temperature comparison.
+`docs/audit-1.1.0.md` records additional sensor/warning regressions and hidden native
+Tk scrolling/scaling checks; physical acceptance remains open. The main VRAM row
+now includes GB and percentage; the empty footer collapses. Native Tk checks cover
+the panel returning when a warning appears and retention of runtime errors; check
+the updated compact layout in the gaming smoke test. Color, CPU percentage, and
+grouped-layout audit: `docs/display-audit-2026-09-05.md`. Activity highlighting is
+now neutral; RPM/reference estimates must be distinguished from measured duty.
 
-Manual Windows smoke после игры:
+Manual Windows smoke check after gaming:
 
-- Закрыть старый HeatMap и запустить обновлённый обычным `run_as_admin.bat` с UAC.
-- Сопоставить G.CORE и HOTSPOT с Current/Junction в Adrenalin в один момент времени;
-  проверить V.TEMP, недоступные датчики `--`, отсутствие обрезанных подписей и
-  перекрытий при текущем DPI, Details OFF/ON, размещение выросшего окна у края.
-- При обычной игровой нагрузке проверить отдельный красный HOTSPOT и звук при
-  включённых Alerts; не создавать перегрев специально. Проверить Alerts OFF и
-  Reset peaks. Свежесть/ошибки безопасно покрыты fake-тестами, не отключать драйвер.
-- Если Hotspot снова устойчиво 108–110°C при существенно более холодном Core,
-  уменьшить нагрузку, сопоставить показания Adrenalin и проверить охлаждение.
-  Снижение температур после исправления отображения не заявляется.
+- Close the old HeatMap and start the updated version normally with
+  `run_as_admin.bat` and UAC.
+- Compare G.CORE and HOTSPOT with Current/Junction in Adrenalin at the same moment;
+  check V.TEMP, unavailable sensors shown as `--`, absence of clipped labels and
+  overlaps at the current DPI, Details OFF/ON, and placement of an expanded window
+  near the edge.
+- Under ordinary gaming load, check the separate red HOTSPOT indicator and sound
+  with Alerts enabled; do not deliberately cause overheating. Check Alerts OFF
+  and Reset peaks. Freshness/errors are safely covered by fake tests; do not
+  disable the driver.
+- If Hotspot again remains at 108–110°C with a substantially cooler Core, reduce
+  load, compare Adrenalin readings, and check cooling. No temperature reduction
+  from the display fix is claimed.
 
-## P2 - Подтвердить постоянное размещение виджета на реальной оболочке Windows
+## P2 - Confirm fixed widget placement in the real Windows shell
 
-Файлы: `overlay.py`, `tests/test_layout_audit.py`; поведение: `README.md`.
+Files: `overlay.py`, `tests/test_layout_audit.py`; behavior: `README.md`.
 
-Текущая модель: независимое окно постоянно остаётся на рабочем столе под
-приложениями. `Raise on edge` временно меняет только порядок окон. Позиция,
-размер и монитор виджета сохраняются; анимации, перенос к краю, скрытие из-за
-перекрытия приложением и привязка к WorkerW больше не используются.
-`Always on top` включает постоянное размещение поверх приложений.
+Current model: an independent window remains on the desktop beneath applications.
+`Raise on edge` temporarily changes only the window order. The widget's position,
+size, and monitor are preserved; animation, movement to the edge, hiding because
+an application covers it, and WorkerW attachment are no longer used. `Always on top`
+enables persistent placement above applications.
 
-Необходимо проверить после запуска обновлённого HeatMap:
+Check the following after starting the updated HeatMap:
 
-- Наведение на правый край, многократный уход и возврат, клик по показаниям,
-  заголовку и меню: виджет остаётся на месте, после ухода оказывается под
-  приложениями, а активная программа сохраняет фокус.
-- Разворачивание и сворачивание приложений, Show Desktop/Win+D, наведение и
-  повторные клики на кнопке возле часов, Raise on edge OFF, auto-hide taskbar.
-  На свободном рабочем столе виджет остаётся доступным.
-- Меню, ввод CPU reference, перетаскивание и потеря ButtonRelease при смене
-  оболочки; Details и ошибка датчиков возле нижнего края. Коррекция позиции
-  допустима только при выходе выросшего окна за рабочую область.
-- Закрытие во время открытия датчиков и модального диалога, затем обычный
-  повторный запуск. Размещение под значками не гарантируется: проверить,
-  что виджет не перекрывает нужные значки в выбранном месте.
+- Hover at the right edge, repeatedly leave and return, and click readings, the
+  title, and the menu: the widget stays in place, returns beneath applications
+  after departure, and the active application retains focus.
+- Maximize and minimize applications, Show Desktop/Win+D, hover and repeatedly
+  click the button beside the clock, Raise on edge OFF, and an auto-hide taskbar.
+  The widget remains accessible on an unobstructed desktop.
+- The menu, CPU reference entry, dragging, and a lost ButtonRelease during shell
+  changes; Details and sensor errors near the bottom edge. Position adjustment
+  is allowed only if an expanded window extends beyond the work area.
+- Close during sensor opening and a modal dialog, then restart normally. Placement
+  beneath icons is not guaranteed: check that the widget does not cover needed
+  icons at the chosen position.
 
-Автоматические регрессии и прозрачные off-screen Tk/Win32 окна проверяют
-геометрию и жизненный цикл, но не заменяют эту проверку Explorer, реального
-рендеринга и игрового сценария. Исторические отчёты о выезжающем Peek относятся
-к прежней модели поведения и не доказывают acceptance новой.
-Проверка независимого обдува, формул и перезапуска текущей модели описана в
+Automated regressions and transparent off-screen Tk/Win32 windows check geometry
+and lifecycle, but do not replace these Explorer, real-rendering, and gaming
+checks. Historical reports of sliding Peek refer to the previous behavior model
+and do not establish acceptance of the new one. Verification of independent
+cooling, formulas, and restart for the current model is described in
 `docs/cooling-and-desktop-1.2.0-rc.2.md`.
 
-## P3 - Выполнить physical multi-monitor и mixed-DPI acceptance matrix
+## P3 - Complete the physical multi-monitor and mixed-DPI acceptance matrix
 
-Файл: `overlay.py`.
+File: `overlay.py`.
 
-Автотесты геометрии используют заданные области мониторов. Доступный физический
-стенд содержит один монитор; negative coordinates, staggered layouts, mixed DPI
-и disconnect/reconnect требуют второго дисплея или отдельной Windows VM.
+Geometry tests use predefined monitor areas. The available physical test setup
+has one monitor; negative coordinates, staggered layouts, mixed DPI, and
+disconnect/reconnect require a second display or a separate Windows VM.
 
-Что проверить:
+Checks:
 
-- Два монитора: horizontal, staggered, negative origin, mixed 100%/150% scaling;
-  перетаскивание, сохранение и повторный запуск на каждом из них.
-- Наведение на внешний правый край любого монитора под приложением поднимает
-  виджет на его прежнем месте. Внутренний стык и панель задач не активируют его.
-  Монитор курсора не меняет размер или положение виджета на другом мониторе.
-- Отключение и подключение монитора в обычном режиме, при временном поднятии
-  и Always on top. Окно остаётся доступным в рабочей области подключённого
-  монитора; сохранённая позиция соответствует новому размещению.
-- Details и предупреждения при разном DPI: подписи доступны через перенос и
-  прокрутку, заголовок и закрытие видны, окно не перекрывает панель задач.
-- Проверить компактную ширину, отдельные CPU/SYS проценты и FW возле SYS4:
-  реальные 0/100%, неизвестное --%, оценка ~%, длинное предупреждение и потеря
-  датчиков. Native Tk регрессии покрывают отсутствие обрезания при 100/150/200%.
-- Состояние меню совпадает с фактическим порядком окон после переключений.
-  Top/right taskbar проверять только на Windows/VM с поддерживаемым layout,
-  не менять shell registry ради теста.
+- Two monitors: horizontal, staggered, negative origin, mixed 100%/150% scaling;
+  drag, save, and restart on each.
+- Hovering over the outer right edge of any monitor while in an application raises
+  the widget at its existing position. Internal seams and the taskbar do not
+  trigger it. The cursor's monitor does not change the widget's size or position
+  on another monitor.
+- Disconnect and reconnect a monitor in normal mode, while temporarily raised,
+  and with Always on top. The window remains accessible within a connected
+  monitor's work area; the saved position reflects the new placement.
+- Details and warnings at different DPI settings: labels remain accessible through
+  wrapping and scrolling, the title and close button are visible, and the window
+  does not cover the taskbar.
+- Check compact width, separate CPU/SYS percentages, and FW beside SYS4: actual
+  0/100%, unknown --%, estimated ~%, a long warning, and sensor loss. Native Tk
+  regressions cover the absence of clipping at 100/150/200%.
+- Menu state matches actual window order after toggles. Check top/right taskbars
+  only on Windows/VM setups with supported layouts; do not change the shell
+  registry for testing.
 
-## Parking - Атомарно обновить LibreHardwareMonitor и PawnIO до следующего bundle
+## Parking - Update LibreHardwareMonitor and PawnIO atomically to the next bundle
 
-Promote when: появляется конкретная hardware fix/security reason для upgrade либо
-scheduled latest-compatible/provenance lane показывает несовместимость.
+Promote when: a specific hardware fix/security reason warrants an upgrade, or the
+scheduled latest-compatible/provenance lane identifies an incompatibility.
 
-Почему не сейчас:
+Why not now:
 
-- LibreHardwareMonitor и PawnIO образуют совместимую пару; независимое обновление
-  только одного компонента возвращает исходный failure mode после package update.
-- Следующий bundle должен обновлять LHM DLL graph, PawnIO installer metadata,
-  runtime lock, manifest, sensor fixtures и licenses одной reviewable change.
+- LibreHardwareMonitor and PawnIO form a compatible pair; updating only one
+  component independently reintroduces the original failure mode after a package
+  update.
+- The next bundle must update the LHM DLL graph, PawnIO installer metadata,
+  runtime lock, manifest, sensor fixtures, and licenses in one reviewable change.
 
-Требуемая проверка при promotion:
+Required checks when promoted:
 
-- Clean-room restore и staged CLR smoke проходят до runtime swap.
-- Failed download/hash/type import сохраняет предыдущий рабочий bundle.
-- После driver install/reboot elevated hardware smoke подтверждает CPU, GPU, RAM,
-  storage и доступные fan sensors.
+- Clean-room restore and staged CLR smoke checks pass before the runtime swap.
+- Failed downloads/hash checks/type imports preserve the previous working bundle.
+- After driver installation/reboot, an elevated hardware smoke check confirms
+  CPU, GPU, RAM, storage, and available fan sensors.
 
-## Рекомендованные следующие bundles
+## Recommended next work bundles
 
-1. **Постоянное размещение:** наведение, Show Desktop и возврат в приложение после перезапуска.
-2. **Desktop acceptance:** physical multi-monitor/mixed-DPI matrix и только
-   воспроизводимые follow-up fixes.
+1. **Fixed placement:** hovering, Show Desktop, and returning to an application
+   after restart.
+2. **Desktop acceptance:** the physical multi-monitor/mixed-DPI matrix and only
+   reproducible follow-up fixes.
