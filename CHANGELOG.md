@@ -1,16 +1,16 @@
 # Changelog
 
-## Unreleased
+## 1.2.3 — 2026-09-13
 
 - Replace misleading physical-drive fullness with separate Windows volume rows
   showing used/total GiB and percentage. Use the same volume source for warnings,
   alerts, and usage peaks; retain physical-drive temperatures independently.
-
 - Preserve verified fan-restoration results in a compact fallback when the full
   shutdown report cannot be written. Storage failures remain errors and do not
   trigger automatic controller recovery.
-- Warn about individual local volumes and show free GiB, so a nearly full C:
-  is visible even when the physical SSD reports a lower overall percentage.
+- Keep fresh Windows volume readings visible when hardware sensors fail. Include
+  their age in diagnostics and exclude stale readings from current warnings,
+  capacity rows, alerts, and usage peaks.
 
 ## 1.2.2 — 2026-09-12
 
