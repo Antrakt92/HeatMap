@@ -2,8 +2,8 @@
 
 ## Unreleased
 
-- Keep RAM as a standalone cyan row and give drives an orange STORAGE heading,
-  replacing the combined MEMORY & STORAGE heading without adding another title.
+- Keep RAM as a standalone cyan row followed by orange drive rows, removing the
+  combined MEMORY & STORAGE heading and extra storage title for a compact layout.
 
 ## 1.2.4 — 2026-09-16
 

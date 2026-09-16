@@ -2662,7 +2662,8 @@ class OverlayApp:
         self.rows["ram_pct"] = tk.Label(ram.master, text="", font=("Segoe UI", 9),
                                        fg="#888888", bg="#1a1a2e", anchor="e")
         self.rows["ram_pct"].pack(side="right", before=ram, padx=(8, 0))
-        storage = self._make_group("STORAGE", self.DISK_CLR)
+        storage = tk.Frame(self.content, bg="#1a1a2e", padx=5)
+        storage.pack(fill="x", pady=(4, 5))
         self.details_frame = tk.Frame(storage, bg="#1a1a2e")
         self.details_frame.pack(fill="x")
         for key, label in (("detail_board_temps", "Board"), ("detail_disk_life", "SSD life"),

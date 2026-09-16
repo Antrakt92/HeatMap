@@ -520,7 +520,8 @@ Verified environment: Python 3.13, pythonnet 3.1.0, psutil 7.2.2. Exact producti
 
 ## Controls
 
-Main readings are grouped into CPU, GPU, CASE COOLING, and MEMORY & STORAGE.
+CPU, GPU, and CASE COOLING have section headings. The standalone cyan RAM row
+and orange drive rows follow without extra headings.
 The ⚙ title-bar button and right-click open the same menu with four sections.
 The widget stays temporarily raised while the menu or CPU reference dialog is open.
 

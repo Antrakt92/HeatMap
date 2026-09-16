@@ -62,7 +62,7 @@ class DisplayAuditTests(TkTestCase):
 
     def test_grouped_settings_keep_toggle_state_in_the_right_menu(self):
         with layout_app() as app:
-            self.assertEqual(list(app.groups), ["CPU", "GPU", "CASE COOLING", "MEMORY & STORAGE"])
+            self.assertEqual(list(app.groups), ["CPU", "GPU", "CASE COOLING"])
             self.assertEqual([app.menu.entrycget(i, "label") for i in range(4)],
                              ["Display", "Alerts & limits", "Cooling", "Diagnostics"])
             menu, index = app._menu_idx["alerts"]
