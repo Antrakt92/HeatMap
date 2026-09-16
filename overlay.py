@@ -35,7 +35,7 @@ from gpu_fans import GpuWorkerClient, mode_text as gpu_fan_mode_text
 from hardware_access_guard import HardwareAccessConflict, require_hardware_access
 from storage_identity import volume_disk_number
 
-VERSION = "1.2.5"
+VERSION = "1.2.6"
 
 
 # --- Paths ---
@@ -2653,7 +2653,6 @@ class OverlayApp:
         for number in range(1, 7):
             self._make_row(f"case_fan_{number}", f"SYS {number}", parent=cooling)
             self.rows[f"case_fan_{number}"].master.pack_forget()
-        self._make_row("case_fan_control", "Mode", parent=cooling)
 
         memory = tk.Frame(self.content, bg="#1a1a2e", padx=5)
         memory.pack(fill="x")
@@ -3320,7 +3319,7 @@ class OverlayApp:
             row, text=label_text, font=("Segoe UI", 9),
             fg=label_fg, bg="#1a1a2e", width=max(6, len(label_text) + 1), anchor="w"
         ).pack(side="left")
-        if key in ("gpu_fan", "cpu_fan", "cpu_optional_fan") or (key.startswith("case_fan_") and key != "case_fan_control"):
+        if key in ("gpu_fan", "cpu_fan", "cpu_optional_fan") or key.startswith("case_fan_"):
             if not hasattr(self, "fan_percent_labels"):
                 self.fan_percent_labels = {}
             percent = tk.Label(row, text="", font=("Segoe UI", 9), bg="#1a1a2e", fg="#888888", anchor="e")
@@ -4027,10 +4026,6 @@ class OverlayApp:
                     self.config["case_fan_full_rpm"] = merged
                     self.fan_worker.full_rpm = merged
                     self._save_config()
-            self.rows["case_fan_control"].config(
-                text=_case_fan_mode(status),
-                fg="#f87171" if state == "error" else "#facc15" if state == "checking" else "#4ade80",
-            )
 
         with self.lock:
             data = self.sensor_data
@@ -4163,8 +4158,12 @@ class OverlayApp:
             fan = case_sensors.get(f"System Fan #{number}") or case_sensors.get(f"System Fan #{number} / Pump")
             rpm = fan.get("rpm") if fan else None
             if rpm and hasattr(self, "_seen_case_fans") and number not in self._seen_case_fans:
+                # Sensors may appear later; keep SYS rows in header order.
+                following = next((self.rows[f"case_fan_{other}"].master
+                                  for other in range(number + 1, 7)
+                                  if other in self._seen_case_fans), None)
+                self.rows[key].master.pack(fill="x", pady=1, **({"before": following} if following else {}))
                 self._seen_case_fans.add(number)
-                self.rows[key].master.pack(fill="x", pady=1, before=self.rows["case_fan_control"].master)
             reference = self.config.get("case_fan_full_rpm", {}).get(fan["name"]) if fan else None
             self._set_fan_reading(key, rpm, fan.get("control_pct") if fan else None, reference,
                                   bool(fan and fan.get("id") in stalled_ids),
@@ -4293,7 +4292,7 @@ class OverlayApp:
         self._last_disk_names = []
 
         for key, label in self.rows.items():
-            if key not in ("case_fan_control", "gpu_fan_control"):
+            if key != "gpu_fan_control":
                 label.config(text=text, fg=color)
         for label in getattr(self, "fan_percent_labels", {}).values():
             label.config(text=" · --%", fg="#888888")

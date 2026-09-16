@@ -116,6 +116,29 @@ class FanScopeTests(unittest.TestCase):
 
 
 class FanScopeNativeUiTests(TkTestCase):
+    def test_late_fans_keep_numeric_order_without_mode_row(self):
+        with layout_app() as app:
+            for readings in ({4: 900}, {1: 900, 2: 900, 4: 0, 5: 900}):
+                app.sensor_data = sample(fans=[
+                    dict(name=f"System Fan #{number}", id=str(number), rpm=rpm)
+                    for number, rpm in readings.items()])
+                app.update_ui()
+                frames = [app.rows[f"case_fan_{number}"].master for number in sorted(readings)]
+                self.assertEqual(frames[0].master.pack_slaves(), frames)
+            self.assertNotIn("case_fan_control", app.rows)
+
+    def test_controller_error_remains_visible_without_mode_row(self):
+        with layout_app() as app:
+            app.sensor_data = sample()
+            app.fan_worker.poll = mock.Mock(return_value=dict(
+                state="error", restore_confirmed=False,
+                restore_errors=["System Fan #1: restore failed"]))
+            app.update_ui()
+            self.assertNotIn("case_fan_control", app.rows)
+            self.assertIn("restore unconfirmed", app.health_messages[0])
+            self.assertIn("restart Windows", app.health_label.cget("text"))
+            self.assertEqual(app.health_label.cget("fg"), "#f87171")
+
     def test_cooling_status_reuses_dialog_refreshes_and_cancels_timer_on_close(self):
         with layout_app() as app:
             create_toplevel = overlay.tk.Toplevel
@@ -180,13 +203,12 @@ class FanScopeNativeUiTests(TkTestCase):
             app.sensor_data = sample(fans=[dict(name=name, id=name, rpm=900) for name in fans.TARGETS])
             app.fan_worker.poll = mock.Mock(return_value=status_for(fans.INDEPENDENT_TARGETS))
             app.update_ui()
-            self.assertEqual(app.rows["case_fan_control"].cget("text"), "AUTO 77% · SYS 1/2")
+            self.assertNotIn("case_fan_control", app.rows)
             self.assertEqual(app.rows["case_fan_4"].cget("text"), "900 RPM · FW")
             self.assertNotIn("Firmware", app.rows["case_fan_1"].cget("text"))
             self.assertNotIn("Firmware", app.rows["case_fan_2"].cget("text"))
             app.fan_worker.poll.return_value = status_for(fans.TARGETS)
             app.update_ui()
-            self.assertEqual(app.rows["case_fan_control"].cget("text"), "AUTO 77% · SYS 1/2/4")
             self.assertEqual(app.rows["case_fan_4"].cget("text"), "900 RPM")
 
     def test_two_channel_commissioning_is_saved_and_shared_reference_is_preserved(self):

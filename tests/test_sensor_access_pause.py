@@ -46,13 +46,12 @@ class SensorAccessPauseTests(unittest.TestCase):
         clamp.assert_called_once_with(persist=False)
 
     def test_pause_preserves_unconfirmed_fan_restore_warning(self):
-        from test_overlay_helpers import _FakeLabel, _update_ui_app
+        from test_overlay_helpers import _update_ui_app
 
         app = _update_ui_app()
         reason = "Sensors paused: Close cpuz.exe, then restart HeatMap"
         app._hardware_pause_reason = reason
         app.sensor_data = {"error": reason}
-        app.rows["case_fan_control"] = _FakeLabel()
         app.fan_worker = mock.Mock()
         app.fan_worker.poll.return_value = {
             "state": "error", "restore_errors": ["System Fan #1: restore failed"],

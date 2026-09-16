@@ -115,7 +115,7 @@ class LayoutTests(TkTestCase):
                 app.details_enabled = True
                 app._apply_details_visibility()
                 for number in (1, 2, 4, 5):
-                    app.rows[f"case_fan_{number}"].master.pack(fill="x", before=app.rows["case_fan_control"].master)
+                    app.rows[f"case_fan_{number}"].master.pack(fill="x")
                 for key in ("detail_board_temps", "detail_disk_sensors"):
                     app.rows[key].configure(text="Sensor one 54°C | Sensor two 74°C | Sensor three 88°C | Sensor four 56°C")
                 app._make_disk_row("disk_0", "Long NVMe model " * 8, app.disk_frame)

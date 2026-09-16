@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.6 — 2026-09-16
+
+- Remove the separate Mode row from CASE COOLING to save space. Keep controller
+  warnings in the overlay and full status in Cooling status and policy and Copy
+  diagnostics. Preserve SYS header order when fan readings appear later.
+
 ## 1.2.5 — 2026-09-16
 
 - Keep RAM as a standalone cyan row followed by orange drive rows, removing the

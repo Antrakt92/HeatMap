@@ -19,7 +19,7 @@ class ReadinessUiTests(TkTestCase):
             app.gpu_fan_worker.poll.return_value = self.waiting()
             app._check_alerts.reset_mock()
             app.update_ui()
-            self.assertEqual(app.rows['case_fan_control'].cget('text'), 'Waiting sensors...')
+            self.assertNotIn('case_fan_control', app.rows)
             self.assertIn('Waiting GPU', app.rows['gpu_fan_control'].cget('text'))
             self.assertIn('Case fans: waiting for sensors.', app.health_label.cget('text'))
             self.assertIn('GPU fans: waiting for sensors.', app.health_label.cget('text'))
@@ -43,7 +43,7 @@ class ReadinessUiTests(TkTestCase):
                 app.gpu_fan_worker.poll.return_value = self.waiting()
                 app.update_ui()
                 app.root.update_idletasks()
-                for key in ('case_fan_control', 'gpu_fan_control'):
+                for key in ('case_fan_1', 'gpu_fan_control'):
                     self.assertLessEqual(app.rows[key].master.master.winfo_reqwidth(),
                                          int(app.canvas.itemcget(app._content_window, 'width')))
                 app.fan_worker.poll.return_value = dict(state='off')

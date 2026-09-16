@@ -85,6 +85,8 @@ fresh case/GPU statuses. After normal sleep/resume, check restoration of control
 and the single automatic recovery attempt following a confirmed timeout. Copy
 diagnostics must retain the original stop reason; OFF → ON must remain available
 after a repeat failure. Do not suspend or kill hardware processes for this test.
+Controller warnings must remain visible in the health panel without a separate
+Mode row; detailed state remains in Cooling status and policy and Copy diagnostics.
 Automated fake regressions check timeouts, restart boundaries, and diagnostic
 retention, but do not replace sleep, sustained-load, and driver-hang checks.
 

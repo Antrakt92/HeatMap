@@ -10,7 +10,7 @@ A lightweight Windows widget that displays PC temperatures, load, and component 
 | **GPU** | Core, Hotspot, and memory temperatures on separate rows, load (%), VRAM, and fans |
 | **RAM** | Used/total GB and usage (%) |
 | **Drives** | One compact row per volume: drive letter, device model, temperature, and fullness (%) |
-| **Case** | RPM and available percentage for each SYS header, plus automatic control status |
+| **Case** | RPM and available percentage for each SYS header; controller warnings when needed |
 | **Warnings** | Overheating, a large Hotspot–Core difference, a previously spinning fan stopping under load, and memory/disk usage |
 
 CPU/GPU/RAM update every 2 seconds; storage sensors and local volume capacity update approximately every 30 seconds to avoid unnecessary I/O. Storage rows combine the drive letter, model, temperature, and fullness, for example `C: 980 PRO 500GB 36°C 78.2%`. Used/total GiB are omitted from the main rows; detailed capacity remains in Copy diagnostics. Fullness comes from Windows volume capacity, not the physical drive's LHM aggregate.
@@ -208,7 +208,7 @@ HeatMap repeats motherboard-only discovery every 10 seconds, at most five times
 within the same deadline. This addresses LHM missing discovery because the hardware
 bus was busy. CPU/GPU devices and drivers are not reopened. Already-discovered
 controllers are not recreated during this wait. The window shows
-`Waiting sensors...`; no fan commands are sent until the channels and
+`Case fans: waiting for sensors.`; no fan commands are sent until the channels and
 CPU/Core/Hotspot/Memory temperatures are ready. Retries do not bypass duplicates,
 foreign identifiers, a stopped fan, or a missing control object. An error before
 takeover explicitly reports that no commands were sent and retains the FW label;
@@ -218,8 +218,9 @@ for SYS4/SYS5/SYS6 is described below; it does not use the old LHM SetSoftware
 path for them. With a different motherboard or wiring, HeatMap continues monitoring
 but rejects this profile. Header numbers do not mean “front” or “rear” fan.
 
-Mode shows the percentage and controlled channels, for example `AUTO 70% · SYS 1/2`.
-SYS4 shows `FW` in this mode. **Cooling → Cooling status and policy** displays
+The main overlay shows SYS fan readings without a separate Mode row. SYS4 shows
+`FW` under the two-channel profile. **Cooling → Cooling status and policy** displays
+the mode and controlled channels (for example `AUTO 70% · SYS 1/2`),
 the current reason for cooling, target percentage, and actual command, which
 may exceed the target during a gradual decrease. The window updates without
 interrupting sensor polling or the controller heartbeat.
@@ -240,7 +241,7 @@ Without `--enable`, it only tests and restores control. Results and the backup
 are stored in `%LOCALAPPDATA%/HeatMap/shared-controller-2026-09-06/`.
 This command does not change sound or autostart settings.
 
-In this mode, Mode shows `AUTO …% · SYS 1/2/4/5`. All four fans follow the same
+With this profile, **Cooling status and policy** shows `AUTO …% · SYS 1/2/4/5`. All four fans follow the same
 temperature curve. The unused SYS6 on the same controller is held at a 100%
 command; detecting its tachometer stops this profile. CPU and GPU retain their
 own control. To return control to the motherboard, turn off
