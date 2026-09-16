@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.5 — 2026-09-16
 
 - Keep RAM as a standalone cyan row followed by orange drive rows, removing the
   combined MEMORY & STORAGE heading and extra storage title for a compact layout.
