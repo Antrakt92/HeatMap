@@ -29,9 +29,11 @@ after the user frees disk space remains to be checked; do not fill C: deliberate
 or treat successful report publication as evidence of hardware restoration.
 
 Storage display follow-up: compare the C:/D: capacity rows with Windows after a
-large file copy or deletion, allowing the 30-second refresh interval. Physical
-drive temperatures and volume fullness are separate; multi-partition devices and
-volumes spanning devices must not be mapped by model name or enumeration order.
+large file copy or deletion, allowing the 30-second refresh interval. Compact rows
+join temperature and fullness only by confirmed physical disk number. Unknown or
+spanned mappings retain separate readings. Physical hot-plug and unusual storage
+topologies remain follow-ups; fake regressions cover unknown/ambiguous identities,
+reordered devices, duplicate models, and multiple partitions.
 
 ## P2 - Physical reboot/login acceptance
 

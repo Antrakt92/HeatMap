@@ -848,6 +848,8 @@ class OverlayHelperTests(unittest.TestCase):
             ],
         )
         computer = SimpleNamespace(Hardware=[storage])
+        # pythonnet exposes IHardware; Storage belongs to its concrete implementation.
+        storage.__implementation__ = SimpleNamespace(Storage=SimpleNamespace(DriveNumber=1))
 
         with (
             mock.patch.dict(sys.modules, modules),
@@ -857,7 +859,7 @@ class OverlayHelperTests(unittest.TestCase):
             data = overlay.read_sensors(computer, update_storage=False)
 
         self.assertEqual(storage.update_calls, 0)
-        self.assertEqual(data["disks"], [{"name": "980", "temp": 41, "lhm_used_pct": 68}])
+        self.assertEqual(data["disks"], [{"name": "980", "temp": 41, "lhm_used_pct": 68, "disk_number": 1}])
         self.assertEqual(data["cpu_load"], 11)
         self.assertEqual(data["ram_pct"], 22)
 

@@ -11,21 +11,25 @@ from test_overlay_helpers import _sample_data, _update_ui_app
 
 
 class VolumeSpaceTests(TestCase):
-    def test_main_rows_show_windows_capacity_separately_from_device_temperature(self):
+    def setUp(self):
+        mapping = mock.patch.object(overlay, 'volume_disk_number', return_value=None)
+        self.mapping = mapping.start()
+        self.addCleanup(mapping.stop)
+
+    def test_main_rows_combine_confirmed_device_temperature_and_windows_fullness(self):
         app = _update_ui_app()
         app.sensor_data = _sample_data()
-        app.sensor_data['disks'] = [dict(name='SSD', temp=38, used_pct=65)]
+        app.sensor_data['disks'] = [dict(name='SSD', temp=38, used_pct=65, disk_number=1)]
         volumes = dict(volumes=[dict(name='C:', total_bytes=400 * 2**30, free_bytes=4 * 2**30,
-                                    used_pct=99)], volume_errors=[])
+                                    used_pct=99, disk_number=1)], volume_errors=[])
         app._volume_snapshot = (100, volumes)
         with mock.patch.object(overlay.time, 'monotonic', return_value=100):
             app.update_ui()
-        self.assertEqual(app._last_disk_names, [('device', 'SSD'), ('volume', 'C:')])
+        self.assertEqual(app._last_disk_names, [('volume', 'C: SSD')])
         self.assertEqual(app.rows['disk_0'].options['text'], '38°C')
-        self.assertEqual(app.rows['disk_0_usage'].options['text'], '')
-        self.assertEqual(app.rows['disk_1'].options['text'], '396.0/400.0 GiB')
-        self.assertEqual(app.rows['disk_1_usage'].options['text'], '99.0%')
-        self.assertEqual(app.rows['disk_1_usage'].options['fg'], '#f87171')
+        self.assertEqual(app.rows['disk_0_usage'].options['text'], '99.0%')
+        self.assertEqual(app.rows['disk_0_usage'].options['fg'], '#f87171')
+        self.assertNotIn('disk_1', app.rows)
         self.assertEqual(app.peaks['disk_used_pct'], 99)
 
     def test_volume_rows_refresh_capacity_and_mount_changes_without_device_changes(self):
@@ -36,12 +40,54 @@ class VolumeSpaceTests(TestCase):
         second = dict(first, free_bytes=10 * 2**30, used_pct=90)
         app._update_storage_rows([], dict(volumes=[second]))
         self.assertIs(app.rows['disk_0'], first_label)
-        self.assertEqual(first_label.options['text'], '90.0/100.0 GiB')
+        self.assertEqual(first_label.options['text'], '--')
+        self.assertEqual(app.rows['disk_0_usage'].options['text'], '90.0%')
         app._update_storage_rows([], dict(volumes=[dict(second, name='D:')]))
         self.assertEqual(app._last_disk_names, [('volume', 'D:')])
         app._update_storage_rows([], dict(volumes=[]))
         self.assertEqual(app.disk_labels, [])
         self.assertNotIn('disk_0', app.rows)
+
+    def test_identity_not_order_or_model_controls_temperature(self):
+        app = _update_ui_app()
+        disks = [dict(name='Same SSD', temp=26, disk_number=0),
+                 dict(name='Same SSD', temp=36, disk_number=1)]
+        volumes = dict(volumes=[dict(name='C:', disk_number=1, used_pct=78.2),
+                               dict(name='D:', disk_number=0, used_pct=79)])
+        app._update_storage_rows(disks, volumes)
+        self.assertEqual(len(app.disk_labels), 2)
+        self.assertEqual(app.rows['disk_0'].options['text'], '36°C')
+        self.assertEqual(app.rows['disk_1'].options['text'], '26°C')
+        self.assertEqual(app._last_disk_names, [('volume', 'C: Same SSD'), ('volume', 'D: Same SSD')])
+        app._update_storage_rows(list(reversed(disks)), volumes)
+        self.assertEqual(app.rows['disk_0'].options['text'], '36°C')
+
+    def test_unknown_or_duplicate_identity_does_not_borrow_temperature(self):
+        for number in (None, 4):
+            with self.subTest(number=number):
+                app = _update_ui_app()
+                disks = [dict(name='SSD', temp=38, disk_number=4), dict(name='Other', temp=50, disk_number=4)]
+                app._update_storage_rows(disks, dict(volumes=[dict(name='C:', disk_number=number, used_pct=80)]))
+                self.assertEqual(app.rows['disk_0'].options['text'], '--')
+                self.assertEqual(app._last_disk_names[0], ('volume', 'C:'))
+                self.assertEqual(len(app.disk_labels), 3)
+
+    def test_multiple_partitions_keep_their_own_fullness_without_duplicate_device_row(self):
+        app = _update_ui_app()
+        app._update_storage_rows([dict(name='SSD', temp=38, disk_number=1)],
+            dict(volumes=[dict(name='C:', disk_number=1, used_pct=80), dict(name='E:', disk_number=1, used_pct=10)]))
+        self.assertEqual(len(app.disk_labels), 2)
+        self.assertEqual(app.rows['disk_0_usage'].options['text'], '80.0%')
+        self.assertEqual(app.rows['disk_1_usage'].options['text'], '10.0%')
+        self.assertEqual(app.rows['disk_1'].options['text'], '38°C')
+
+    def test_volume_sampling_includes_confirmed_windows_identity(self):
+        self.mapping.return_value = 1
+        with mock.patch.object(overlay.psutil, 'disk_partitions', return_value=[NS(mountpoint='C:\\', opts='rw,fixed')]), \
+                mock.patch.object(overlay.psutil, 'disk_usage', return_value=NS(total=100, free=20)):
+            data = overlay._read_volume_usage()
+        self.assertEqual(data['volumes'][0]['disk_number'], 1)
+        self.mapping.assert_called_once_with('C:')
 
     def test_physical_capacity_never_changes_usage_peak_or_plays_fullness_alert(self):
         data = dict(disks=[dict(name='SSD', temp=30, used_pct=99, lhm_used_pct=99)])

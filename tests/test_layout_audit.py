@@ -31,9 +31,10 @@ class LayoutAuditTests(TkTestCase):
     def test_device_temperatures_and_volume_capacity_fit_without_clipping(self):
         for scaling in (1.333, 2.0):
             with self.subTest(scaling=scaling), mapped_layout_app(scaling=scaling, height=700) as (app, area):
-                app._update_storage_rows([dict(name='980 PRO 500GB', temp=38, lhm_used_pct=65)],
-                    dict(volumes=[dict(name='C:', total_bytes=400 * 2**30, free_bytes=4 * 2**30, used_pct=99),
-                                  dict(name='D:', total_bytes=840 * 2**30, free_bytes=82 * 2**30, used_pct=90.2)]))
+                app._update_storage_rows([dict(name='980 PRO 500GB', temp=38, disk_number=1),
+                                          dict(name='860 EVO 1TB', temp=26, disk_number=0)],
+                    dict(volumes=[dict(name='C:', disk_number=1, used_pct=99),
+                                  dict(name='D:', disk_number=0, used_pct=90.2)]))
                 app._fit_content()
                 app.root.update_idletasks()
                 self.assertLessEqual(app.root.winfo_height(), 700)
@@ -42,7 +43,11 @@ class LayoutAuditTests(TkTestCase):
                     usage = app.rows[key + '_usage']
                     self.assertGreaterEqual(label.winfo_width(), label.winfo_reqwidth())
                     self.assertGreaterEqual(usage.winfo_width(), usage.winfo_reqwidth())
-                self.assertEqual(app.rows['disk_1_usage'].cget('text'), '99.0%')
+                self.assertEqual(len(app.disk_labels), 2)
+                self.assertEqual(app.rows['disk_0_usage'].cget('text'), '99.0%')
+                for row in app.disk_frame.winfo_children():
+                    labels = row.winfo_children()
+                    self.assertEqual(labels[0].winfo_reqheight(), labels[1].winfo_reqheight())
 
     def test_sensor_error_growth_keeps_footer_inside_work_area(self):
         with mapped_layout_app() as (app, area):

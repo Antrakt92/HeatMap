@@ -9,11 +9,13 @@ A lightweight Windows widget that displays PC temperatures, load, and component 
 | **CPU** | Temperature, frequency, load (%), RPM of both fans, and percentage when available |
 | **GPU** | Core, Hotspot, and memory temperatures on separate rows, load (%), VRAM, and fans |
 | **RAM** | Used/total GB and usage (%) |
-| **Drives** | Physical drive temperatures; separate C:, D:, etc. rows show used/total GiB and volume fullness (%) |
+| **Drives** | One compact row per volume: drive letter, device model, temperature, and fullness (%) |
 | **Case** | RPM and available percentage for each SYS header, plus automatic control status |
 | **Warnings** | Overheating, a large Hotspot–Core difference, a previously spinning fan stopping under load, and memory/disk usage |
 
-CPU/GPU/RAM update every 2 seconds; storage sensors and local volume capacity update approximately every 30 seconds to avoid unnecessary I/O. Each local drive-letter volume has its own capacity row, such as `C: 396.0/400.0 GiB 99.0%`: the first number is used space, the second is total capacity. Fullness comes from Windows volume capacity, not the physical drive's LHM aggregate. Drive temperatures remain beside the device model; the app does not guess which device hosts a volume. GiB means 1,073,741,824 bytes.
+CPU/GPU/RAM update every 2 seconds; storage sensors and local volume capacity update approximately every 30 seconds to avoid unnecessary I/O. Storage rows combine the drive letter, model, temperature, and fullness, for example `C: 980 PRO 500GB 36°C 78.2%`. Used/total GiB are omitted from the main rows; detailed capacity remains in Copy diagnostics. Fullness comes from Windows volume capacity, not the physical drive's LHM aggregate.
+
+Temperature is joined to a volume only when Windows confirms a single physical disk and LHM supplies the same disk number. Model names and discovery order are never used to infer a match. If the mapping is unknown or spans devices, the volume keeps its percentage with an unavailable temperature, and unmatched physical temperatures remain separate. Multiple partitions on one device retain their own fullness values.
 
 Capacity rows, warnings, alerts, and usage peaks all use Windows volume readings. The warning panel also shows free GiB, using the same 80% warning and 90% critical thresholds. Volume read failures remain visible in the panel and Copy diagnostics. Expired readings are not displayed as current, and fresh volume rows remain available if hardware-temperature readings fail.
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.4 — 2026-09-16
+
+- Combine the drive letter, device model, temperature, and Windows fullness into
+  one compact storage row. Keep detailed capacity in diagnostics instead of
+  showing used/total GiB in the main overlay.
+- Match volumes to sensors by confirmed Windows physical disk numbers. Preserve
+  safe separate readings when mapping is unknown or ambiguous, including volumes
+  spanning devices; never match by model name or discovery order.
+
 ## 1.2.3 — 2026-09-13
 
 - Replace misleading physical-drive fullness with separate Windows volume rows

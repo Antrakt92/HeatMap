@@ -33,8 +33,9 @@ from thermal_policy import ThermalAdvisor, gpu_delta, delta_severity, finite
 from case_fans import FanWorkerClient, full_rpm_reference
 from gpu_fans import GpuWorkerClient, mode_text as gpu_fan_mode_text
 from hardware_access_guard import HardwareAccessConflict, require_hardware_access
+from storage_identity import volume_disk_number
 
-VERSION = "1.2.3"
+VERSION = "1.2.4"
 
 
 # --- Paths ---
@@ -1459,6 +1460,9 @@ def _read_volume_usage():
                 raise ValueError("invalid volume capacity")
             result["volumes"].append(dict(name=name, total_bytes=int(total), free_bytes=int(free),
                                           used_pct=100 * (total - free) / total))
+            number = volume_disk_number(name)
+            if number is not None:
+                result["volumes"][-1]["disk_number"] = number
         except (OSError, psutil.Error, ValueError) as exc:
             result["volume_errors"].append(f"{name} {exc}")
     return result
@@ -1846,6 +1850,13 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
             "temp": primary_temp if primary_temp is not None else disk_temp,
             "lhm_used_pct": disk_used,  # Raw physical-device aggregate; never volume fullness.
         }
+        # LHM Storage.DriveNumber is the Windows physical disk number, independent
+        # of discovery order or model names (including identical drive models).
+        storage = getattr(getattr(hw, "__implementation__", hw), "Storage", None)
+        if storage is not None:
+            number = getattr(storage, "DriveNumber", None)
+            if number is not None and not isinstance(number, bool) and 0 <= int(number) <= 0xffffffff:
+                disk_data["disk_number"] = int(number)
         if len(temperature_readings) > 1:
             disk_data["temperatures"] = temperature_readings
             disk_data["aux_temp"] = max(item["temp"] for item in temperature_readings)
@@ -3336,7 +3347,7 @@ class OverlayApp:
         # Left: disk name (orange, bold)
         tk.Label(
             row, text=f" {disk_name}", font=("Segoe UI", 10, "bold"),
-            fg=self.DISK_CLR, bg="#1a1a2e", anchor="w", wraplength=180, justify="left"
+            fg=self.DISK_CLR, bg="#1a1a2e", anchor="w", justify="left"
         ).pack(side="left")
         # Far-right: usage % (colored)
         usage_lbl = tk.Label(
@@ -4211,9 +4222,22 @@ class OverlayApp:
     def _update_storage_rows(self, disks, volume_data):
         # Device temperature and filesystem capacity have different identities.
         # Never infer drive letters from device names or LHM enumeration order.
-        entries = [("device", disk["name"], disk) for disk in disks]
-        entries += [("volume", volume["name"], volume)
-                    for volume in (volume_data or {}).get("volumes", [])]
+        entries = []
+        matched = set()
+        for volume in (volume_data or {}).get("volumes", []):
+            number = volume.get("disk_number")
+            candidates = [(index, disk) for index, disk in enumerate(disks)
+                          if type(number) is int and type(disk.get("disk_number")) is int
+                          and disk["disk_number"] == number]
+            entry, name = dict(volume), volume["name"]
+            if len(candidates) == 1:
+                index, disk = candidates[0]
+                matched.add(index)
+                name += " " + disk["name"]
+                entry.update(temp=disk.get("temp"), device_name=disk["name"])
+            entries.append(("volume", name, entry))
+        entries += [("device", disk["name"], disk) for index, disk in enumerate(disks)
+                    if index not in matched]
         identities = [(kind, name) for kind, name, _ in entries]
         if identities != self._last_disk_names:
             self._last_disk_names = identities
@@ -4228,18 +4252,13 @@ class OverlayApp:
                 self._make_disk_row(key, name, parent=self.disk_frame)
                 self.disk_labels.append(key)
         for key, (kind, name, entry) in zip(self.disk_labels, entries):
-            if kind == "device":
-                temperature = entry.get("temp")
-                value = f"{temperature}°C" if temperature is not None else "--"
-                color = disk_temp_color(temperature, name) if temperature is not None else "#888888"
-                usage, usage_color = "", "#888888"
-            else:
-                total = finite(entry.get("total_bytes"), 1, 2**64 - 1)
-                free = finite(entry.get("free_bytes"), 0, 2**64 - 1)
+            temperature = entry.get("temp")
+            value = f"{temperature}°C" if temperature is not None else "--"
+            color = (disk_temp_color(temperature, entry.get("device_name", name))
+                     if temperature is not None else "#888888")
+            usage, usage_color = "", "#888888"
+            if kind == "volume":
                 percent = finite(entry.get("used_pct"), 0, 100)
-                value = (f"{(total - free) / 2**30:.1f}/{total / 2**30:.1f} GiB"
-                         if total is not None and free is not None and free <= total else "--")
-                color = "#cbd5e1" if value != "--" else "#888888"
                 usage = f"{percent:.1f}%" if percent is not None else "--"
                 usage_color = disk_usage_color(percent) if percent is not None else "#888888"
             self.rows[key].config(text=value, fg=color)
