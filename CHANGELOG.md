@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Keep RAM as a standalone cyan row and give drives an orange STORAGE heading,
+  replacing the combined MEMORY & STORAGE heading without adding another title.
+
 ## 1.2.4 — 2026-09-16
 
 - Combine the drive letter, device model, temperature, and Windows fullness into

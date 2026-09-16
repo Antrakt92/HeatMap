@@ -2655,20 +2655,22 @@ class OverlayApp:
             self.rows[f"case_fan_{number}"].master.pack_forget()
         self._make_row("case_fan_control", "Mode", parent=cooling)
 
-        memory = self._make_group("MEMORY & STORAGE", "#67e8f9")
-        self._make_row("ram_gb", "RAM", parent=memory)
+        memory = tk.Frame(self.content, bg="#1a1a2e", padx=5)
+        memory.pack(fill="x")
+        self._make_row("ram_gb", "RAM", parent=memory, label_fg="#67e8f9")
         ram = self.rows["ram_gb"]
         self.rows["ram_pct"] = tk.Label(ram.master, text="", font=("Segoe UI", 9),
                                        fg="#888888", bg="#1a1a2e", anchor="e")
         self.rows["ram_pct"].pack(side="right", before=ram, padx=(8, 0))
-        self.details_frame = tk.Frame(memory, bg="#1a1a2e")
+        storage = self._make_group("STORAGE", self.DISK_CLR)
+        self.details_frame = tk.Frame(storage, bg="#1a1a2e")
         self.details_frame.pack(fill="x")
         for key, label in (("detail_board_temps", "Board"), ("detail_disk_life", "SSD life"),
                            ("detail_disk_sensors", "Disk sensors"), ("detail_peak_temps", "Peak temp"),
                            ("detail_peak_usage", "Peak usage")):
             self._make_row(key, label, parent=self.details_frame,
                            label_fg=self.DISK_CLR if key.startswith("detail_disk_") else "#cbd5e1")
-        self.disk_frame = tk.Frame(memory, bg="#1a1a2e")
+        self.disk_frame = tk.Frame(storage, bg="#1a1a2e")
         self.disk_frame.pack(fill="x")
         self.disk_labels = []
         self._last_disk_names = []
