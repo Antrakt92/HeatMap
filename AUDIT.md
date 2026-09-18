@@ -73,8 +73,11 @@ Independent HeatMap risks were fixed: SYS4 no longer takes over the shared EC ba
 on a one-off Pump 100% reading; known competing programs pause sensors; Copy
 diagnostics does not open an additional monitor. Ryzen Master detection recognizes
 `AMD Ryzen Master.exe` from the official MSI, including spaces; a separate
-regression checks that hardware access is blocked. Extended stability testing is
-needed after Windows repair. Automated tests do not prove that the kernel freeze
+regression checks that hardware access is blocked. Ambiguous `gcc.exe` detection
+checks compiler support files before blocking a recognized GCC toolchain;
+unknown identities remain blocked. Conflict pauses preserve the actual cause
+and label cached diagnostics as historical. Extended stability testing is needed
+after Windows repair. Automated tests do not prove that the kernel freeze
 is resolved and do not replace this check.
 
 ## P2 - Extended RX 7900 XT fan-control testing
@@ -226,6 +229,10 @@ Checks:
 - Menu state matches actual window order after toggles. Check top/right taskbars
   only on Windows/VM setups with supported layouts; do not change the shell
   registry for testing.
+
+Native Tk regressions cover drive rows disappearing and returning, removal of
+their stale empty height, and the complete long warning panel at 100/150/200%
+scaling. They do not replace the physical display matrix above.
 
 ## Parking - Update LibreHardwareMonitor and PawnIO atomically to the next bundle
 

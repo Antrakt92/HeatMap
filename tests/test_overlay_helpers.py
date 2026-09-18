@@ -1828,7 +1828,7 @@ class OverlayHelperTests(unittest.TestCase):
         read_sensors.assert_not_called()
         build.assert_called_once_with(None, {"cpu_temp": 58})
         self.assertFalse(computer.closed)
-        self.assertEqual(app.root.clipboard_value, 'diagnostic dump\nSensor inventory: not yet cached; latest published data only.\nCase fan controller:\n{"state": "off"}\nGPU fan controller:\n{"state": "off"}')
+        self.assertEqual(app.root.clipboard_value, 'Sensor inventory: not yet cached; latest published data only.\n\ndiagnostic dump\nCase fan controller:\n{"state": "off"}\nGPU fan controller:\n{"state": "off"}')
 
     def test_prepare_verified_pawnio_installer_returns_verified_path(self):
         with mock.patch("setup.download_pawnio", return_value=r"C:\verified\PawnIO.exe"):

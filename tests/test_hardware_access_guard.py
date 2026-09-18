@@ -2,6 +2,8 @@
 from types import SimpleNamespace as NS
 import unittest
 from unittest import mock
+from pathlib import Path
+import tempfile
 
 import psutil
 
@@ -13,6 +15,53 @@ def process(name):
 
 
 class HardwareAccessGuardTests(unittest.TestCase):
+    def test_gnu_compiler_layout_does_not_block_hardware(self):
+        for layout in ('mingw', 'w64devkit'):
+            with self.subTest(layout=layout), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                binary = root / 'bin' / 'gcc.exe'
+                binary.parent.mkdir()
+                binary.touch()
+                if layout == 'mingw':
+                    support = root / 'libexec/gcc/x86_64-w64-mingw32/15.1.0'
+                    library = root / 'lib/gcc/x86_64-w64-mingw32/15.1.0'
+                else:
+                    support, library = binary.parent, root / 'lib'
+                support.mkdir(parents=True, exist_ok=True)
+                library.mkdir(parents=True, exist_ok=True)
+                (support / 'cc1.exe').touch()
+                (library / 'libgcc.a').touch()
+                compiler = mock.Mock(info={'name': 'GCC.exe'})
+                compiler.exe.return_value = str(binary)
+                with mock.patch.object(guard.psutil, 'process_iter', return_value=[compiler]):
+                    self.assertEqual(guard.hardware_conflicts(), [])
+                # A suggestive path alone cannot authorize access.
+                (library / 'libgcc.a').unlink()
+                with mock.patch.object(guard.psutil, 'process_iter', return_value=[compiler]):
+                    self.assertEqual(guard.hardware_conflicts(), ['gcc.exe'])
+
+    def test_gigabyte_unknown_or_unreadable_gcc_still_blocks(self):
+        for path in (r'C:\Program Files\GIGABYTE\Control Center\GCC.exe', '', None):
+            candidate = mock.Mock(info={'name': 'gcc.exe'})
+            candidate.exe.return_value = path
+            with mock.patch.object(guard.psutil, 'process_iter', return_value=[candidate]):
+                self.assertEqual(guard.hardware_conflicts(), ['gcc.exe'])
+        candidate.exe.side_effect = psutil.AccessDenied(42)
+        with mock.patch.object(guard.psutil, 'process_iter', return_value=[candidate]):
+            self.assertEqual(guard.hardware_conflicts(), ['gcc.exe'])
+
+    def test_non_gcc_tools_never_inspect_executable_paths(self):
+        candidate = mock.Mock(info={'name': 'cpuz.exe'})
+        with mock.patch.object(guard.psutil, 'process_iter', return_value=[candidate]):
+            self.assertEqual(guard.hardware_conflicts(), ['cpuz.exe'])
+        candidate.exe.assert_not_called()
+
+    def test_gcc_exit_during_identity_check_does_not_latch_a_conflict(self):
+        candidate = mock.Mock(info={'name': 'gcc.exe'})
+        candidate.exe.side_effect = psutil.NoSuchProcess(42)
+        with mock.patch.object(guard.psutil, 'process_iter', return_value=[candidate, process('cpuz.exe')]):
+            self.assertEqual(guard.hardware_conflicts(), ['cpuz.exe'])
+
     def test_official_ryzen_master_executable_blocks_sensor_access(self):
         # File table in AMD's signed 3.1.1.5502 MSI uses this spaced basename.
         with mock.patch.object(guard.psutil, "process_iter", return_value=[

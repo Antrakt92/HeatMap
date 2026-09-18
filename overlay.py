@@ -35,7 +35,7 @@ from gpu_fans import GpuWorkerClient, mode_text as gpu_fan_mode_text
 from hardware_access_guard import HardwareAccessConflict, require_hardware_access
 from storage_identity import volume_disk_number
 
-VERSION = "1.2.6"
+VERSION = "1.2.7"
 
 
 # --- Paths ---
@@ -2947,6 +2947,11 @@ class OverlayApp:
         else:
             age = max(0.0, time.monotonic() - snapshot[0])
             cache_context = f"\nSensor inventory snapshot age: {age:.1f}s"
+            if age > SENSOR_STALE_SECONDS or getattr(self, "_hardware_pause_reason", None):
+                cache_context += "\nHistorical snapshot: the following sensor values are not current."
+        pause = getattr(self, "_hardware_pause_reason", None)
+        if pause:
+            cache_context += "\n" + pause
         messages = getattr(self, "health_messages", [])
         health_context = "\nWarnings at request:\n" + "\n".join(messages) if messages else ""
         health_context += "\nCase fan controller:\n" + json.dumps(
@@ -2961,7 +2966,7 @@ class OverlayApp:
                     return
                 detail = snapshot[1] if snapshot is not None else build_sensor_diagnostics(None, data)
                 if not self._stop_event.is_set():
-                    result = (True, detail + cache_context + volume_context + health_context)
+                    result = (True, cache_context.lstrip() + "\n\n" + detail + volume_context + health_context)
             except Exception as e:
                 log.warning("Failed to collect diagnostics: %s", e, exc_info=True)
                 result = (False, str(e))
@@ -3183,6 +3188,14 @@ class OverlayApp:
         """Keep the header and health panel visible when metrics exceed the work area."""
         if not hasattr(self, "canvas"):
             return
+        # Tk retains an empty frame's last requested size after its disk rows
+        # are destroyed. Reset the empty request while preserving pack order
+        # with Details, so sensor failures reclaim the old drive-row space.
+        if not self.disk_frame.pack_slaves():
+            self.disk_frame.configure(width=1, height=1)
+        if (hasattr(self, "health_label") and self.health_label.winfo_manager()
+                and self.status_label.winfo_manager()):
+            self.status_label.pack_configure(before=self.health_label)
         # An empty Tk Frame retains its last requested height; unmap the frame
         # too, otherwise a dismissed warning leaves a blank strip below the rows.
         if self.footer.pack_slaves():
@@ -3995,6 +4008,19 @@ class OverlayApp:
             status = dict(status, recovery_attempts=recovery["attempts"],
                           previous_stop=recovery["previous_stop"])
         if self.config.get(setting, False) and status.get("state") == "stopped":
+            # An intentional hardware-access pause is not a worker crash. Keep
+            # errors visible unless rollback is positively confirmed (or no
+            # command was sent), including pending GPU recovery/conflicts.
+            safe_pause = (
+                getattr(self, "_hardware_pause_reason", None)
+                and status.get("restore_errors") == []
+                and not status.get("recovery_pending")
+                and not status.get("settings_conflict")
+                and (status.get("restore_confirmed") is True
+                     or status.get("control_attempted") is False)
+            )
+            if safe_pause:
+                return status
             # Keep the worker's actual reason intact in Copy diagnostics.
             label = "GPU fans" if attribute == "gpu_fan_worker" else "automatic case fans"
             status = dict(status, state="error",

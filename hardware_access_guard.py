@@ -1,4 +1,6 @@
-"""Process-name-only exclusion for tools that can compete for sensor hardware."""
+"""Exclude competing hardware tools, distinguishing GCC compiler installations."""
+from pathlib import Path
+
 import psutil
 
 
@@ -19,8 +21,42 @@ class HardwareAccessConflict(RuntimeError):
     """Exclusive sensor access is blocked or cannot be verified."""
 
 
+def _is_gnu_compiler(process):
+    """Recognize GCC's compiler/runtime layout without executing another program.
+
+    GCC.exe is also Gigabyte Control Center. A basename or a suggestive directory
+    alone is insufficient; unknown/unreadable installations remain blocked.
+    Inspect only this ambiguous process, never other command lines or paths.
+    """
+    try:
+        executable = process.exe() if hasattr(process, 'exe') else None
+        if not isinstance(executable, str) or not executable:
+            return False
+        binary = Path(executable)
+        if not binary.is_absolute() or binary.name.casefold() != 'gcc.exe':
+            return False
+        if binary.parent.name.casefold() != 'bin' or not binary.is_file():
+            return False
+        root = binary.parent.parent
+        if any('gigabyte' in part.casefold() for part in root.parts):
+            return False
+        # Match target/version trees, or the flattened portable compiler layout.
+        if (binary.parent / 'cc1.exe').is_file() and (root / 'lib/libgcc.a').is_file():
+            return True
+        support = root / 'libexec/gcc'
+        for compiler in support.glob('*/*/cc1.exe'):
+            relative = compiler.parent.relative_to(support)
+            if compiler.is_file() and (root / 'lib/gcc' / relative / 'libgcc.a').is_file():
+                return True
+    except psutil.NoSuchProcess:
+        raise
+    except (psutil.Error, OSError, ValueError):
+        return False
+    return False
+
+
 def hardware_conflicts():
-    """Return canonical executable names; never inspect paths or command lines."""
+    """Return canonical tool names; inspect paths only to disambiguate gcc.exe."""
     conflicts = set()
     try:
         # psutil substitutes ad_value when reading a protected process fails.
@@ -48,6 +84,12 @@ def hardware_conflicts():
                 raise HardwareAccessConflict(_INVENTORY_ERROR)
             name = name.casefold()
             if name in CONFLICTING_PROCESS_NAMES:
+                if name == 'gcc.exe':
+                    try:
+                        if _is_gnu_compiler(process):
+                            continue
+                    except psutil.NoSuchProcess:
+                        continue
                 conflicts.add(name)
     except (psutil.Error, OSError) as exc:
         raise HardwareAccessConflict(_INVENTORY_ERROR) from exc

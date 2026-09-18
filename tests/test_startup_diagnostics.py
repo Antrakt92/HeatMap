@@ -224,6 +224,8 @@ class StartupDiagnosticsTests(unittest.TestCase):
         self.assertIn("cached inventory", detail)
         self.assertNotIn("new inventory", detail)
         self.assertIn("snapshot age: 45.0s", detail)
+        self.assertLess(detail.index('snapshot age:'), detail.index('cached inventory'))
+        self.assertIn('Historical snapshot', detail)
         self.assertIn("Sensors unavailable now", detail)
         for operation in (initialize, sample, close, build):
             operation.assert_not_called()

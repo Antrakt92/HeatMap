@@ -103,6 +103,8 @@ the available percentage is still shown; unknown values are not inferred from
 the GPU model.
 
 The warning panel is hidden and takes up no space when there are no messages.
+Unavailable drive rows release their space, keeping warnings close to the
+remaining readings; the rows expand again when fresh drive data returns.
 Muted sound is indicated by `Alerts: OFF` in the menu, without a permanent footer.
 Elevated RAM/VRAM usage highlights the row itself; a separate message appears
 only from 95% RAM or 98% VRAM usage. Temperature, missing-sensor, and control-error
@@ -264,9 +266,16 @@ Before opening sensors and at every poll, HeatMap checks for known CPU-Z,
 Ryzen Master, HWiNFO, and third-party fan-controller processes. On detecting a
 conflict, it suspends readings until HeatMap restarts, and its controller returns
 control to the motherboard normally. Standard AMD Adrenalin is not blocked.
+For the ambiguous `gcc.exe` name, HeatMap checks the executable's compiler and
+runtime files to recognize MinGW/MSYS and w64devkit GCC installations; compiling
+software does not pause sensors. Unknown or unreadable GCC installations remain
+blocked. A deliberate pause with confirmed fan restoration shows the access
+conflict without misleading controller-failure or OFF → ON instructions.
 This reduces competing access but does not guarantee detection of every driver
 or elimination of system freezes. Copy diagnostics uses a snapshot from the main
 sensor thread, including its age, without opening another hardware monitor.
+Snapshot age appears before the readings, and old or paused snapshots are marked
+as historical so they cannot be mistaken for live measurements.
 
 After installation, run **`enable_case_fans.bat`** once and accept UAC. Activation
 closes the previous HeatMap instance from this checkout normally, checks RPM at

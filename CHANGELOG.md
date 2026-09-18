@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.7 — 2026-09-18
+
+- Keep sensors and fan control running when a recognized GCC compiler is used.
+  Distinguish its installation from Gigabyte Control Center, which has the same
+  executable name. Unknown or unreadable installations still pause hardware access.
+- Show intentional hardware-access pauses without false controller-failure or
+  OFF → ON messages when fan restoration is confirmed. Keep unconfirmed
+  restoration and controller errors visible.
+- Put the age of diagnostic snapshots before their readings and clearly label
+  old or paused readings as historical.
+- Remove the empty space left by missing drive readings and keep status messages
+  above the warning panel when they reappear.
+
 ## 1.2.6 — 2026-09-16
 
 - Remove the separate Mode row from CASE COOLING to save space. Keep controller

@@ -7,6 +7,29 @@ from test_sensor_lifecycle import sensor_app
 
 
 class SensorAccessPauseTests(unittest.TestCase):
+    def test_confirmed_pause_shows_cause_without_toggle_instructions(self):
+        from test_overlay_helpers import _update_ui_app, _FakeLabel
+
+        app = _update_ui_app()
+        reason = 'Sensors paused: Close cpuz.exe, then restart HeatMap'
+        app._hardware_pause_reason = reason
+        app.sensor_data = {'error': reason}
+        app.config = {'case_fans_enabled': True, 'gpu_fans_enabled': True}
+        app.rows['gpu_fan_control'] = _FakeLabel()
+        app.health_label = mock.Mock()
+        for attribute in ('fan_worker', 'gpu_fan_worker'):
+            worker = mock.Mock()
+            worker.poll.return_value = dict(state='stopped', restore_confirmed=True,
+                                           restore_errors=[], control_attempted=True)
+            setattr(app, attribute, worker)
+        with mock.patch.object(app, '_fit_content'), \
+             mock.patch.object(app, '_clamp_saved_position_to_visible_screen'):
+            app.update_ui()
+        self.assertEqual(app.health_messages, [reason])
+        self.assertEqual(app.rows['gpu_fan_control'].options['text'], 'Driver curve')
+        app.fan_worker.start.assert_not_called()
+        app.gpu_fan_worker.start.assert_not_called()
+
     def test_diagnostics_failure_does_not_reopen_healthy_monitor(self):
         computer = mock.Mock()
         app = sensor_app(5, computer)

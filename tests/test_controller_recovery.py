@@ -90,6 +90,38 @@ class ControllerRecoveryTests(unittest.TestCase):
         self.assertEqual(status['state'], 'stopped')
         worker.start.assert_not_called()
 
+    def test_confirmed_stop_during_hardware_pause_is_not_a_controller_failure(self):
+        for attribute, setting in (('fan_worker', 'case_fans_enabled'),
+                                   ('gpu_fan_worker', 'gpu_fans_enabled')):
+            app, worker, _ = self.app(state='stopped', stop_cause='requested_stop')
+            app._hardware_pause_reason = 'Sensors paused: cpuz.exe'
+            status = self.poll(app, 0, attribute, setting)
+            self.assertEqual(status['state'], 'stopped')
+            self.assertNotIn('display_reason', status)
+            worker.start.assert_not_called()
+
+    def test_pause_does_not_hide_unconfirmed_or_conflicting_restoration(self):
+        for changes in ({'restore_confirmed': False}, {'restore_errors': ['failed']},
+                        {'recovery_pending': True}, {'settings_conflict': {'external': True}}):
+            app, worker, _ = self.app(state='stopped', **changes)
+            app._hardware_pause_reason = 'Sensors paused: cpuz.exe'
+            self.assertEqual(self.poll(app, 0)['state'], 'error')
+            worker.start.assert_not_called()
+
+    def test_pause_before_first_command_keeps_firmware_state(self):
+        app, worker, _ = self.app(state='stopped', control_attempted=False,
+                                  restore_confirmed=False, recovery_pending=False)
+        app._hardware_pause_reason = 'Sensors paused: cpuz.exe'
+        self.assertEqual(self.poll(app, 0)['state'], 'stopped')
+        worker.start.assert_not_called()
+
+    def test_pause_with_missing_restore_errors_stays_visible(self):
+        app, worker, status = self.app(state='stopped')
+        del status['restore_errors']
+        app._hardware_pause_reason = 'Sensors paused: cpuz.exe'
+        self.assertEqual(self.poll(app, 0)['state'], 'error')
+        worker.start.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()
