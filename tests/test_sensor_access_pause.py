@@ -75,13 +75,51 @@ class SensorAccessPauseTests(unittest.TestCase):
         shared.Close.assert_called_once_with()
         app.fan_worker.stop.assert_called_once_with()
         app.gpu_fan_worker.stop.assert_called_once_with()
-        self.assertTrue(app._gcc_coexistence)
+        self.assertTrue(app._monitor_coexistence)
 
     def test_gcc_at_startup_keeps_sensor_monitoring_available(self):
         app = sensor_app(2)
         shared = mock.Mock()
-        app._gcc_coexistence = True
+        app._monitor_coexistence = True
         with mock.patch.object(overlay, 'require_hardware_access', return_value='gcc'), \
+             mock.patch.object(overlay, 'init_hardware_monitor', return_value=shared) as initialize, \
+             mock.patch.object(overlay, 'read_sensors', return_value={'cpu_temp': None}) as read, \
+             mock.patch.object(overlay, '_read_volume_usage', return_value={'volumes': []}), \
+             mock.patch.object(app, '_cache_sensor_diagnostics'), \
+             mock.patch.object(overlay.psutil, 'cpu_percent'):
+            app.sensor_loop()
+        initialize.assert_called_once_with(coexistence=True)
+        self.assertEqual([call.args[0] for call in read.call_args_list], [shared, shared])
+
+    def test_ryzen_master_arrival_reopens_monitor_and_stops_fan_control(self):
+        full = mock.Mock()
+        shared = mock.Mock()
+        app = sensor_app(3, full)
+        app.fan_worker = mock.Mock()
+        app.gpu_fan_worker = mock.Mock()
+        app.fan_worker.process = None
+        app.gpu_fan_worker.process = None
+        with mock.patch.object(overlay, 'require_hardware_access', side_effect=['full', 'ryzen_master', 'ryzen_master']), \
+             mock.patch.object(overlay, 'init_hardware_monitor', return_value=shared) as initialize, \
+             mock.patch.object(overlay, 'read_sensors', return_value={'cpu_temp': None}) as read, \
+             mock.patch.object(overlay, '_read_volume_usage', return_value={'volumes': []}), \
+             mock.patch.object(app, '_cache_sensor_diagnostics'), \
+             mock.patch.object(overlay.psutil, 'cpu_percent'):
+            app.sensor_loop()
+        initialize.assert_called_once_with(coexistence=True)
+        self.assertEqual(read.call_count, 3)
+        self.assertEqual(read.call_args_list[-1].args, (shared,))
+        full.Close.assert_called_once_with()
+        shared.Close.assert_called_once_with()
+        app.fan_worker.stop.assert_called_once_with()
+        app.gpu_fan_worker.stop.assert_called_once_with()
+        self.assertTrue(app._monitor_coexistence)
+
+    def test_ryzen_master_at_startup_keeps_sensor_monitoring_available(self):
+        app = sensor_app(2)
+        shared = mock.Mock()
+        app._monitor_coexistence = True
+        with mock.patch.object(overlay, 'require_hardware_access', return_value='ryzen_master'), \
              mock.patch.object(overlay, 'init_hardware_monitor', return_value=shared) as initialize, \
              mock.patch.object(overlay, 'read_sensors', return_value={'cpu_temp': None}) as read, \
              mock.patch.object(overlay, '_read_volume_usage', return_value={'volumes': []}), \
@@ -101,7 +139,7 @@ class SensorAccessPauseTests(unittest.TestCase):
             worker.poll.return_value = {'state': 'stopped', 'restore_errors': [],
                                         'restore_confirmed': True, 'recovery_pending': False}
             setattr(app, name, worker)
-        app._stop_fan_workers_for_gcc()
+        app._stop_fan_workers_for_monitor()
         self.assertEqual(events, ['stop gpu_fan_worker', 'stop fan_worker',
                                   'wait gpu_fan_worker', 'wait fan_worker'])
 
@@ -113,7 +151,7 @@ class SensorAccessPauseTests(unittest.TestCase):
                                                 'restore_confirmed': False}
         app.fan_worker = mock.Mock(process=None)
         with self.assertRaisesRegex(HardwareAccessConflict, 'restoration could not be confirmed'):
-            app._stop_fan_workers_for_gcc()
+            app._stop_fan_workers_for_monitor()
 
     def test_confirmed_pause_shows_cause_without_toggle_instructions(self):
         from test_overlay_helpers import _update_ui_app, _FakeLabel

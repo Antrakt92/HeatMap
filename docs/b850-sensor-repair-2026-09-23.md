@@ -66,3 +66,43 @@ were absent, and `case_fans_enabled` remained false. This establishes the repair
 live behavior over that interval, not long-term stability or driver-replacement
 recovery. The frozen final sample is `b850-verified-sensors.json` beside the live
 reports.
+
+## Ryzen Master follow-up
+
+Opening Ryzen Master still triggered the older all-sensor pause. Monitoring scope
+now accepts its four known executable names, alone or alongside GCC. Control scope
+continues to reject both tools, and driver installers or additional conflicting
+tools still block monitoring. The coexistence latch and UI now use generic names.
+
+Verification: 777 unittest tests passed; compileall, setup.py --verify and
+whitespace checks passed. Regressions exercise Ryzen Master at startup and arriving
+during monitoring, combined GCC/Ryzen Master detection, and control exclusion.
+After an attended elevated restart, both actual programs remained open while the
+same HeatMap window produced 17 successive sensor samples over 33 seconds with
+one LHM initialization. CPU/GPU temperatures, both CPU tachometers, RAM and drives
+were present; both HeatMap fan workers remained absent. This is a short concurrent
+monitoring check, not proof of extended stability or tuning/driver replacement.
+
+## GPU load source correction
+
+The same RX 7900 XT snapshot reported AMD GPU Core activity of 35% and Windows
+D3D 3D utilization of 5.44%. HeatMap preferred the former. This was a source-policy
+mismatch, not a demonstrated hidden process consuming the difference. The main
+percentage now prefers the busiest valid Windows D3D engine, including compute,
+copy and video; driver activity is a fallback only when D3D values are unavailable.
+Engine selection compares value before name, so alphabetical order cannot choose
+a less busy engine. Memory utilization is excluded and engine loads are not summed.
+
+Sources: LibreHardwareMonitor v0.9.5 AmdGpu.cs (AMD activity and D3D node counters):
+https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/blob/v0.9.5/LibreHardwareMonitorLib/Hardware/Gpu/AmdGpu.cs
+Microsoft's busiest-engine aggregation rule:
+https://devblogs.microsoft.com/directx/gpus-in-the-task-manager/
+
+All 782 unit tests passed, including five focused load-policy regressions;
+compileall, setup.py --verify and git diff --check passed. After elevated restart,
+eight successive comparisons on the RX 7900 XT showed the actual Tk label at 5%,
+LHM D3D 3D at 5.14-5.38%, and independently sampled Windows 3D counters at
+5.06-5.41%. AMD activity stayed at 34-35%. Sampling windows were adjacent and
+partially overlapping, not synchronized exactly. Local comparison evidence:
+%LOCALAPPDATA%/HeatMap/gpu-load-comparison.json. Other engine selection and
+invalid/missing readings were tested with fake sensors; no gaming benchmark ran.

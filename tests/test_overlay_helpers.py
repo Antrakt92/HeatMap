@@ -794,7 +794,7 @@ class OverlayHelperTests(unittest.TestCase):
             data = overlay.read_sensors(computer)
 
         self.assertEqual(data["cpu_load"], 22)
-        self.assertEqual(data["ram_pct"], 77)
+        self.assertEqual(data["ram_pct"], 55)
         self.assertEqual(data["ram_used_gb"], 3.0)
         self.assertEqual(data["ram_total_gb"], 16.0)
         self.assertEqual(data[overlay.SENSOR_STATUS_KEY], overlay.SENSOR_STATUS_PARTIAL)
@@ -979,9 +979,9 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["gpu_vram_pct"], 50)
         self.assertEqual(data["gpu_vram_used_gb"], 8.0)
         self.assertEqual(data["gpu_vram_total_gb"], 16.0)
-        self.assertEqual(data["ram_pct"], 77)
+        self.assertEqual(data["ram_pct"], 22)
 
-    def test_read_sensors_prefers_aggregate_gpu_load_regardless_of_sensor_order(self):
+    def test_read_sensors_prefers_windows_gpu_load_regardless_of_sensor_order(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
 
         def read_with(sensors):
@@ -1000,10 +1000,10 @@ class OverlayHelperTests(unittest.TestCase):
         aggregate = _FakeSensor("GPU Core", SensorType.Load, 80)
         fallback = _FakeSensor("D3D 3D", SensorType.Load, 20)
 
-        self.assertEqual(read_with([aggregate, fallback])["gpu_load"], 80)
-        self.assertEqual(read_with([fallback, aggregate])["gpu_load"], 80)
+        self.assertEqual(read_with([aggregate, fallback])["gpu_load"], 20)
+        self.assertEqual(read_with([fallback, aggregate])["gpu_load"], 20)
 
-    def test_read_sensors_prefers_physical_ram_regardless_of_hardware_order(self):
+    def test_read_sensors_uses_windows_ram_regardless_of_hardware_order(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
         physical = _FakeHardware(
             "Total Memory",
@@ -1028,8 +1028,8 @@ class OverlayHelperTests(unittest.TestCase):
             ):
                 return overlay.read_sensors(SimpleNamespace(Hardware=hardware))
 
-        self.assertEqual(read_with([physical, virtual])["ram_pct"], 70)
-        self.assertEqual(read_with([virtual, physical])["ram_pct"], 70)
+        self.assertEqual(read_with([physical, virtual])["ram_pct"], 22)
+        self.assertEqual(read_with([virtual, physical])["ram_pct"], 22)
 
     def test_read_sensors_rejects_temperature_sentinels(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
@@ -1158,8 +1158,8 @@ class OverlayHelperTests(unittest.TestCase):
         ):
             data = overlay.read_sensors(computer)
 
-        self.assertIsNone(data["gpu_load"])
-        self.assertEqual(data["gpu_temp"], 45)
+        self.assertEqual(data["gpu_load"], 80)
+        self.assertIsNone(data["gpu_temp"])
         self.assertEqual(intel_gpu.update_calls, 1)
 
     def test_read_sensors_selects_multi_gpu_metrics_as_permutation_invariant_bundle(self):
@@ -1196,8 +1196,8 @@ class OverlayHelperTests(unittest.TestCase):
         first = read([gpu_a, gpu_b])
         second = read([gpu_b, gpu_a])
 
-        self.assertEqual((first["gpu_temp"], first["gpu_load"]), (90, 10))
-        self.assertEqual((second["gpu_temp"], second["gpu_load"]), (90, 10))
+        self.assertEqual((first["gpu_temp"], first["gpu_load"]), (50, 80))
+        self.assertEqual((second["gpu_temp"], second["gpu_load"]), (50, 80))
 
     def test_read_sensors_cpu_fan_control_priority(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
@@ -1567,7 +1567,7 @@ class OverlayHelperTests(unittest.TestCase):
 
         self.assertEqual(values["detail_cpu_fan_rpm"], "1800 RPM")
         self.assertEqual(values["detail_gpu_fan_rpm"], "0 RPM")
-        self.assertEqual(values["detail_vram_gb"], "0.6/20.0 GB")
+        self.assertEqual(values["detail_vram_gb"], "0.6/20.0 GiB")
         self.assertEqual(values["detail_board_temps"], "VRM 34°C  CHIP 30°C  SYS 27°C")
         self.assertEqual(values["detail_disk_life"], "980 77%  860 97%")
 

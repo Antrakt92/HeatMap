@@ -6,9 +6,9 @@ A lightweight Windows widget that displays PC temperatures, load, and component 
 
 | Component | Metrics |
 |-----------|---------|
-| **CPU** | Temperature, frequency, load (%), RPM of both fans, and percentage when available |
+| **CPU** | Package/Tctl temperature, highest reported core frequency, load (%), RPM of both fans, and percentage when available |
 | **GPU** | Core, Hotspot, and memory temperatures on separate rows, load (%), VRAM, and fans |
-| **RAM** | Used/total GB and usage (%) |
+| **RAM** | Used/total GiB and usage (%) from one Windows memory snapshot |
 | **Drives** | One compact row per volume: drive letter, device model, temperature, and fullness (%) |
 | **Case** | RPM and available percentage for each SYS header; controller warnings when needed |
 | **Warnings** | Overheating, a large Hotspot–Core difference, a previously spinning fan stopping under load, and memory/disk usage |
@@ -60,6 +60,26 @@ as a normal green state just because Core is substantially cooler. If it persist
 under load, reduce the load and check the cooling; GPU clocks remain under driver
 control. Optional case and GPU fan control is described below.
 
+GPU load uses the busiest available Windows D3D engine on the selected adapter,
+including 3D, compute, copy and video engines, following Task Manager's aggregation
+rule. Engine percentages are not added. If valid D3D readings are unavailable,
+HeatMap falls back to the driver's GPU Core activity counter; that counter can
+differ substantially from Windows utilization and is marked `drv`. Different sampling intervals can
+also cause small differences from Task Manager. Raw sensors remain in diagnostics.
+
+CPU `GHz max` is the highest reported core clock, not an average or effective
+clock; sleeping cores can retain a high reported clock. Package/Tctl readings take
+priority over CCD temperatures. CPU load is busy time across logical processors,
+not a frequency-weighted performance percentage.
+
+GPU selection prefers available sensor devices, AMD/NVIDIA over Intel, then the
+largest reported dedicated-memory capacity and a stable name/identifier tie-break.
+Temperature and load do not choose the adapter. Diagnostics show its name and ID.
+VRAM used/total must come from a complete pair on that adapter: Windows dedicated
+memory first, driver memory second. Shared system memory is excluded. RAM and
+VRAM capacities use GiB (1024-based units), distinct from decimal GB; their
+percentages are calculated before display rounding.
+
 `Δ` next to Hotspot continuously shows the temperature difference. When Hotspot
 is at least 80°C, a difference of 25°C or more is yellow and 35°C or more is red;
 a text warning appears after 10 seconds of continuous exceedance. This is a
@@ -97,7 +117,7 @@ Warning/Critical values are not current readings and are not displayed as the
 drive temperature. If there is no named primary sensor, the hottest available
 reading is used.
 
-VRAM shows used/total GB and a percentage in its main row without enabling Details.
+VRAM shows used/total GiB and a percentage in its main row without enabling Details.
 RAM separately shows system memory capacity. If VRAM capacity is unavailable,
 the available percentage is still shown; unknown values are not inferred from
 the GPU model.
@@ -263,15 +283,15 @@ mean the other fans are off. The command percentage and fraction of rated RPM
 fan models.
 
 Before opening sensors and at every poll, HeatMap checks for known CPU-Z,
-Ryzen Master, HWiNFO, third-party fan controllers, AMD AtiSetup, and live
+HWiNFO, third-party fan controllers, AMD AtiSetup, and live
 `pnputil /add-driver /install` operations. On detecting a
 conflict, it suspends readings until HeatMap restarts, and its controller returns
-control normally. GCC alone is handled separately: HeatMap keeps read-only CPU,
-GPU, motherboard fan, and storage monitoring available while its automatic fan
-controllers remain paused. RAM usage comes from Windows; the additional DDR5
-SPD/SMBus inventory is disabled beside GCC. The control pause remains until HeatMap
-restarts, including if GCC closes during the session. A second competing tool
-still pauses sensors.
+control normally. GCC and Ryzen Master, alone or together, are handled separately:
+HeatMap keeps read-only CPU, GPU, motherboard fan, and storage monitoring available
+while its automatic fan controllers remain paused. RAM usage comes from Windows; the additional DDR5
+SPD/SMBus inventory is disabled beside these tools. The control pause remains until
+HeatMap restarts, including if the other tools close during the session. Additional
+conflicting tools still pause sensors.
 An installer detected before the next sensor call pauses monitoring until restart;
 this cannot guarantee recovery from a driver removed during an in-flight native call.
 An empty secondary display adapter does not repeatedly reopen a healthy GPU monitor.

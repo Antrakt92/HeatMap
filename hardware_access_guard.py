@@ -12,6 +12,10 @@ CONFLICTING_PROCESS_NAMES = frozenset({
     "atisetup.exe",
 })
 _UNREADABLE = object()
+RYZEN_MASTER_PROCESS_NAMES = frozenset({
+    "amdryzenmaster.exe", "ryzenmaster.exe", "amd-ryzen-master.exe",
+    "amd ryzen master.exe",
+})
 _INVENTORY_ERROR = (
     "Cannot verify which hardware monitoring tools are running. "
     "Close other hardware monitoring or fan-control tools, then restart HeatMap."
@@ -111,12 +115,13 @@ def hardware_conflicts():
 
 
 def require_hardware_access(scope="control"):
-    """Keep fan control exclusive while allowing read-only monitoring with GCC."""
+    """Keep control exclusive; allow monitoring beside GCC and Ryzen Master."""
     if scope not in ("control", "monitor"):
         raise ValueError("Unknown hardware access scope")
     conflicts = hardware_conflicts()
-    if scope == "monitor" and conflicts == ["gcc.exe"]:
-        return "gcc"
+    if (scope == "monitor" and conflicts
+            and set(conflicts) <= RYZEN_MASTER_PROCESS_NAMES | {"gcc.exe"}):
+        return "ryzen_master" if set(conflicts) & RYZEN_MASTER_PROCESS_NAMES else "gcc"
     if conflicts:
         raise HardwareAccessConflict(
             "Hardware monitoring or driver tools are running: " + ", ".join(conflicts) + ". "

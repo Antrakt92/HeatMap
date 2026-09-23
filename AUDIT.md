@@ -1,5 +1,11 @@
 # HeatMap Audit Backlog
 
+Sensor source/display audit and verified corrections:
+`docs/sensor-source-audit-2026-09-24.md`. The exact AMD PMLOG-versus-Windows activity
+accounting difference remains unresolved; the main GPU percentage now uses Windows
+engines, and a fallback driver percentage is explicitly marked. Driver-reported
+clocks have not been validated against synchronized independent measurements.
+
 This file contains only confirmed open tasks. Closed findings are removed rather
 than retained as session history. Priority reflects impact and likelihood, not
 change size.
@@ -73,9 +79,10 @@ Independent HeatMap risks were fixed: SYS4 no longer takes over the shared EC ba
 on a one-off Pump 100% reading; known competing programs pause sensors; Copy
 diagnostics does not open an additional monitor. Ryzen Master detection recognizes
 `AMD Ryzen Master.exe` from the official MSI, including spaces; a separate
-regression checks that hardware access is blocked. Ambiguous `gcc.exe` detection
+regression checks that control access is blocked. Ambiguous `gcc.exe` detection
 uses compiler support files to distinguish a toolchain from Gigabyte Control Center.
-GCC alone permits read-only monitoring with automatic fan control paused
+GCC and Ryzen Master, separately or together, permit read-only monitoring
+with automatic fan control paused
 and DDR5 SPD inventory disabled; RAM usage comes from Windows. Other known
 conflicts still pause sensors. A 2026-09-23 clr.dll crash coincided with AMD display
 driver installation and device restarts at 20:35:44 in setupapi.dev.log. That event
@@ -86,7 +93,8 @@ A temporarily sensorless secondary display adapter no longer forces repeated
 LHM reopening when the RX 7900 XT has valid readings.
 The new board's generic IT8696E fan channels 0/4 are mapped to CPU/CPU OPT only
 for the exact B850 AORUS ELITE WIFI7 ICE identity, matching its GCC profile.
-Repair evidence and the completed five-minute concurrent-GCC smoke check:
+Repair evidence, the concurrent-GCC smoke check, and the verified correction
+of GPU load to Windows busiest-engine utilization:
 `docs/b850-sensor-repair-2026-09-23.md`.
 Conflict pauses preserve the cause and label cached diagnostics as historical.
 Automated tests do not prove that

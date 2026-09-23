@@ -1363,7 +1363,7 @@ def init_hardware_monitor(*, coexistence=False):
         computer.IsGpuEnabled = True
         computer.IsStorageEnabled = True
         # RAM usage comes from Windows. Avoid a second DDR5 SPD/SMBus poller
-        # alongside GCC; it adds no readings used by the main memory row.
+        # alongside GCC or Ryzen Master; it adds no readings used by the main memory row.
         computer.IsMemoryEnabled = not coexistence
         computer.IsMotherboardEnabled = True
         computer.Open()
@@ -1501,8 +1501,8 @@ def _apply_psutil_fallbacks(data):
     if data["cpu_load"] is None:
         data["cpu_load"] = round(psutil.cpu_percent(interval=0))
     vm = psutil.virtual_memory()
-    if data["ram_pct"] is None:
-        data["ram_pct"] = round(vm.percent)
+    # Percentage and bytes must describe the same Windows physical-memory sample.
+    data["ram_pct"] = round(vm.percent)
     data["ram_used_gb"] = round(vm.used / (1024 ** 3), 1)
     data["ram_total_gb"] = round(vm.total / (1024 ** 3), 1)
     return data
@@ -1587,7 +1587,11 @@ def _gpu_fan_control_key(name):
 
 def _is_gpu_load_sensor(name):
     name = _normalized_sensor_name(name)
-    if "memory" in name or "bus" in name or "video" in name:
+    if "memory" in name or "bus" in name:
+        return False
+    if name == "d3d" or name.startswith("d3d ") or name == "gpu d3d":
+        return True
+    if "video" in name:
         return False
     return (
         name in ("gpu core", "gpu load", "gpu d3d", "d3d", "d3d 3d")
@@ -1601,7 +1605,7 @@ def _gpu_load_priority(name):
     if not _is_gpu_load_sensor(name):
         return None
     if "d3d" in name:
-        return 10
+        return 40
     if name in ("gpu core", "gpu load"):
         return 30
     return 20
@@ -1641,6 +1645,20 @@ def _is_gpu_memory_total_sensor(name):
     return "memory" in name and "total" in name and "shared" not in name
 
 
+def _select_gpu_memory_pair(sources):
+    pairs = []
+    for source, values in sources.items():
+        used, total = values.get("used", set()), values.get("total", set())
+        if len(used) != 1 or len(total) != 1:
+            continue
+        used, total = next(iter(used)), next(iter(total))
+        if not 0 <= used <= total or total <= 0:
+            continue
+        priority = 30 if source == "d3d dedicated memory" else 20 if source == "gpu memory" else 10
+        pairs.append((priority, source, used, total))
+    return max(pairs) if pairs else None
+
+
 def _is_ram_load_sensor(name):
     name = _normalized_sensor_name(name)
     return name in (
@@ -1667,7 +1685,7 @@ def _ram_load_priority(hardware_name, sensor_name):
 def _apply_ranked_sensor_candidates(data, candidates):
     cpu_temps = candidates["cpu_temp"]
     if cpu_temps:
-        data["cpu_temp"] = max(cpu_temps)[-1]
+        _, data["cpu_temp"], data["cpu_temp_sensor"] = max(cpu_temps)
     gpu_samples = candidates["gpus"]
     if gpu_samples:
         _rank, selected = max(gpu_samples, key=lambda item: item[0])
@@ -1706,15 +1724,16 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
                 name = sensor.Name.lower()
                 val = _safe_temperature(sensor.Value)
                 if val is not None:
-                    preferred = any(marker in name for marker in ("tctl", "tdie", "package"))
-                    candidates["cpu_temp"].append((preferred, val))
+                    preferred = (2 if "tctl" in name or "package" in name else
+                                 1 if "tdie" in name and "ccd" not in name else 0)
+                    candidates["cpu_temp"].append((preferred, val, str(sensor.Name)))
             elif sensor.SensorType == SensorType.Load:
                 if "total" in sensor.Name.lower():
                     val = _safe_percentage(sensor.Value)
                     if val is not None:
                         data["cpu_load"] = val
             elif sensor.SensorType == SensorType.Clock:
-                if "core" in sensor.Name.lower():
+                if "core" in sensor.Name.lower() and "effective" not in sensor.Name.lower():
                     val = _safe_round(sensor.Value, minimum=0)
                     if val is not None and val > 0:
                         core_clocks.append(val)
@@ -1729,11 +1748,11 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
         )
         gpu_sample = {key: None for key in gpu_keys}
         gpu_sample["gpu_id"] = str(getattr(hw, "Identifier", hw.Name))
+        gpu_sample["gpu_name"] = str(hw.Name)
         gpu_sample["gpu_fans"] = []
         gpu_controls = {}
         gpu_load_candidates = []
-        gpu_mem_used = None
-        gpu_mem_total = None
+        gpu_memory_sources = {}
         sensors = list(hw.Sensors)
         if not sensors:
             candidates.setdefault("empty_gpus", []).append(str(hw.Name))
@@ -1776,14 +1795,11 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
                     if val is not None:
                         gpu_sample["gpu_clock"] = val
             elif sensor.SensorType == SensorType.SmallData:
-                if _is_gpu_memory_used_sensor(sensor.Name):
-                    value = sensor.Value
-                    if _safe_round(value, minimum=0) is not None:
-                        gpu_mem_used = float(value)
-                elif _is_gpu_memory_total_sensor(sensor.Name):
-                    value = sensor.Value
-                    if _safe_round(value, minimum=0) is not None:
-                        gpu_mem_total = float(value)
+                kind = ("used" if _is_gpu_memory_used_sensor(sensor.Name) else
+                        "total" if _is_gpu_memory_total_sensor(sensor.Name) else None)
+                if kind and _safe_round(sensor.Value, minimum=0) is not None:
+                    source = re.sub(r"\b(used|total)\b", "", _normalized_sensor_name(sensor.Name)).strip()
+                    gpu_memory_sources.setdefault(source, {}).setdefault(kind, set()).add(float(sensor.Value))
         gpu_sample["gpu_fans"].sort(key=lambda fan: (
             int(_fan_number(fan["name"].lower()) or 0), _normalized_sensor_name(fan["name"]), fan["id"]))
         if gpu_sample["gpu_fans"]:
@@ -1797,28 +1813,31 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
             if not gpu_sample["gpu_fans"] or control_name in ("gpu fan", "fan"):
                 gpu_sample["gpu_fan_pct"] = duty
         _select_gpu_display_temperature(gpu_sample)
-        selected_load = max(gpu_load_candidates) if gpu_load_candidates else None
+        # Windows reports the busiest engine, not a sum or the driver activity
+        # counter. Choose by value before name (engine names are not priorities).
+        selected_load = max(gpu_load_candidates, key=lambda item: (item[0], item[2], item[1])) if gpu_load_candidates else None
         if selected_load:
             gpu_sample["gpu_load"] = selected_load[-1]
-        if gpu_mem_used is not None and gpu_mem_total and 0 <= gpu_mem_used <= gpu_mem_total:
+            gpu_sample["gpu_load_source"] = "Windows D3D" if selected_load[0] == 40 else "Driver activity"
+            gpu_sample["gpu_load_sensor"] = selected_load[1]
+        memory_pair = _select_gpu_memory_pair(gpu_memory_sources)
+        if memory_pair:
+            _, source, gpu_mem_used, gpu_mem_total = memory_pair
+            gpu_sample["gpu_vram_source"] = source
             gpu_sample["gpu_vram_pct"] = round(gpu_mem_used / gpu_mem_total * 100)
             gpu_sample["gpu_vram_used_gb"] = round(gpu_mem_used / 1024, 1)
             gpu_sample["gpu_vram_total_gb"] = round(gpu_mem_total / 1024, 1)
         hardware_priority = 10 if hw_type == HardwareType.GpuIntel else 20
-        # Keep device ranking independent of the primary display policy.
-        temperatures = [gpu_sample[key] for key in (
-            "gpu_core_temp", "gpu_hotspot_temp", "gpu_memory_temp"
-        ) if gpu_sample[key] is not None]
-        display_temp = max(temperatures) if temperatures else None
-        load_priority = selected_load[0] if selected_load else -1
-        load_value = gpu_sample["gpu_load"]
+        # Temperature/load cannot select the adapter: an idle dGPU must not be
+        # replaced by a hotter iGPU. Dedicated capacity also works without usage.
+        capacity = max((value for source in gpu_memory_sources.values()
+                        for value in source.get("total", set())), default=0)
         rank = (
-            display_temp is not None,
+            bool(sensors),
             hardware_priority,
-            display_temp if display_temp is not None else -1,
-            load_priority,
-            load_value if load_value is not None else -1,
+            capacity,
             _normalized_sensor_name(hw.Name),
+            gpu_sample["gpu_id"],
         )
         candidates["gpus"].append((rank, gpu_sample))
 
@@ -2204,7 +2223,7 @@ def _health_summary(messages):
 def _format_vram_gb(used_gb, total_gb):
     if used_gb is None or total_gb is None:
         return "--"
-    return f"{used_gb:.1f}/{total_gb:.1f} GB"
+    return f"{used_gb:.1f}/{total_gb:.1f} GiB"
 
 
 def _short_board_temp_name(name):
@@ -2363,11 +2382,11 @@ def build_sensor_diagnostics(computer, sensor_data=None, is_admin=None, pawnio_i
     if sensor_data:
         lines.append("Sensor data:")
         for key in (
-            "cpu_temp", "cpu_load", "cpu_clock", "cpu_fan", "cpu_fan_pct", "cpu_optional_fan", "cpu_optional_fan_pct", "fans",
+            "cpu_temp", "cpu_temp_sensor", "cpu_load", "cpu_clock", "cpu_fan", "cpu_fan_pct", "cpu_optional_fan", "cpu_optional_fan_pct", "fans",
             "gpu_temp", "gpu_temp_label", "gpu_core_temp", "gpu_hotspot_temp", "gpu_memory_temp",
-            "gpu_load", "gpu_clock", "gpu_fan", "gpu_fan_pct",
-            "gpu_vram_pct", "gpu_vram_used_gb", "gpu_vram_total_gb",
-            "ram_pct", "volumes", "volume_errors", SENSOR_STATUS_KEY, SENSOR_REINIT_KEY,
+            "gpu_name", "gpu_id", "gpu_load", "gpu_load_source", "gpu_load_sensor", "gpu_clock", "gpu_fan", "gpu_fan_pct",
+            "gpu_vram_pct", "gpu_vram_used_gb", "gpu_vram_total_gb", "gpu_vram_source",
+            "ram_pct", "ram_used_gb", "ram_total_gb", "volumes", "volume_errors", SENSOR_STATUS_KEY, SENSOR_REINIT_KEY,
         ):
             if key in sensor_data:
                 lines.append(f"  {key}={_format_diag_value(sensor_data.get(key))}")
@@ -2606,9 +2625,9 @@ class OverlayApp:
                     log.warning("Retired unsupported case-fan profile; previous config: %s", backup)
             self._config_status = STATUS_CONFIG_ADJUSTED
         try:
-            self._gcc_coexistence = require_hardware_access("monitor") == "gcc"
+            self._monitor_coexistence = require_hardware_access("monitor") in ("gcc", "ryzen_master")
         except HardwareAccessConflict:
-            self._gcc_coexistence = False
+            self._monitor_coexistence = False
         self._driver_status = (
             SENSOR_STATUS_DRIVER_MISSING
             if not is_pawnio_driver_installed()
@@ -2830,9 +2849,9 @@ class OverlayApp:
 
         # Publish the fan process before the sensor owner can request its stop.
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
-        if self.config.get("case_fans_enabled", False) and not self._gcc_coexistence:
+        if self.config.get("case_fans_enabled", False) and not self._monitor_coexistence:
             self.fan_worker.start()
-        if self.config.get("gpu_fans_enabled", False) and not self._gcc_coexistence:
+        if self.config.get("gpu_fans_enabled", False) and not self._monitor_coexistence:
             self.gpu_fan_worker.start()
 
         # --- Start sensor thread ---
@@ -3165,7 +3184,9 @@ class OverlayApp:
             "Core: ordinary GPU temperature. Hotspot: hottest measured GPU point.\n"
             "Δ: Hotspot minus Core; a persistent large gap needs checking.\n"
             "Memory temp: video memory temperature. VRAM: capacity used.\n"
-            "RAM: system memory used/total GB and percent in use.\n"
+            "RAM / VRAM: used/total GiB (1024-based units). RAM comes from Windows.\n"
+            "CPU GHz max: highest reported core clock, not average effective clock.\n"
+            "GPU %: busiest Windows engine; drv marks fallback driver activity.\n"
             "CPU Fan 1 / Fan 2: CPU and CPU Optional headers. SYS numbers identify motherboard headers, not the connected device.\n"
             "0 RPM is a measured stop; -- is unavailable. Bare % is controller duty readback.\n"
             "~% estimates RPM / reference RPM; it can exceed 100%.\n"
@@ -3750,8 +3771,8 @@ class OverlayApp:
         enabled = not self.config.get("gpu_fans_enabled", False)
         if enabled:
             with self.lock:
-                reason = ("GPU fans: GCC coexistence leaves control with the driver"
-                          if getattr(self, "_gcc_coexistence", False) is True else
+                reason = ("GPU fans: Another monitoring tool leaves control with the driver"
+                          if getattr(self, "_monitor_coexistence", False) is True else
                           getattr(self, "_hardware_pause_reason", None))
                 process = self.gpu_fan_worker.process
                 if not reason and process is not None and process.poll() is None and process.stdin.closed:
@@ -3775,8 +3796,8 @@ class OverlayApp:
             # a menu action can start a new child just after that owner stopped it.
             with self.lock:
                 reason = getattr(self, "_hardware_pause_reason", None)
-                if not reason and getattr(self, "_gcc_coexistence", False):
-                    reason = "Case fans: GCC coexistence leaves control with firmware"
+                if not reason and getattr(self, "_monitor_coexistence", False):
+                    reason = "Case fans: Another monitoring tool leaves control with firmware"
                 if not reason and _supported_case_fan_board() is not True:
                     reason = "Case fans: this profile requires B550 AORUS PRO AC"
                 severity = 2
@@ -3814,8 +3835,8 @@ class OverlayApp:
         if missing:
             messages.append("Unavailable: " + ", ".join(missing))
             severity = max(severity, 1)
-        if getattr(self, "_gcc_coexistence", False):
-            messages.append("GCC running: automatic fan control paused")
+        if getattr(self, "_monitor_coexistence", False):
+            messages.append("Other monitor running: automatic fan control paused")
             severity = max(severity, 1)
         if status.get("state") == "error":
             messages.insert(0, _case_fan_advice(status))
@@ -3963,14 +3984,14 @@ class OverlayApp:
         try:
             while self.running and not self._stop_event.is_set():
                 access_mode = require_hardware_access("monitor")
-                if access_mode == "gcc" and not getattr(self, "_gcc_coexistence", False):
+                if access_mode in ("gcc", "ryzen_master") and not getattr(self, "_monitor_coexistence", False):
                     # Stop fan owners before switching to restricted LHM readings.
-                    self._gcc_coexistence = True
-                    self._stop_fan_workers_for_gcc()
+                    self._monitor_coexistence = True
+                    self._stop_fan_workers_for_monitor()
                     needs_reinit = computer is not None
                     next_init_retry = 0
-                if getattr(self, "_gcc_coexistence", False):
-                    access_mode = "gcc"  # Stay restricted until restart, even if GCC exits.
+                if getattr(self, "_monitor_coexistence", False):
+                    access_mode = "gcc"  # Stay restricted until restart, even if the other tool exits.
                 if time.monotonic() >= next_volume_update:
                     volume_data = _read_volume_usage()
                     volume_time = time.monotonic()
@@ -3990,7 +4011,7 @@ class OverlayApp:
                     computer = None
                     if not self.running or self._stop_event.is_set():
                         break
-                    if access_mode == "gcc":
+                    if access_mode in ("gcc", "ryzen_master"):
                         computer = init_hardware_monitor(coexistence=True)
                     else:
                         computer = init_hardware_monitor()
@@ -4081,7 +4102,7 @@ class OverlayApp:
             eligible = (
                 self.running and self.config.get(setting, False)
                 and not getattr(self, "_hardware_pause_reason", None)
-                and not getattr(self, "_gcc_coexistence", False)
+                and not getattr(self, "_monitor_coexistence", False)
                 and status.get("state") == "error"
                 and status.get("stop_cause") == "heartbeat_expired"
                 and status.get("restore_confirmed") is True
@@ -4115,7 +4136,7 @@ class OverlayApp:
             # command was sent), including pending GPU recovery/conflicts.
             safe_pause = (
                 (getattr(self, "_hardware_pause_reason", None)
-                 or getattr(self, "_gcc_coexistence", False))
+                 or getattr(self, "_monitor_coexistence", False))
                 and status.get("restore_errors") == []
                 and not status.get("recovery_pending")
                 and not status.get("settings_conflict")
@@ -4134,8 +4155,8 @@ class OverlayApp:
         if not self.running:
             return
 
-        if getattr(self, "_gcc_coexistence", False) and self.config.get("gpu_fans_enabled", False):
-            self._set_menu_label("gpu_fans", "Automatic GPU fans: PAUSED (GCC)")
+        if getattr(self, "_monitor_coexistence", False) and self.config.get("gpu_fans_enabled", False):
+            self._set_menu_label("gpu_fans", "Automatic GPU fans: PAUSED (other monitor)")
 
         if hasattr(self, "gpu_fan_worker"):
             status = self._poll_fan_controller("gpu_fan_worker", "gpu_fans_enabled")
@@ -4213,7 +4234,7 @@ class OverlayApp:
         )
         if cpu_clock is not None:
             ghz = cpu_clock / 1000
-            self.rows["cpu_clock"].config(text=f"{ghz:.2f} GHz", fg="#cbd5e1")
+            self.rows["cpu_clock"].config(text=f"{ghz:.2f} GHz max", fg="#cbd5e1")
         else:
             self.rows["cpu_clock"].config(text="", fg="#888888")
         self.rows["cpu_load"].config(
@@ -4250,7 +4271,7 @@ class OverlayApp:
         else:
             self.rows["gpu_clock"].config(text="", fg="#888888")
         self.rows["gpu_load"].config(
-            text=f"{gpu_load}%" if gpu_load is not None else "",
+            text=(f"{gpu_load}%" + (" drv" if data.get("gpu_load_source") == "Driver activity" else "")) if gpu_load is not None else "",
             fg=load_color(gpu_load)
         )
 
@@ -4308,7 +4329,7 @@ class OverlayApp:
         ram_total = data.get("ram_total_gb")
         if ram_used is not None and ram_total is not None:
             self.rows["ram_gb"].config(
-                text=f"{ram_used}/{ram_total} GB",
+                text=f"{ram_used}/{ram_total} GiB",
                 fg=_metric_color(ram_pct, _METRIC_THRESHOLDS["ram_pct"])
             )
         else:
@@ -4445,7 +4466,7 @@ class OverlayApp:
                 # fails. Never kill it: its finally block owns restoration.
                 log.exception("Failed to close %s controller heartbeat pipe", label)
 
-    def _stop_fan_workers_for_gcc(self):
+    def _stop_fan_workers_for_monitor(self):
         """Do not resume monitoring until all fan owners have finished handback."""
         self._stop_fan_workers()
         for attribute in ("gpu_fan_worker", "fan_worker"):
@@ -4457,7 +4478,7 @@ class OverlayApp:
                 process.wait(timeout=15)
             except subprocess.TimeoutExpired as exc:
                 raise HardwareAccessConflict(
-                    "GCC started while fan restoration is still pending; restart Windows before monitoring"
+                    "Another monitoring tool started while fan restoration is still pending; restart Windows before monitoring"
                 ) from exc
             status = worker.poll()
             safe = (status.get("state") in ("stopped", "error")
@@ -4468,7 +4489,7 @@ class OverlayApp:
                          or status.get("control_attempted") is False))
             if not safe:
                 raise HardwareAccessConflict(
-                    "GCC started and fan restoration could not be confirmed; restart Windows before monitoring"
+                    "Another monitoring tool started and fan restoration could not be confirmed; restart Windows before monitoring"
                 )
 
     def quit(self):

@@ -64,8 +64,8 @@ class TemperaturePresentationTests(unittest.TestCase):
         app = self.app(gpu_vram_used_gb=5.6, gpu_vram_total_gb=20.0, gpu_vram_pct=28,
                        ram_used_gb=25.6, ram_total_gb=31.9, ram_pct=80)
         app.update_ui()
-        self.assertEqual(app.rows["vram"].options["text"], "5.6/20.0 GB · 28%")
-        self.assertEqual(app.rows["ram_gb"].options["text"], "25.6/31.9 GB")
+        self.assertEqual(app.rows["vram"].options["text"], "5.6/20.0 GiB · 28%")
+        self.assertEqual(app.rows["ram_gb"].options["text"], "25.6/31.9 GiB")
         self.assertEqual(app.rows["ram_pct"].options["fg"], "#facc15")
         app.sensor_data.update(gpu_vram_used_gb=None, gpu_vram_total_gb=None)
         app.update_ui()
@@ -73,6 +73,15 @@ class TemperaturePresentationTests(unittest.TestCase):
         app.sensor_data["gpu_vram_pct"] = None
         app.update_ui()
         self.assertEqual(app.rows["vram"].options["text"], "--")
+
+    def test_clock_and_driver_fallback_are_explicit(self):
+        app = self.app(cpu_clock=5590, gpu_load=35, gpu_load_source="Driver activity")
+        app.update_ui()
+        self.assertEqual(app.rows["cpu_clock"].options["text"], "5.59 GHz max")
+        self.assertEqual(app.rows["gpu_load"].options["text"], "35% drv")
+        app.sensor_data.update(gpu_load=5, gpu_load_source="Windows D3D")
+        app.update_ui()
+        self.assertEqual(app.rows["gpu_load"].options["text"], "5%")
 
     def test_actual_game_sample_keeps_hotspot_red_and_core_green(self):
         app = self.app(cpu_temp=78, gpu_temp=54, gpu_core_temp=54,

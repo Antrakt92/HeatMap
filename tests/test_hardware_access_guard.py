@@ -61,6 +61,21 @@ class HardwareAccessGuardTests(unittest.TestCase):
             with self.assertRaises(guard.HardwareAccessConflict):
                 guard.require_hardware_access('monitor')
 
+    def test_ryzen_master_allows_monitoring_but_keeps_control_exclusive(self):
+        for name in guard.RYZEN_MASTER_PROCESS_NAMES:
+            for names in ([name], [name, 'gcc.exe']):
+                with self.subTest(names=names), mock.patch.object(
+                    guard, 'hardware_conflicts', return_value=sorted(names)
+                ):
+                    self.assertEqual(guard.require_hardware_access('monitor'), 'ryzen_master')
+                    with self.assertRaises(guard.HardwareAccessConflict):
+                        guard.require_hardware_access()
+        for other in ('atisetup.exe', 'pnputil.exe', 'fancontrol.exe'):
+            with mock.patch.object(guard, 'hardware_conflicts',
+                                   return_value=['amd ryzen master.exe', other]):
+                with self.assertRaises(guard.HardwareAccessConflict):
+                    guard.require_hardware_access('monitor')
+
     def test_non_gcc_tools_never_inspect_executable_paths(self):
         candidate = mock.Mock(info={'name': 'cpuz.exe'})
         with mock.patch.object(guard.psutil, 'process_iter', return_value=[candidate]):
@@ -73,7 +88,7 @@ class HardwareAccessGuardTests(unittest.TestCase):
         with mock.patch.object(guard.psutil, 'process_iter', return_value=[candidate, process('cpuz.exe')]):
             self.assertEqual(guard.hardware_conflicts(), ['cpuz.exe'])
 
-    def test_official_ryzen_master_executable_blocks_sensor_access(self):
+    def test_official_ryzen_master_executable_blocks_control_access(self):
         # File table in AMD's signed 3.1.1.5502 MSI uses this spaced basename.
         with mock.patch.object(guard.psutil, "process_iter", return_value=[
             process("AMD Ryzen Master.exe"),

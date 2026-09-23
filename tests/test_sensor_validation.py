@@ -67,7 +67,8 @@ class SensorValidationTests(unittest.TestCase):
         for value, expected in ((0, 0), (100, 100), (33.4, 33)):
             with self.subTest(value=value):
                 data = self.percentage_sample(value)
-                for key in ("cpu_load", "ram_pct", "gpu_load", "gpu_fan_pct", "cpu_fan_pct"):
+                self.assertEqual(data["ram_pct"], 25)
+                for key in ("cpu_load", "gpu_load", "gpu_fan_pct", "cpu_fan_pct"):
                     self.assertEqual(data[key], expected, key)
                 self.assertEqual(data["disks"][0]["lhm_used_pct"], expected)
 
