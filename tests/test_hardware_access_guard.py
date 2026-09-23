@@ -50,6 +50,17 @@ class HardwareAccessGuardTests(unittest.TestCase):
         with mock.patch.object(guard.psutil, 'process_iter', return_value=[candidate]):
             self.assertEqual(guard.hardware_conflicts(), ['gcc.exe'])
 
+    def test_gcc_only_allows_restricted_monitor_not_fan_control(self):
+        candidate = mock.Mock(info={'name': 'gcc.exe'})
+        candidate.exe.return_value = None
+        with mock.patch.object(guard.psutil, 'process_iter', return_value=[candidate]):
+            self.assertEqual(guard.require_hardware_access('monitor'), 'gcc')
+            with self.assertRaises(guard.HardwareAccessConflict):
+                guard.require_hardware_access()
+        with mock.patch.object(guard.psutil, 'process_iter', return_value=[candidate, process('hwinfo64.exe')]):
+            with self.assertRaises(guard.HardwareAccessConflict):
+                guard.require_hardware_access('monitor')
+
     def test_non_gcc_tools_never_inspect_executable_paths(self):
         candidate = mock.Mock(info={'name': 'cpuz.exe'})
         with mock.patch.object(guard.psutil, 'process_iter', return_value=[candidate]):
@@ -76,6 +87,7 @@ class HardwareAccessGuardTests(unittest.TestCase):
             "cpuz.exe", "cpuz_x64.exe", "hwinfo32.exe", "hwinfo64.exe",
             "amdryzenmaster.exe", "ryzenmaster.exe", "amd-ryzen-master.exe",
             "amd ryzen master.exe",
+            "atisetup.exe",
         })
         inventory = [process(name.upper()) for name in reversed(expected)]
         inventory += [process("CPUZ.exe"), process("FanControl.EXE")]
@@ -91,6 +103,28 @@ class HardwareAccessGuardTests(unittest.TestCase):
         with mock.patch.object(guard.psutil, "process_iter", return_value=[process(name) for name in names]):
             self.assertEqual(guard.hardware_conflicts(), [])
             self.assertIsNone(guard.require_hardware_access())
+
+    def test_amd_driver_installation_blocks_even_gcc_monitor_mode(self):
+        with mock.patch.object(guard.psutil, 'process_iter', return_value=[process('AtiSetup.exe')]):
+            with self.assertRaisesRegex(guard.HardwareAccessConflict, 'atisetup.exe'):
+                guard.require_hardware_access('monitor')
+
+    def test_pnputil_only_blocks_live_driver_installation(self):
+        candidate = mock.Mock(info={'name': 'pnputil.exe'})
+        for args, blocked in ((['pnputil.exe', '/enum-devices'], False),
+                              (['pnputil.exe', '/add-driver', 'amd.inf'], False),
+                              (['pnputil.exe', '/ADD-DRIVER', 'amd.inf', '/INSTALL'], True)):
+            candidate.cmdline.return_value = args
+            with mock.patch.object(guard.psutil, 'process_iter', return_value=[candidate]):
+                self.assertEqual(guard.hardware_conflicts(), ['pnputil.exe'] if blocked else [])
+
+    def test_unreadable_pnputil_is_guarded_and_exited_pnputil_is_ignored(self):
+        candidate = mock.Mock(info={'name': 'pnputil.exe'})
+        for error, expected in ((psutil.AccessDenied(1), ['pnputil.exe']),
+                                (psutil.NoSuchProcess(1), [])):
+            candidate.cmdline.side_effect = error
+            with mock.patch.object(guard.psutil, 'process_iter', return_value=[candidate]):
+                self.assertEqual(guard.hardware_conflicts(), expected)
 
     def test_each_call_detects_newly_started_tools_and_their_exit(self):
         with mock.patch.object(guard.psutil, "process_iter", side_effect=(

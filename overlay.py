@@ -17,6 +17,7 @@ import logging
 import logging.handlers
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -1342,9 +1343,12 @@ def _close_hardware_monitor(computer):
             log.debug("Failed to close hardware monitor", exc_info=True)
 
 
-def init_hardware_monitor():
+def init_hardware_monitor(*, coexistence=False):
     """Initialize LibreHardwareMonitor via pythonnet."""
-    require_hardware_access()
+    if coexistence:
+        require_hardware_access("monitor")
+    else:
+        require_hardware_access()
     computer = None
     try:
         import clr  # pythonnet
@@ -1358,7 +1362,9 @@ def init_hardware_monitor():
         computer.IsCpuEnabled = True
         computer.IsGpuEnabled = True
         computer.IsStorageEnabled = True
-        computer.IsMemoryEnabled = True
+        # RAM usage comes from Windows. Avoid a second DDR5 SPD/SMBus poller
+        # alongside GCC; it adds no readings used by the main memory row.
+        computer.IsMemoryEnabled = not coexistence
         computer.IsMotherboardEnabled = True
         computer.Open()
 
@@ -1532,6 +1538,19 @@ def _fan_number(name):
 
 def _is_primary_cpu_fan_name(name):
     return ("cpu" in name or "processor" in name) and "optional" not in name
+
+
+def _board_fan_name(board_name, sensor_name, identifier):
+    # LHM 0.9.5 exposes this board as generic IT8696E channels. The installed
+    # GCC board profile identifies tach 0 as CPU and tach 4 as CPU OPT.
+    # Match board + chip + channel; never infer a CPU fan from its RPM/order.
+    if str(board_name).strip().casefold() == "gigabyte b850 aorus elite wifi7 ice":
+        names = {"/lpc/it8696e/0/fan/0": ("Fan #1", "CPU Fan"),
+                 "/lpc/it8696e/0/fan/4": ("Fan #5", "CPU Optional Fan")}
+        expected = names.get(identifier)
+        if expected and sensor_name == expected[0]:
+            return expected[1]
+    return sensor_name
 
 
 def _select_cpu_fan(fan_sensors):
@@ -1717,8 +1736,7 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
         gpu_mem_total = None
         sensors = list(hw.Sensors)
         if not sensors:
-            data[SENSOR_STATUS_KEY] = SENSOR_STATUS_PARTIAL
-            data[SENSOR_REINIT_KEY] = True
+            candidates.setdefault("empty_gpus", []).append(str(hw.Name))
         for sensor in sensors:
             if sensor.SensorType == SensorType.Temperature:
                 temp_key = _gpu_temperature_key(sensor.Name)
@@ -1874,10 +1892,13 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
             name = sensor.Name.lower()
             if sensor.SensorType == SensorType.Fan:
                 val = _safe_round(sensor.Value, minimum=0)
+                identifier = str(getattr(sensor, "Identifier", str(hw.Name) + "/" + name))
+                display_name = _board_fan_name(hw.Name, str(sensor.Name), identifier)
+                name = display_name.lower()
                 # Retain identity when tach feedback disappears so the advisor can report it.
                 data["fans"].append({
-                    "name": str(sensor.Name), "rpm": val,
-                    "id": str(getattr(sensor, "Identifier", str(hw.Name) + "/" + name)),
+                    "name": display_name, "rpm": val,
+                    "id": identifier,
                     "control_pct": None,
                 })
                 board_fans.append(data["fans"][-1])
@@ -1997,6 +2018,15 @@ def read_sensors(computer, update_storage=True):
             if hw.HardwareType == HardwareType.Storage:
                 data[SENSOR_STORAGE_FAILED_KEY] = True
             log.warning("Skipping hardware block after sensor read failure: %s", _hardware_label(hw), exc_info=True)
+
+    # A sensorless secondary adapter must not reopen a healthy discrete GPU.
+    if candidates.get("empty_gpus") and not any(
+        sample.get(key) is not None
+        for _rank, sample in candidates["gpus"]
+        for key in ("gpu_core_temp", "gpu_hotspot_temp", "gpu_memory_temp")
+    ):
+        data[SENSOR_STATUS_KEY] = SENSOR_STATUS_PARTIAL
+        data[SENSOR_REINIT_KEY] = True
 
     _apply_ranked_sensor_candidates(data, candidates)
     _apply_psutil_fallbacks(data)
@@ -2376,6 +2406,41 @@ def _default_config():
             "gpu_fan_max_rpm": 2200, "cpu_fan_max_rpm": 1800}
 
 
+def _supported_case_fan_board():
+    """The saved case-fan profile is wired only for the old B550 board."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\BIOS") as key:
+            manufacturer = winreg.QueryValueEx(key, "BaseBoardManufacturer")[0]
+            product = winreg.QueryValueEx(key, "BaseBoardProduct")[0]
+    except (OSError, ValueError):
+        return None
+    return "gigabyte" in str(manufacturer).casefold() and str(product).strip().casefold() == "b550 aorus pro ac"
+
+
+def _retire_unsupported_case_fan_profile(config):
+    if not (config.get("case_fans_enabled") or config.get("case_fans_shared_enabled")
+            or "case_fan_full_rpm" in config):
+        return False
+    supported = _supported_case_fan_board()
+    if supported:
+        return False
+    config["case_fans_enabled"] = False
+    config["case_fans_shared_enabled"] = False
+    if supported is False:
+        config.pop("case_fan_full_rpm", None)
+    return True
+
+
+def _back_up_case_fan_config():
+    if not os.path.isfile(CONFIG_PATH):
+        return None
+    directory = os.path.dirname(LOG_PATH)
+    os.makedirs(directory, exist_ok=True)
+    backup = os.path.join(directory, f"config-before-board-change-{time.time_ns()}.json")
+    shutil.copy2(CONFIG_PATH, backup)
+    return backup
+
+
 def _normalize_config(cfg, defaults):
     invalid_keys = []
     provided_keys = set(cfg)
@@ -2528,6 +2593,22 @@ class OverlayApp:
         self.computer = None
         self.config, config_warning = load_config_result()
         self._config_status = STATUS_CONFIG_ADJUSTED if config_warning else None
+        if _retire_unsupported_case_fan_profile(self.config):
+            try:
+                backup = _back_up_case_fan_config()
+            except OSError:
+                log.warning("Could not back up old case-fan config; keeping it on disk", exc_info=True)
+            else:
+                saved, message = save_config(self.config)
+                if not saved:
+                    log.warning("Could not persist disabled case-fan profile: %s", message)
+                else:
+                    log.warning("Retired unsupported case-fan profile; previous config: %s", backup)
+            self._config_status = STATUS_CONFIG_ADJUSTED
+        try:
+            self._gcc_coexistence = require_hardware_access("monitor") == "gcc"
+        except HardwareAccessConflict:
+            self._gcc_coexistence = False
         self._driver_status = (
             SENSOR_STATUS_DRIVER_MISSING
             if not is_pawnio_driver_installed()
@@ -2749,9 +2830,9 @@ class OverlayApp:
 
         # Publish the fan process before the sensor owner can request its stop.
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
-        if self.config.get("case_fans_enabled", False):
+        if self.config.get("case_fans_enabled", False) and not self._gcc_coexistence:
             self.fan_worker.start()
-        if self.config.get("gpu_fans_enabled", False):
+        if self.config.get("gpu_fans_enabled", False) and not self._gcc_coexistence:
             self.gpu_fan_worker.start()
 
         # --- Start sensor thread ---
@@ -3669,7 +3750,9 @@ class OverlayApp:
         enabled = not self.config.get("gpu_fans_enabled", False)
         if enabled:
             with self.lock:
-                reason = getattr(self, "_hardware_pause_reason", None)
+                reason = ("GPU fans: GCC coexistence leaves control with the driver"
+                          if getattr(self, "_gcc_coexistence", False) is True else
+                          getattr(self, "_hardware_pause_reason", None))
                 process = self.gpu_fan_worker.process
                 if not reason and process is not None and process.poll() is None and process.stdin.closed:
                     reason = "GPU fans: waiting for saved curve restoration"
@@ -3692,6 +3775,10 @@ class OverlayApp:
             # a menu action can start a new child just after that owner stopped it.
             with self.lock:
                 reason = getattr(self, "_hardware_pause_reason", None)
+                if not reason and getattr(self, "_gcc_coexistence", False):
+                    reason = "Case fans: GCC coexistence leaves control with firmware"
+                if not reason and _supported_case_fan_board() is not True:
+                    reason = "Case fans: this profile requires B550 AORUS PRO AC"
                 severity = 2
                 if not reason:
                     process = self.fan_worker.process
@@ -3726,6 +3813,9 @@ class OverlayApp:
                            if data.get(key) is None and "missing:" + key not in reported)
         if missing:
             messages.append("Unavailable: " + ", ".join(missing))
+            severity = max(severity, 1)
+        if getattr(self, "_gcc_coexistence", False):
+            messages.append("GCC running: automatic fan control paused")
             severity = max(severity, 1)
         if status.get("state") == "error":
             messages.insert(0, _case_fan_advice(status))
@@ -3872,7 +3962,15 @@ class OverlayApp:
         first_initialization = computer is None
         try:
             while self.running and not self._stop_event.is_set():
-                require_hardware_access()
+                access_mode = require_hardware_access("monitor")
+                if access_mode == "gcc" and not getattr(self, "_gcc_coexistence", False):
+                    # Stop fan owners before switching to restricted LHM readings.
+                    self._gcc_coexistence = True
+                    self._stop_fan_workers_for_gcc()
+                    needs_reinit = computer is not None
+                    next_init_retry = 0
+                if getattr(self, "_gcc_coexistence", False):
+                    access_mode = "gcc"  # Stay restricted until restart, even if GCC exits.
                 if time.monotonic() >= next_volume_update:
                     volume_data = _read_volume_usage()
                     volume_time = time.monotonic()
@@ -3892,7 +3990,10 @@ class OverlayApp:
                     computer = None
                     if not self.running or self._stop_event.is_set():
                         break
-                    computer = init_hardware_monitor()
+                    if access_mode == "gcc":
+                        computer = init_hardware_monitor(coexistence=True)
+                    else:
+                        computer = init_hardware_monitor()
                     now = time.monotonic()
                     next_init_retry = now + SENSOR_INIT_RETRY_SECONDS
                     next_storage_update = 0
@@ -3980,6 +4081,7 @@ class OverlayApp:
             eligible = (
                 self.running and self.config.get(setting, False)
                 and not getattr(self, "_hardware_pause_reason", None)
+                and not getattr(self, "_gcc_coexistence", False)
                 and status.get("state") == "error"
                 and status.get("stop_cause") == "heartbeat_expired"
                 and status.get("restore_confirmed") is True
@@ -4012,7 +4114,8 @@ class OverlayApp:
             # errors visible unless rollback is positively confirmed (or no
             # command was sent), including pending GPU recovery/conflicts.
             safe_pause = (
-                getattr(self, "_hardware_pause_reason", None)
+                (getattr(self, "_hardware_pause_reason", None)
+                 or getattr(self, "_gcc_coexistence", False))
                 and status.get("restore_errors") == []
                 and not status.get("recovery_pending")
                 and not status.get("settings_conflict")
@@ -4030,6 +4133,9 @@ class OverlayApp:
     def update_ui(self):
         if not self.running:
             return
+
+        if getattr(self, "_gcc_coexistence", False) and self.config.get("gpu_fans_enabled", False):
+            self._set_menu_label("gpu_fans", "Automatic GPU fans: PAUSED (GCC)")
 
         if hasattr(self, "gpu_fan_worker"):
             status = self._poll_fan_controller("gpu_fan_worker", "gpu_fans_enabled")
@@ -4338,6 +4444,32 @@ class OverlayApp:
                 # Each child must get its restore request even if another pipe
                 # fails. Never kill it: its finally block owns restoration.
                 log.exception("Failed to close %s controller heartbeat pipe", label)
+
+    def _stop_fan_workers_for_gcc(self):
+        """Do not resume monitoring until all fan owners have finished handback."""
+        self._stop_fan_workers()
+        for attribute in ("gpu_fan_worker", "fan_worker"):
+            worker = getattr(self, attribute, None)
+            process = getattr(worker, "process", None)
+            if process is None:
+                continue
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired as exc:
+                raise HardwareAccessConflict(
+                    "GCC started while fan restoration is still pending; restart Windows before monitoring"
+                ) from exc
+            status = worker.poll()
+            safe = (status.get("state") in ("stopped", "error")
+                    and status.get("restore_errors") == []
+                    and not status.get("recovery_pending")
+                    and not status.get("settings_conflict")
+                    and (status.get("restore_confirmed") is True
+                         or status.get("control_attempted") is False))
+            if not safe:
+                raise HardwareAccessConflict(
+                    "GCC started and fan restoration could not be confirmed; restart Windows before monitoring"
+                )
 
     def quit(self):
         if not self.running:

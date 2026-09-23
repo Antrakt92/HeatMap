@@ -100,6 +100,21 @@ class ControllerRecoveryTests(unittest.TestCase):
             self.assertNotIn('display_reason', status)
             worker.start.assert_not_called()
 
+    def test_gcc_coexistence_does_not_restart_or_mislabel_fan_workers(self):
+        app, worker, _ = self.app(state='stopped', stop_cause='requested_stop',
+                                  control_attempted=False, restore_confirmed=False)
+        app._gcc_coexistence = True
+        status = self.poll(app, 0, 'gpu_fan_worker', 'gpu_fans_enabled')
+        self.assertEqual(status['state'], 'stopped')
+        self.assertNotIn('display_reason', status)
+        worker.start.assert_not_called()
+
+        app, worker, _ = self.app()
+        app._gcc_coexistence = True
+        self.poll(app, 0, 'gpu_fan_worker', 'gpu_fans_enabled')
+        self.poll(app, 3, 'gpu_fan_worker', 'gpu_fans_enabled')
+        worker.start.assert_not_called()
+
     def test_pause_does_not_hide_unconfirmed_or_conflicting_restoration(self):
         for changes in ({'restore_confirmed': False}, {'restore_errors': ['failed']},
                         {'recovery_pending': True}, {'settings_conflict': {'external': True}}):

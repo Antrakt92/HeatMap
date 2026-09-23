@@ -74,11 +74,23 @@ on a one-off Pump 100% reading; known competing programs pause sensors; Copy
 diagnostics does not open an additional monitor. Ryzen Master detection recognizes
 `AMD Ryzen Master.exe` from the official MSI, including spaces; a separate
 regression checks that hardware access is blocked. Ambiguous `gcc.exe` detection
-checks compiler support files before blocking a recognized GCC toolchain;
-unknown identities remain blocked. Conflict pauses preserve the actual cause
-and label cached diagnostics as historical. Extended stability testing is needed
-after Windows repair. Automated tests do not prove that the kernel freeze
-is resolved and do not replace this check.
+uses compiler support files to distinguish a toolchain from Gigabyte Control Center.
+GCC alone permits read-only monitoring with automatic fan control paused
+and DDR5 SPD inventory disabled; RAM usage comes from Windows. Other known
+conflicts still pause sensors. A 2026-09-23 clr.dll crash coincided with AMD display
+driver installation and device restarts at 20:35:44 in setupapi.dev.log. That event
+does not establish GCC concurrency as its cause. Replacing a live GPU driver
+remains a native-monitor lifecycle risk; close HeatMap before driver installation.
+A changed motherboard retires the B550 case-fan profile before worker startup.
+A temporarily sensorless secondary display adapter no longer forces repeated
+LHM reopening when the RX 7900 XT has valid readings.
+The new board's generic IT8696E fan channels 0/4 are mapped to CPU/CPU OPT only
+for the exact B850 AORUS ELITE WIFI7 ICE identity, matching its GCC profile.
+Repair evidence and the completed five-minute concurrent-GCC smoke check:
+`docs/b850-sensor-repair-2026-09-23.md`.
+Conflict pauses preserve the cause and label cached diagnostics as historical.
+Automated tests do not prove that
+the kernel freeze is resolved; extended stability testing remains open.
 
 ## P2 - Extended RX 7900 XT fan-control testing
 

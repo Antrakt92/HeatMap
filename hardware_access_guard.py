@@ -9,6 +9,7 @@ CONFLICTING_PROCESS_NAMES = frozenset({
     "cpuz.exe", "cpuz_x64.exe", "hwinfo32.exe", "hwinfo64.exe",
     "amdryzenmaster.exe", "ryzenmaster.exe", "amd-ryzen-master.exe",
     "amd ryzen master.exe",
+    "atisetup.exe",
 })
 _UNREADABLE = object()
 _INVENTORY_ERROR = (
@@ -56,7 +57,7 @@ def _is_gnu_compiler(process):
 
 
 def hardware_conflicts():
-    """Return canonical tool names; inspect paths only to disambiguate gcc.exe."""
+    """Inspect only ambiguous GCC and PnP installer processes beyond their names."""
     conflicts = set()
     try:
         # psutil substitutes ad_value when reading a protected process fails.
@@ -83,6 +84,19 @@ def hardware_conflicts():
             if not isinstance(name, str) or not name.strip():
                 raise HardwareAccessConflict(_INVENTORY_ERROR)
             name = name.casefold()
+            if name == "pnputil.exe":
+                try:
+                    args = {arg.casefold() for arg in process.cmdline()}
+                except psutil.NoSuchProcess:
+                    continue
+                except (psutil.AccessDenied, OSError):
+                    conflicts.add(name)
+                    continue
+                # Package staging and device enumeration do not replace a live
+                # driver. The observed /add-driver /install operation does.
+                if {"/add-driver", "/install"} <= args:
+                    conflicts.add(name)
+                continue
             if name in CONFLICTING_PROCESS_NAMES:
                 if name == 'gcc.exe':
                     try:
@@ -96,11 +110,17 @@ def hardware_conflicts():
     return sorted(conflicts)
 
 
-def require_hardware_access():
-    """Reject a conflict before acquiring or polling hardware-monitor sensors."""
+def require_hardware_access(scope="control"):
+    """Keep fan control exclusive while allowing read-only monitoring with GCC."""
+    if scope not in ("control", "monitor"):
+        raise ValueError("Unknown hardware access scope")
     conflicts = hardware_conflicts()
+    if scope == "monitor" and conflicts == ["gcc.exe"]:
+        return "gcc"
     if conflicts:
         raise HardwareAccessConflict(
-            "Other hardware monitoring tools are running: " + ", ".join(conflicts) + ". "
-            "Close these tools, then restart HeatMap before reading sensors or controlling fans."
+            "Hardware monitoring or driver tools are running: " + ", ".join(conflicts) + ". "
+            "Close monitoring tools or finish driver installation, then restart HeatMap."
         )
+    if scope == "monitor":
+        return "full"

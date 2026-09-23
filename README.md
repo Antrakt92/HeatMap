@@ -263,21 +263,38 @@ mean the other fans are off. The command percentage and fraction of rated RPM
 fan models.
 
 Before opening sensors and at every poll, HeatMap checks for known CPU-Z,
-Ryzen Master, HWiNFO, and third-party fan-controller processes. On detecting a
+Ryzen Master, HWiNFO, third-party fan controllers, AMD AtiSetup, and live
+`pnputil /add-driver /install` operations. On detecting a
 conflict, it suspends readings until HeatMap restarts, and its controller returns
-control to the motherboard normally. Standard AMD Adrenalin is not blocked.
-For the ambiguous `gcc.exe` name, HeatMap checks the executable's compiler and
-runtime files to recognize MinGW/MSYS and w64devkit GCC installations; compiling
-software does not pause sensors. Unknown or unreadable GCC installations remain
-blocked. A deliberate pause with confirmed fan restoration shows the access
-conflict without misleading controller-failure or OFF → ON instructions.
+control normally. GCC alone is handled separately: HeatMap keeps read-only CPU,
+GPU, motherboard fan, and storage monitoring available while its automatic fan
+controllers remain paused. RAM usage comes from Windows; the additional DDR5
+SPD/SMBus inventory is disabled beside GCC. The control pause remains until HeatMap
+restarts, including if GCC closes during the session. A second competing tool
+still pauses sensors.
+An installer detected before the next sensor call pauses monitoring until restart;
+this cannot guarantee recovery from a driver removed during an in-flight native call.
+An empty secondary display adapter does not repeatedly reopen a healthy GPU monitor.
+Standard AMD Adrenalin is not blocked. For the ambiguous `gcc.exe` name, HeatMap
+checks compiler/runtime files to recognize MinGW/MSYS and w64devkit installations;
+compiling software does not restrict sensors. A deliberate pause with confirmed
+fan restoration shows the access conflict without misleading controller-failure
+or OFF → ON instructions.
+
+Saved case-fan control for B550 AORUS PRO AC is disabled automatically on a
+different motherboard. Its old RPM calibration is removed only when the board
+identity is known. A future board needs its own verified profile before control.
+On B850 AORUS ELITE WIFI7 ICE, generic IT8696E tach channels 0 and 4 are displayed
+as CPU Fan and CPU Optional Fan. This display mapping does not enable fan control.
+
 This reduces competing access but does not guarantee detection of every driver
 or elimination of system freezes. Copy diagnostics uses a snapshot from the main
 sensor thread, including its age, without opening another hardware monitor.
 Snapshot age appears before the readings, and old or paused snapshots are marked
 as historical so they cannot be mistaken for live measurements.
 
-After installation, run **`enable_case_fans.bat`** once and accept UAC. Activation
+On the supported B550 board with connected case fans, run **`enable_case_fans.bat`**
+once and accept UAC. Do not run it on a different board or disconnected fans. Activation
 closes the previous HeatMap instance from this checkout normally, checks RPM at
 100%, verifies restoration of the previous control, saves the setting, enables
 sound alerts and autostart, and starts the updated HeatMap. A failed check is not
@@ -542,7 +559,7 @@ The widget stays temporarily raised while the menu or CPU reference dialog is op
 | Always on top | Display → Always on top |
 | Autostart | Display → Autostart |
 | Sound on/off | Alerts & limits → Alerts |
-| Automatic case fans | `enable_case_fans.bat`; then Cooling → Automatic case fans |
+| Automatic case fans (B550 profile only) | `enable_case_fans.bat`; then Cooling → Automatic case fans |
 | Automatic GPU fans | Cooling → Automatic GPU fans |
 | CPU fan percentage | Cooling → CPU fan % reference |
 | Raise above windows when hovering at the edge | Display → Raise on edge |

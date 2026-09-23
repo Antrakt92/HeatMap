@@ -1,4 +1,7 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import overlay
@@ -7,6 +10,111 @@ from test_sensor_lifecycle import sensor_app
 
 
 class SensorAccessPauseTests(unittest.TestCase):
+    def test_new_board_startup_backs_up_and_disables_old_case_profile(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config_path = Path(folder) / 'overlay_config.json'
+            log_path = Path(folder) / 'HeatMap' / 'HeatMap.log'
+            original = {'case_fans_enabled': True, 'case_fans_shared_enabled': True,
+                        'case_fan_full_rpm': {'System Fan #1': 1200, 'System Fan #2': 1200,
+                                              'System Fan #4': 1200, 'System Fan #5 / Pump': 1200},
+                        'gpu_fans_enabled': True}
+            config_path.write_text(json.dumps(original), encoding='utf-8')
+            with (mock.patch.object(overlay, 'CONFIG_PATH', str(config_path)),
+                  mock.patch.object(overlay, 'LOG_PATH', str(log_path)),
+                  mock.patch.object(overlay, '_supported_case_fan_board', return_value=False),
+                  mock.patch.object(overlay, 'is_pawnio_driver_installed', return_value=True),
+                  mock.patch.object(overlay, 'require_hardware_access', return_value='full'),
+                  mock.patch.object(overlay.tk, 'Tk', side_effect=RuntimeError('window reached'))):
+                with self.assertRaisesRegex(RuntimeError, 'window reached'):
+                    overlay.OverlayApp()
+            saved = json.loads(config_path.read_text(encoding='utf-8'))
+            self.assertFalse(saved['case_fans_enabled'])
+            self.assertFalse(saved['case_fans_shared_enabled'])
+            self.assertNotIn('case_fan_full_rpm', saved)
+            self.assertTrue(saved['gpu_fans_enabled'])
+            backups = list(log_path.parent.glob('config-before-board-change-*.json'))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(json.loads(backups[0].read_text(encoding='utf-8')), original)
+
+    def test_old_case_profile_is_retired_on_new_board(self):
+        config = {'case_fans_enabled': True, 'case_fans_shared_enabled': True,
+                  'case_fan_full_rpm': {'System Fan #1': 1200}, 'gpu_fans_enabled': True}
+        with mock.patch.object(overlay, '_supported_case_fan_board', return_value=False):
+            self.assertTrue(overlay._retire_unsupported_case_fan_profile(config))
+        self.assertFalse(config['case_fans_enabled'])
+        self.assertFalse(config['case_fans_shared_enabled'])
+        self.assertNotIn('case_fan_full_rpm', config)
+        self.assertTrue(config['gpu_fans_enabled'])
+
+    def test_unknown_board_disables_case_fans_but_preserves_calibration(self):
+        config = {'case_fans_enabled': True, 'case_fan_full_rpm': {'System Fan #1': 1200}}
+        with mock.patch.object(overlay, '_supported_case_fan_board', return_value=None):
+            self.assertTrue(overlay._retire_unsupported_case_fan_profile(config))
+        self.assertFalse(config['case_fans_enabled'])
+        self.assertIn('case_fan_full_rpm', config)
+
+    def test_gcc_arrival_reopens_monitor_and_stops_fan_control(self):
+        full = mock.Mock()
+        shared = mock.Mock()
+        app = sensor_app(3, full)
+        app.fan_worker = mock.Mock()
+        app.gpu_fan_worker = mock.Mock()
+        app.fan_worker.process = None
+        app.gpu_fan_worker.process = None
+        with mock.patch.object(overlay, 'require_hardware_access', side_effect=['full', 'gcc', 'gcc']), \
+             mock.patch.object(overlay, 'init_hardware_monitor', return_value=shared) as initialize, \
+             mock.patch.object(overlay, 'read_sensors', return_value={'cpu_temp': None}) as read, \
+             mock.patch.object(overlay, '_read_volume_usage', return_value={'volumes': []}), \
+             mock.patch.object(app, '_cache_sensor_diagnostics'), \
+             mock.patch.object(overlay.psutil, 'cpu_percent'):
+            app.sensor_loop()
+        initialize.assert_called_once_with(coexistence=True)
+        self.assertEqual(read.call_count, 3)
+        self.assertEqual(read.call_args_list[-1].args, (shared,))
+        full.Close.assert_called_once_with()
+        shared.Close.assert_called_once_with()
+        app.fan_worker.stop.assert_called_once_with()
+        app.gpu_fan_worker.stop.assert_called_once_with()
+        self.assertTrue(app._gcc_coexistence)
+
+    def test_gcc_at_startup_keeps_sensor_monitoring_available(self):
+        app = sensor_app(2)
+        shared = mock.Mock()
+        app._gcc_coexistence = True
+        with mock.patch.object(overlay, 'require_hardware_access', return_value='gcc'), \
+             mock.patch.object(overlay, 'init_hardware_monitor', return_value=shared) as initialize, \
+             mock.patch.object(overlay, 'read_sensors', return_value={'cpu_temp': None}) as read, \
+             mock.patch.object(overlay, '_read_volume_usage', return_value={'volumes': []}), \
+             mock.patch.object(app, '_cache_sensor_diagnostics'), \
+             mock.patch.object(overlay.psutil, 'cpu_percent'):
+            app.sensor_loop()
+        initialize.assert_called_once_with(coexistence=True)
+        self.assertEqual([call.args[0] for call in read.call_args_list], [shared, shared])
+
+    def test_gcc_waits_for_confirmed_fan_handback(self):
+        app = sensor_app(1)
+        events = []
+        for name in ('gpu_fan_worker', 'fan_worker'):
+            worker = mock.Mock()
+            worker.stop.side_effect = lambda name=name: events.append('stop ' + name)
+            worker.process.wait.side_effect = lambda timeout, name=name: events.append('wait ' + name)
+            worker.poll.return_value = {'state': 'stopped', 'restore_errors': [],
+                                        'restore_confirmed': True, 'recovery_pending': False}
+            setattr(app, name, worker)
+        app._stop_fan_workers_for_gcc()
+        self.assertEqual(events, ['stop gpu_fan_worker', 'stop fan_worker',
+                                  'wait gpu_fan_worker', 'wait fan_worker'])
+
+    def test_gcc_does_not_resume_sensors_after_unconfirmed_handback(self):
+        app = sensor_app(1)
+        app.gpu_fan_worker = mock.Mock()
+        app.gpu_fan_worker.poll.return_value = {'state': 'error', 'restore_errors': [],
+                                                'control_attempted': True,
+                                                'restore_confirmed': False}
+        app.fan_worker = mock.Mock(process=None)
+        with self.assertRaisesRegex(HardwareAccessConflict, 'restoration could not be confirmed'):
+            app._stop_fan_workers_for_gcc()
+
     def test_confirmed_pause_shows_cause_without_toggle_instructions(self):
         from test_overlay_helpers import _update_ui_app, _FakeLabel
 
@@ -113,7 +221,7 @@ class SensorAccessPauseTests(unittest.TestCase):
                 raise AssertionError("Concurrent start was not released")
             sequence.append("start")
 
-        def deny_hardware():
+        def deny_hardware(*_args):
             attempted_pause.set()
             raise HardwareAccessConflict("cpuz.exe")
 
@@ -130,7 +238,8 @@ class SensorAccessPauseTests(unittest.TestCase):
         app.fan_worker.stop.side_effect = lambda: sequence.append("stop")
         ui = threading.Thread(target=run, args=(app.toggle_case_fans,), daemon=True)
         sensor = threading.Thread(target=run, args=(app.sensor_loop, sensor_finished), daemon=True)
-        with mock.patch.object(overlay, "require_hardware_access", side_effect=deny_hardware), \
+        with mock.patch.object(overlay, "_supported_case_fan_board", return_value=True), \
+             mock.patch.object(overlay, "require_hardware_access", side_effect=deny_hardware), \
              mock.patch.object(overlay.psutil, "cpu_percent"), mock.patch.object(overlay, "log"):
             try:
                 ui.start()

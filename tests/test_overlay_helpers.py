@@ -1079,6 +1079,21 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data[overlay.SENSOR_STATUS_KEY], overlay.SENSOR_STATUS_PARTIAL)
         self.assertTrue(data[overlay.SENSOR_REINIT_KEY])
 
+    def test_empty_secondary_gpu_does_not_reopen_healthy_discrete_gpu(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        discrete = _FakeHardware("AMD Radeon RX 7900 XT", HardwareType.GpuAmd,
+                                 sensors=[_FakeSensor("GPU Core", SensorType.Temperature, 52)])
+        empty = _FakeHardware("Microsoft Basic Display Adapter", HardwareType.GpuAmd)
+        with (mock.patch.dict(sys.modules, modules),
+              mock.patch.object(overlay.psutil, "cpu_percent", return_value=10),
+              mock.patch.object(overlay.psutil, "virtual_memory",
+                                return_value=_memory(percent=20, used_gb=2, total_gb=8))):
+            for order in ((discrete, empty), (empty, discrete)):
+                with self.subTest(first=order[0].Name):
+                    data = overlay.read_sensors(SimpleNamespace(Hardware=list(order)))
+                    self.assertEqual(data["gpu_core_temp"], 52)
+                    self.assertFalse(data.get(overlay.SENSOR_REINIT_KEY, False))
+
     def test_read_sensors_ignores_zero_cpu_clocks(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
         cpu = _FakeHardware(
@@ -1386,6 +1401,46 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertTrue(computer.opened)
         self.assertEqual(bad_gpu.update_calls, 0)
         self.assertEqual(cpu.update_calls, 1)
+
+    def test_gcc_blocks_lhm_before_loading_clr(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        clr_module = ModuleType("clr")
+        clr_module.AddReference = lambda _path: None
+        computer = _FakeInitComputer([_FakeHardware(
+            "CPU", HardwareType.Cpu,
+            sensors=[_FakeSensor("CPU Package", SensorType.Temperature, 42)],
+        )])
+        modules["clr"] = clr_module
+        modules["LibreHardwareMonitor.Hardware"].Computer = lambda: computer
+        with (mock.patch.dict(sys.modules, modules),
+              mock.patch.object(overlay.os.path, "exists", return_value=True),
+              mock.patch.object(overlay, "require_hardware_access",
+                                side_effect=overlay.HardwareAccessConflict("gcc.exe")) as guard):
+            with self.assertRaisesRegex(overlay.HardwareAccessConflict, "gcc.exe"):
+                overlay.init_hardware_monitor()
+        self.assertFalse(computer.opened)
+        guard.assert_called_once_with()
+
+    def test_gcc_read_only_monitor_keeps_board_but_skips_spd(self):
+        modules, HardwareType, SensorType = _fake_lhm_modules()
+        clr_module = ModuleType("clr")
+        clr_module.AddReference = lambda _path: None
+        computer = _FakeInitComputer([_FakeHardware(
+            "CPU", HardwareType.Cpu,
+            sensors=[_FakeSensor("CPU Package", SensorType.Temperature, 42)],
+        )])
+        modules["clr"] = clr_module
+        modules["LibreHardwareMonitor.Hardware"].Computer = lambda: computer
+        with (mock.patch.dict(sys.modules, modules),
+              mock.patch.object(overlay.os.path, "exists", return_value=True),
+              mock.patch.object(overlay, "require_hardware_access", return_value="gcc") as guard):
+            result = overlay.init_hardware_monitor(coexistence=True)
+        self.assertIs(result, computer)
+        self.assertTrue(computer.IsMotherboardEnabled)
+        self.assertTrue(computer.IsCpuEnabled)
+        self.assertTrue(computer.IsGpuEnabled)
+        self.assertFalse(computer.IsMemoryEnabled)
+        guard.assert_called_once_with("monitor")
 
     def test_init_hardware_monitor_keeps_opened_computer_when_cpu_sanity_check_fails(self):
         modules, HardwareType, _SensorType = _fake_lhm_modules()
