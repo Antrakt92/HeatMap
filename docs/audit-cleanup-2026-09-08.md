@@ -64,8 +64,7 @@ Checks used the existing locked Python 3.14 virtual environment:
 - `python -m compileall -q` over runtime modules, setup, tools and tests: passed.
 - `python setup.py --verify`, `python setup.py --preflight`,
   `python tools/sync_runtime_manifest.py --check`, `python -m pip check`: passed.
-- `python tools/check_third_party_licenses.py`: 23 packages verified;
-  `python tools/check_constraint_ages.py`: pinned packages passed the age gate.
+- `python tools/check_third_party_licenses.py`: 23 packages verified.
 - `python tools/test_desktop_window_integration.py`: passed with disposable
   off-screen windows, including DWM exclusion, z-order, minimize recovery and
   unchanged foreground focus. This is not physical Explorer acceptance.

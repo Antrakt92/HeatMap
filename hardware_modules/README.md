@@ -2,9 +2,9 @@
 
 `IsaBridgeEC.bin` is the unmodified, signed PawnIO module from
 [PawnIO.Modules 0.2.10](https://github.com/namazso/PawnIO.Modules/releases/tag/0.2.10),
-published 2026-07-27. The 2026-08-30 release was younger than the project's 14-day
-dependency gate and was not adopted. This is a module for the installed PawnIO
-2.0.1 driver, not a new driver installation.
+published 2026-07-27. This pinned module matches the installed PawnIO 2.0.1
+driver; replacing it requires verifying the exact signed archive, source, hash,
+and hardware compatibility.
 
 Exact archive/file hashes, size, source commit and URL are in `runtime_sources.json`;
 `runtime-lock.json` locks the supplemental file. `pawnio_shared.verified_module`

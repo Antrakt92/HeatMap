@@ -41,7 +41,7 @@ agent reviewed integration and runs the final checks/publication.
 - `python -m compileall -q` over runtime modules, tools and tests: passed.
 - `python setup.py --verify`, `--preflight`: passed; supplemental module verified.
 - `python tools/sync_runtime_manifest.py --check`: passed, no generated drift.
-- `python -m pip check`: passed. Exact dependency age gate passed.
+- `python -m pip check`: passed.
 - `python tools/check_third_party_licenses.py`: passed for 23 locked NuGet packages.
 - Windows PowerShell launcher integration passed success/warning/error/no-Python
   paths and cleaned its temporary artifacts. Disposable Task Scheduler and native
