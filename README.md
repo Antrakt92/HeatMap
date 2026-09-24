@@ -446,6 +446,11 @@ those sensors are absent, the highest available CPU temperature is used.
 - **Always on top** — toggle through the right-click menu
 - **Position memory** — remembers its location between sessions
 
+When `run_as_admin.bat` is started from Codex, HeatMap relays startup through
+its verified Windows task so closing Codex does not terminate the overlay. This
+requires Autostart to be enabled. Other launch sources continue to use the
+normal UAC launcher.
+
 `Raise on edge` temporarily raises the widget above windows when you hover over
 the right edge of the work area. Its position and size stay unchanged: hovering
 changes only window order, with no slide-out movement or animation. When the

@@ -44,6 +44,11 @@ if errorlevel 1 (
 )
 del "%PRECHECK_LOG%" >nul 2>nul
 
+"%PY_EXE%" "%APP_DIR%codex_detach.py"
+set "DETACH_EXIT=%ERRORLEVEL%"
+if "%DETACH_EXIT%"=="1" exit /b 0
+if not "%DETACH_EXIT%"=="0" exit /b %DETACH_EXIT%
+
 set "HEATMAP_PYW_EXE=%PYW_EXE%"
 set "HEATMAP_OVERLAY_PATH=%OVERLAY_PATH%"
 set "HEATMAP_APP_DIR=%APP_DIR%"

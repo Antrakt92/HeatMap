@@ -11,6 +11,11 @@ Monitoring coexistence policy and regression coverage:
 third-party tuning changes remain hardware follow-ups; process detection does
 not guarantee coordination with every driver or unknown controller.
 
+Codex-owned launcher lifetime: `run_as_admin.bat` now relays starts from a Codex
+process through the verified Windows autostart task. The task setting is not
+changed. Launches without an independent task stop with an explanation; check
+the actual overlay after closing Codex to verify host-specific process lifetime.
+
 This file contains only confirmed open tasks. Closed findings are removed rather
 than retained as session history. Priority reflects impact and likelihood, not
 change size.
