@@ -6,6 +6,11 @@ accounting difference remains unresolved; the main GPU percentage now uses Windo
 engines, and a fallback driver percentage is explicitly marked. Driver-reported
 clocks have not been validated against synchronized independent measurements.
 
+Monitoring coexistence policy and regression coverage:
+`docs/shared-monitoring-2026-09-24.md`. Extended simultaneous operation and
+third-party tuning changes remain hardware follow-ups; process detection does
+not guarantee coordination with every driver or unknown controller.
+
 This file contains only confirmed open tasks. Closed findings are removed rather
 than retained as session history. Priority reflects impact and likelihood, not
 change size.

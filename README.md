@@ -282,16 +282,16 @@ mean the other fans are off. The command percentage and fraction of rated RPM
 (`~`) are not measured airflow; they cannot alone be used to compare different
 fan models.
 
-Before opening sensors and at every poll, HeatMap checks for known CPU-Z,
-HWiNFO, third-party fan controllers, AMD AtiSetup, and live
-`pnputil /add-driver /install` operations. On detecting a
-conflict, it suspends readings until HeatMap restarts, and its controller returns
-control normally. GCC and Ryzen Master, alone or together, are handled separately:
+Before opening sensors and at every poll, HeatMap checks for known monitoring
+and fan-control tools, AMD AtiSetup, and live `pnputil /add-driver /install`
+operations. Monitoring tools share one policy, including CPU-Z, HWiNFO,
+FanControl, SIV, EasyTune, GCC and Ryzen Master, alone or together:
 HeatMap keeps read-only CPU, GPU, motherboard fan, and storage monitoring available
 while its automatic fan controllers remain paused. RAM usage comes from Windows; the additional DDR5
 SPD/SMBus inventory is disabled beside these tools. The control pause remains until
-HeatMap restarts, including if the other tools close during the session. Additional
-conflicting tools still pause sensors.
+HeatMap restarts, including if the other tools close during the session. Starting
+or closing additional monitoring tools does not stop sensor updates. When another
+tool starts, HeatMap confirms normal fan-controller handback before shared reads.
 An installer detected before the next sensor call pauses monitoring until restart;
 this cannot guarantee recovery from a driver removed during an in-flight native call.
 An empty secondary display adapter does not repeatedly reopen a healthy GPU monitor.

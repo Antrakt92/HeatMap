@@ -1433,7 +1433,7 @@ class OverlayHelperTests(unittest.TestCase):
         modules["LibreHardwareMonitor.Hardware"].Computer = lambda: computer
         with (mock.patch.dict(sys.modules, modules),
               mock.patch.object(overlay.os.path, "exists", return_value=True),
-              mock.patch.object(overlay, "require_hardware_access", return_value="gcc") as guard):
+              mock.patch.object(overlay, "require_hardware_access", return_value="shared") as guard):
             result = overlay.init_hardware_monitor(coexistence=True)
         self.assertIs(result, computer)
         self.assertTrue(computer.IsMotherboardEnabled)

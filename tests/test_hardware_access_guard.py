@@ -4,6 +4,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 import tempfile
+import itertools
 
 import psutil
 
@@ -15,6 +16,26 @@ def process(name):
 
 
 class HardwareAccessGuardTests(unittest.TestCase):
+    def test_all_monitor_combinations_share_reading_but_never_control(self):
+        names = sorted(guard.CONFLICTING_PROCESS_NAMES - {'atisetup.exe'})
+        for count in (1, 2, 3):
+            for combination in itertools.combinations(names, count):
+                with self.subTest(tools=combination), mock.patch.object(
+                    guard, 'hardware_conflicts', return_value=list(combination)
+                ):
+                    self.assertEqual(guard.require_hardware_access('monitor'), 'shared')
+                    with self.assertRaises(guard.HardwareAccessConflict):
+                        guard.require_hardware_access('control')
+
+    def test_driver_installation_overrides_every_monitor_combination(self):
+        monitors = sorted(guard.CONFLICTING_PROCESS_NAMES - {'atisetup.exe'})
+        for installer in ('atisetup.exe', 'pnputil.exe'):
+            with self.subTest(installer=installer), mock.patch.object(
+                guard, 'hardware_conflicts', return_value=monitors + [installer]
+            ):
+                with self.assertRaisesRegex(guard.HardwareAccessConflict, installer):
+                    guard.require_hardware_access('monitor')
+
     def test_gnu_compiler_layout_does_not_block_hardware(self):
         for layout in ('mingw', 'w64devkit'):
             with self.subTest(layout=layout), tempfile.TemporaryDirectory() as folder:
@@ -54,12 +75,11 @@ class HardwareAccessGuardTests(unittest.TestCase):
         candidate = mock.Mock(info={'name': 'gcc.exe'})
         candidate.exe.return_value = None
         with mock.patch.object(guard.psutil, 'process_iter', return_value=[candidate]):
-            self.assertEqual(guard.require_hardware_access('monitor'), 'gcc')
+            self.assertEqual(guard.require_hardware_access('monitor'), 'shared')
             with self.assertRaises(guard.HardwareAccessConflict):
                 guard.require_hardware_access()
         with mock.patch.object(guard.psutil, 'process_iter', return_value=[candidate, process('hwinfo64.exe')]):
-            with self.assertRaises(guard.HardwareAccessConflict):
-                guard.require_hardware_access('monitor')
+            self.assertEqual(guard.require_hardware_access('monitor'), 'shared')
 
     def test_ryzen_master_allows_monitoring_but_keeps_control_exclusive(self):
         for name in guard.RYZEN_MASTER_PROCESS_NAMES:
@@ -67,10 +87,10 @@ class HardwareAccessGuardTests(unittest.TestCase):
                 with self.subTest(names=names), mock.patch.object(
                     guard, 'hardware_conflicts', return_value=sorted(names)
                 ):
-                    self.assertEqual(guard.require_hardware_access('monitor'), 'ryzen_master')
+                    self.assertEqual(guard.require_hardware_access('monitor'), 'shared')
                     with self.assertRaises(guard.HardwareAccessConflict):
                         guard.require_hardware_access()
-        for other in ('atisetup.exe', 'pnputil.exe', 'fancontrol.exe'):
+        for other in ('atisetup.exe', 'pnputil.exe'):
             with mock.patch.object(guard, 'hardware_conflicts',
                                    return_value=['amd ryzen master.exe', other]):
                 with self.assertRaises(guard.HardwareAccessConflict):

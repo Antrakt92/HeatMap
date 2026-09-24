@@ -1,4 +1,4 @@
-"""Exclude competing hardware tools, distinguishing GCC compiler installations."""
+"""Separate shared monitoring from exclusive control and driver installation."""
 from pathlib import Path
 
 import psutil
@@ -12,6 +12,7 @@ CONFLICTING_PROCESS_NAMES = frozenset({
     "atisetup.exe",
 })
 _UNREADABLE = object()
+DRIVER_INSTALLER_PROCESS_NAMES = frozenset({'atisetup.exe', 'pnputil.exe'})
 RYZEN_MASTER_PROCESS_NAMES = frozenset({
     "amdryzenmaster.exe", "ryzenmaster.exe", "amd-ryzen-master.exe",
     "amd ryzen master.exe",
@@ -115,13 +116,23 @@ def hardware_conflicts():
 
 
 def require_hardware_access(scope="control"):
-    """Keep control exclusive; allow monitoring beside GCC and Ryzen Master."""
+    """Monitoring tools share reads; controllers require exclusive ownership.
+
+    A monitoring process is not evidence of a driver replacement. Apply one
+    read policy to the entire tool inventory rather than per-program exceptions.
+    Live installers still block native reads, even alongside monitoring tools.
+    """
     if scope not in ("control", "monitor"):
         raise ValueError("Unknown hardware access scope")
     conflicts = hardware_conflicts()
-    if (scope == "monitor" and conflicts
-            and set(conflicts) <= RYZEN_MASTER_PROCESS_NAMES | {"gcc.exe"}):
-        return "ryzen_master" if set(conflicts) & RYZEN_MASTER_PROCESS_NAMES else "gcc"
+    if scope == "monitor" and conflicts:
+        installers = sorted(set(conflicts) & DRIVER_INSTALLER_PROCESS_NAMES)
+        if not installers:
+            return "shared"
+        raise HardwareAccessConflict(
+            "Driver installation detected: " + ", ".join(installers) + ". "
+            "Finish driver installation, then restart HeatMap."
+        )
     if conflicts:
         raise HardwareAccessConflict(
             "Hardware monitoring or driver tools are running: " + ", ".join(conflicts) + ". "

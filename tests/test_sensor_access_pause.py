@@ -5,11 +5,59 @@ from pathlib import Path
 from unittest import mock
 
 import overlay
+import hardware_access_guard
 from hardware_access_guard import HardwareAccessConflict
 from test_sensor_lifecycle import sensor_app
 
 
 class SensorAccessPauseTests(unittest.TestCase):
+    def test_monitor_arriving_between_poll_and_open_does_not_latch_pause(self):
+        app = sensor_app(2)
+        shared = mock.Mock()
+        app.fan_worker = mock.Mock(process=None)
+        app.gpu_fan_worker = mock.Mock(process=None)
+        with mock.patch.object(overlay, 'require_hardware_access',
+                               side_effect=['full', 'shared', 'shared', 'shared']), \
+             mock.patch.object(overlay, 'init_hardware_monitor',
+                               side_effect=[HardwareAccessConflict('hwinfo64.exe'), shared]) as initialize, \
+             mock.patch.object(overlay, 'read_sensors', return_value={'cpu_temp': 50}) as read, \
+             mock.patch.object(overlay, '_read_volume_usage', return_value={'volumes': []}), \
+             mock.patch.object(app, '_cache_sensor_diagnostics'), \
+             mock.patch.object(overlay.psutil, 'cpu_percent'):
+            app.sensor_loop()
+        self.assertEqual(initialize.call_args_list, [mock.call(), mock.call(coexistence=True)])
+        self.assertEqual(read.call_count, 2)
+        self.assertFalse(getattr(app, '_hardware_pause_reason', None))
+        app.fan_worker.stop.assert_called_once_with()
+        app.gpu_fan_worker.stop.assert_called_once_with()
+
+    def test_monitor_arrivals_and_exits_keep_reading_with_one_handback(self):
+        full, shared = mock.Mock(), mock.Mock()
+        app = sensor_app(6, full)
+        app.fan_worker = mock.Mock(process=None)
+        app.gpu_fan_worker = mock.Mock(process=None)
+        # HWiNFO arrives, other tools join, then all exit. Never resume control
+        # automatically or churn the monitor when the set of tools changes.
+        inventories = [[], ['hwinfo64.exe'],
+                       ['hwinfo64.exe', 'amd ryzen master.exe', 'gcc.exe'],
+                       ['cpuz.exe', 'fancontrol.exe'], [], []]
+        with mock.patch.object(hardware_access_guard, 'hardware_conflicts', side_effect=inventories), \
+             mock.patch.object(overlay, 'init_hardware_monitor', return_value=shared) as initialize, \
+             mock.patch.object(overlay, 'read_sensors', return_value={'cpu_temp': 50}) as read, \
+             mock.patch.object(overlay, '_read_volume_usage', return_value={'volumes': []}), \
+             mock.patch.object(app, '_cache_sensor_diagnostics'), \
+             mock.patch.object(overlay.psutil, 'cpu_percent'):
+            app.sensor_loop()
+        initialize.assert_called_once_with(coexistence=True)
+        self.assertEqual(read.call_count, 6)
+        self.assertEqual(app.sensor_data['cpu_temp'], 50)
+        self.assertFalse(getattr(app, '_hardware_pause_reason', None))
+        app.fan_worker.stop.assert_called_once_with()
+        app.gpu_fan_worker.stop.assert_called_once_with()
+        self.assertTrue(app._monitor_coexistence)
+        full.Close.assert_called_once_with()
+        shared.Close.assert_called_once_with()
+
     def test_new_board_startup_backs_up_and_disables_old_case_profile(self):
         with tempfile.TemporaryDirectory() as folder:
             config_path = Path(folder) / 'overlay_config.json'
@@ -61,7 +109,7 @@ class SensorAccessPauseTests(unittest.TestCase):
         app.gpu_fan_worker = mock.Mock()
         app.fan_worker.process = None
         app.gpu_fan_worker.process = None
-        with mock.patch.object(overlay, 'require_hardware_access', side_effect=['full', 'gcc', 'gcc']), \
+        with mock.patch.object(overlay, 'require_hardware_access', side_effect=['full', 'shared', 'shared']), \
              mock.patch.object(overlay, 'init_hardware_monitor', return_value=shared) as initialize, \
              mock.patch.object(overlay, 'read_sensors', return_value={'cpu_temp': None}) as read, \
              mock.patch.object(overlay, '_read_volume_usage', return_value={'volumes': []}), \
@@ -81,7 +129,7 @@ class SensorAccessPauseTests(unittest.TestCase):
         app = sensor_app(2)
         shared = mock.Mock()
         app._monitor_coexistence = True
-        with mock.patch.object(overlay, 'require_hardware_access', return_value='gcc'), \
+        with mock.patch.object(overlay, 'require_hardware_access', return_value='shared'), \
              mock.patch.object(overlay, 'init_hardware_monitor', return_value=shared) as initialize, \
              mock.patch.object(overlay, 'read_sensors', return_value={'cpu_temp': None}) as read, \
              mock.patch.object(overlay, '_read_volume_usage', return_value={'volumes': []}), \
@@ -99,7 +147,7 @@ class SensorAccessPauseTests(unittest.TestCase):
         app.gpu_fan_worker = mock.Mock()
         app.fan_worker.process = None
         app.gpu_fan_worker.process = None
-        with mock.patch.object(overlay, 'require_hardware_access', side_effect=['full', 'ryzen_master', 'ryzen_master']), \
+        with mock.patch.object(overlay, 'require_hardware_access', side_effect=['full', 'shared', 'full']), \
              mock.patch.object(overlay, 'init_hardware_monitor', return_value=shared) as initialize, \
              mock.patch.object(overlay, 'read_sensors', return_value={'cpu_temp': None}) as read, \
              mock.patch.object(overlay, '_read_volume_usage', return_value={'volumes': []}), \
@@ -119,7 +167,7 @@ class SensorAccessPauseTests(unittest.TestCase):
         app = sensor_app(2)
         shared = mock.Mock()
         app._monitor_coexistence = True
-        with mock.patch.object(overlay, 'require_hardware_access', return_value='ryzen_master'), \
+        with mock.patch.object(overlay, 'require_hardware_access', return_value='shared'), \
              mock.patch.object(overlay, 'init_hardware_monitor', return_value=shared) as initialize, \
              mock.patch.object(overlay, 'read_sensors', return_value={'cpu_temp': None}) as read, \
              mock.patch.object(overlay, '_read_volume_usage', return_value={'volumes': []}), \

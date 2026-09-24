@@ -1363,7 +1363,7 @@ def init_hardware_monitor(*, coexistence=False):
         computer.IsGpuEnabled = True
         computer.IsStorageEnabled = True
         # RAM usage comes from Windows. Avoid a second DDR5 SPD/SMBus poller
-        # alongside GCC or Ryzen Master; it adds no readings used by the main memory row.
+        # alongside other monitoring tools; it adds no readings used by the main memory row.
         computer.IsMemoryEnabled = not coexistence
         computer.IsMotherboardEnabled = True
         computer.Open()
@@ -2625,7 +2625,7 @@ class OverlayApp:
                     log.warning("Retired unsupported case-fan profile; previous config: %s", backup)
             self._config_status = STATUS_CONFIG_ADJUSTED
         try:
-            self._monitor_coexistence = require_hardware_access("monitor") in ("gcc", "ryzen_master")
+            self._monitor_coexistence = require_hardware_access("monitor") == "shared"
         except HardwareAccessConflict:
             self._monitor_coexistence = False
         self._driver_status = (
@@ -3984,14 +3984,14 @@ class OverlayApp:
         try:
             while self.running and not self._stop_event.is_set():
                 access_mode = require_hardware_access("monitor")
-                if access_mode in ("gcc", "ryzen_master") and not getattr(self, "_monitor_coexistence", False):
+                if access_mode == "shared" and not getattr(self, "_monitor_coexistence", False):
                     # Stop fan owners before switching to restricted LHM readings.
                     self._monitor_coexistence = True
                     self._stop_fan_workers_for_monitor()
                     needs_reinit = computer is not None
                     next_init_retry = 0
                 if getattr(self, "_monitor_coexistence", False):
-                    access_mode = "gcc"  # Stay restricted until restart, even if the other tool exits.
+                    access_mode = "shared"  # Stay restricted until restart, even if the other tool exits.
                 if time.monotonic() >= next_volume_update:
                     volume_data = _read_volume_usage()
                     volume_time = time.monotonic()
@@ -4011,10 +4011,18 @@ class OverlayApp:
                     computer = None
                     if not self.running or self._stop_event.is_set():
                         break
-                    if access_mode in ("gcc", "ryzen_master"):
+                    if access_mode == "shared":
                         computer = init_hardware_monitor(coexistence=True)
                     else:
-                        computer = init_hardware_monitor()
+                        try:
+                            computer = init_hardware_monitor()
+                        except HardwareAccessConflict:
+                            # A monitor can start between this poll and Open's
+                            # stricter guard. Re-enter the loop for fan handback
+                            # and shared initialization instead of latching off.
+                            if require_hardware_access("monitor") == "shared":
+                                continue
+                            raise
                     now = time.monotonic()
                     next_init_retry = now + SENSOR_INIT_RETRY_SECONDS
                     next_storage_update = 0
