@@ -332,8 +332,8 @@ demand** is selected, not an average temperature:
 | GPU Hotspot | 60°C → 60%; 80°C → 80%; 95°C → 100% |
 | GPU Memory | 60°C → 60%; 80°C → 80%; 95°C → 100% |
 
-A large Hotspot–Core difference while hot (35°C or more), a missing required
-sensor, or a lost tachometer requires 100%. Increases take effect at the next poll
+A large Hotspot–Core difference while hot (35°C or more for 10 continuous
+seconds), a missing required sensor, or a lost tachometer requires 100%. Increases take effect at the next poll
 (normally 2 seconds); decreases require 15 seconds of cooling and proceed at
 approximately 2 percentage points per second, with a 3-point deadband and a 60%
 minimum. This is a conservative setting for this profile, not a universal formula
@@ -396,9 +396,12 @@ Hardware validation results and limitations:
 Control runs in a separate process that checks the window heartbeat and owner
 process. On normal exit, an error, or loss of heartbeat, it restores the original
 control through LHM and verifies readback. Restoration errors are reported
-explicitly. Forcibly killing the controller process itself, a native driver hang,
-or a Windows hang prevents any guarantee of software restoration: restart Windows
-after such a failure. Do not run another fan controller (FanControl, SIV, GCC,
+explicitly. The shared four-fan profile additionally records its pre-takeover
+registers in a recovery journal, so the next controller start restores
+motherboard control even if the previous worker was killed. A native driver
+hang or a Windows hang still prevents any guarantee of software restoration:
+restart Windows after such a failure. Forcibly killing the controller process
+itself is recovered on next start for journaled profiles only. Do not run another fan controller (FanControl, SIV, GCC,
 EasyTune) at the same time.
 
 After a heartbeat timeout, HeatMap allows one automatic restart attempt per
@@ -431,6 +434,9 @@ If sensors stop producing fresh data for more than 10 seconds, old values are
 replaced with `--` and `Sensors: waiting for fresh data` appears. Stale data does
 not repeat alerts; readings return automatically after a fresh sample. Persistent
 errors from individual devices trigger recovery with the same retry delay.
+With automatic case fans enabled, frozen sensor readings fail safe: after
+6 seconds without an update the controller holds full airflow, and after
+15 seconds it reports a fault and restores motherboard control.
 After a drive update error, its cached readings remain hidden until a new sample.
 
 Invalid sensor values are not displayed as real percentages or RPM. For CPU,

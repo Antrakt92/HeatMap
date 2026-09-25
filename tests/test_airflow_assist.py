@@ -1,6 +1,6 @@
 import unittest
 
-from thermal_policy import CaseAirflowPolicy, ThermalAdvisor, case_fan_demand
+from thermal_policy import CaseAirflowPolicy, ThermalAdvisor, case_fan_demand, delta_severity
 
 
 def sample(**changes):
@@ -63,13 +63,63 @@ class AirflowAssistTests(unittest.TestCase):
         self.assertEqual(result[0], 90)  # Projects at most75C, not the uncapped95C.
 
     def test_missing_temperatures_and_hotspot_gap_keep_full_airflow_priority(self):
-        for changes in (dict(cpu_temp=None), dict(cpu_temp=float("nan")),
-                        dict(gpu_core_temp=45, gpu_hotspot_temp=85)):
+        for changes in (dict(cpu_temp=None), dict(cpu_temp=float("nan"))):
             policy = CaseAirflowPolicy()
             self.feed(policy, [60, 62, 64, 66])
             data = sample(**changes)
             self.assertEqual(policy.update(data, 8), case_fan_demand(data))
             self.assertEqual(policy.update(sample(cpu_temp=68), 10), case_fan_demand(sample(cpu_temp=68)))
+
+    def test_hotspot_gap_requires_ten_continuous_seconds_before_full_airflow(self):
+        # A single-frame delta>=35 at hotspot>=80 is sensor noise until it
+        # persists: the policy must hold the curve demand for 10 s before the
+        # "Large GPU hotspot gap" override grants full airflow.
+        policy = CaseAirflowPolicy()
+        gap = sample(gpu_core_temp=45, gpu_hotspot_temp=85)  # delta +40.
+        self.assertEqual(delta_severity(gap), 2)
+        self.assertEqual(case_fan_demand(gap), (100, "Large GPU hotspot gap: full airflow"))
+        first = policy.update(dict(gap), 0)
+        self.assertNotEqual(first[0], 100)
+        result = first
+        for step in range(1, 6):
+            result = policy.update(dict(gap), step * 2)
+            if step < 5:
+                self.assertNotEqual(result[0], 100)
+        self.assertEqual(result, (100, "Large GPU hotspot gap: full airflow"))
+
+    def test_hotspot_gap_timer_resets_on_cool_frame_time_gap_and_gpu_change(self):
+        gap = sample(gpu_core_temp=45, gpu_hotspot_temp=85)
+        # A cool frame restarts the persistence window.
+        policy = CaseAirflowPolicy()
+        for now in (0, 2, 4):
+            self.assertNotEqual(policy.update(dict(gap), now)[0], 100)
+        self.assertNotEqual(policy.update(sample(), 6)[0], 100)
+        result = None
+        for now in (8, 10, 12, 14, 16, 18):
+            result = policy.update(dict(gap), now)
+            if now < 18:
+                self.assertNotEqual(result[0], 100)
+        self.assertEqual(result, (100, "Large GPU hotspot gap: full airflow"))
+        # A sampling gap that restarts history also restarts the gap window.
+        policy = CaseAirflowPolicy()
+        for now in (0, 2):
+            self.assertNotEqual(policy.update(dict(gap), now)[0], 100)
+        result = None
+        for now in (12, 14, 16, 18, 20, 22):
+            result = policy.update(dict(gap), now)
+            if now < 22:
+                self.assertNotEqual(result[0], 100)
+        self.assertEqual(result, (100, "Large GPU hotspot gap: full airflow"))
+        # A GPU replacement restarts the gap window like the advisor does.
+        policy = CaseAirflowPolicy()
+        for now in (0, 2):
+            self.assertNotEqual(policy.update(dict(gap), now)[0], 100)
+        result = None
+        for now in (4, 6, 8, 10, 12, 14):
+            result = policy.update(dict(gap, gpu_id="gpu-b"), now)
+            if now < 14:
+                self.assertNotEqual(result[0], 100)
+        self.assertEqual(result, (100, "Large GPU hotspot gap: full airflow"))
 
     def test_nonmonotonic_times_gaps_and_gpu_changes_restart_history(self):
         for now, gpu in ((6, "gpu-a"), (5, "gpu-a"), (12, "gpu-a"), (8, "gpu-b")):

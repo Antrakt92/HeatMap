@@ -191,5 +191,131 @@ class TemperaturePresentationTests(unittest.TestCase):
             self.assertEqual(thread.called, alert)
 
 
+class AmdGpuTempAliasTableTests(unittest.TestCase):
+    def test_alias_table_matches_documented_kinds(self):
+        self.assertEqual(overlay.LHM_AMD_GPU_TEMP_ALIASES, {
+            "gpu_memory_temp": ("memory", "vram"),
+            "gpu_hotspot_temp": ("hotspot", "hot spot", "junction"),
+            "gpu_core_temp": ("core", "gpu core", "gpu", "gpu temperature",
+                              "temperature", "edge", "gpu edge",
+                              "gpu core temperature"),
+        })
+
+    def test_each_core_alias_resolves_to_core(self):
+        for name in ("Core", "GPU Core", "GPU", "GPU Temperature",
+                     "Temperature", "Edge", "GPU Edge",
+                     "GPU Core Temperature"):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    overlay._gpu_temperature_key(name), "gpu_core_temp")
+
+    def test_each_hotspot_alias_resolves_to_hotspot(self):
+        for name in ("Hotspot", "GPU Hot Spot",
+                     "GPU Hotspot Temperature", "GPU Junction Temperature"):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    overlay._gpu_temperature_key(name), "gpu_hotspot_temp")
+
+    def test_each_memory_alias_resolves_to_memory(self):
+        for name in ("GPU Memory", "VRAM Temperature",
+                     "Memory Junction Temperature"):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    overlay._gpu_temperature_key(name), "gpu_memory_temp")
+
+    def test_auxiliary_and_limit_names_resolve_to_none(self):
+        for name in ("GPU VR SoC", "GPU VR MVDD", "GPU PLX", "GPU Liquid",
+                     "GPU Hot Spot Limit", "GPU Temperature Critical",
+                     "GPU Temperature Warning"):
+            with self.subTest(name=name):
+                self.assertIsNone(overlay._gpu_temperature_key(name))
+
+
+class GpuDisplayAliasInvariantTests(unittest.TestCase):
+    setUp = sensor_fakes.SensorValidationTests.setUp
+    hardware = sensor_fakes.SensorValidationTests.hardware
+    read = sensor_fakes.SensorValidationTests.read
+
+    def test_display_alias_tracks_core_in_any_sensor_order(self):
+        readings = [
+            ("GPU Core", "Temperature", 54),
+            ("GPU Hot Spot", "Temperature", 110),
+            ("GPU Memory", "Temperature", 74),
+        ]
+        for ordered in itertools.permutations(readings):
+            with self.subTest(order=ordered):
+                data = self.read(self.hardware("GpuAmd", ordered))
+                self.assertEqual(data["gpu_temp"], 54)
+                self.assertEqual(data["gpu_temp"], data["gpu_core_temp"])
+                self.assertEqual(data["gpu_temp_label"], "CORE")
+
+
+class CpuPackagePriorityTests(unittest.TestCase):
+    setUp = sensor_fakes.SensorValidationTests.setUp
+    hardware = sensor_fakes.SensorValidationTests.hardware
+    read = sensor_fakes.SensorValidationTests.read
+
+    def test_tctl_package_wins_over_tdie_ccd_and_core_in_any_order(self):
+        readings = [
+            ("Tctl", "Temperature", 70),
+            ("Tdie", "Temperature", 75),
+            ("CCD1(Tdie)", "Temperature", 80),
+            ("Core #1", "Temperature", 65),
+        ]
+        for ordered in itertools.permutations(readings):
+            with self.subTest(order=ordered):
+                data = self.read(self.hardware("Cpu", ordered))
+                self.assertEqual(data["cpu_temp"], 70)
+
+
+class DiskThresholdBoundaryTests(unittest.TestCase):
+    def test_model_name_boundaries(self):
+        self.assertEqual(
+            overlay._disk_temperature_thresholds("980PRO"), (45, 55))
+        self.assertEqual(
+            overlay._disk_temperature_thresholds("990 PRO"), (45, 55))
+        self.assertEqual(
+            overlay._disk_temperature_thresholds("980 PRO with Heatsink"),
+            (55, 70))
+
+
+class VramAlertTests(unittest.TestCase):
+    def app(self, **values):
+        app = _update_ui_app()
+        app.sensor_data = overlay._empty_sensor_data()
+        app.sensor_data.update(values)
+        return app
+
+    def test_vram_capacity_red_matches_alert_threshold(self):
+        for value, alert in ((97, False), (98, True)):
+            with self.subTest(value=value):
+                app = self.app(gpu_vram_pct=value)
+                app.alerts_enabled = True
+                app._last_alert_time = 0
+                app._ALERT_COOLDOWN = 60
+                with mock.patch.object(overlay.threading, "Thread") as thread:
+                    overlay.OverlayApp._check_alerts(app, app.sensor_data)
+                self.assertEqual(thread.called, alert)
+
+
+class InvalidAlertValueTests(unittest.TestCase):
+    def app(self, **values):
+        app = _update_ui_app()
+        app.sensor_data = overlay._empty_sensor_data()
+        app.sensor_data.update(values)
+        return app
+
+    def test_invalid_temperature_alert_values_never_beep(self):
+        for bad in (True, "85", float("nan"), float("inf"), None):
+            with self.subTest(value=bad):
+                app = self.app(cpu_temp=bad)
+                app.alerts_enabled = True
+                app._last_alert_time = 0
+                app._ALERT_COOLDOWN = 60
+                with mock.patch.object(overlay.threading, "Thread") as thread:
+                    overlay.OverlayApp._check_alerts(app, app.sensor_data)
+                thread.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

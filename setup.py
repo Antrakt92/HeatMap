@@ -434,6 +434,43 @@ def _load_runtime_sources(path=None, runtime_lock_path=RUNTIME_LOCK_PATH):
         raise SetupError("runtime sources LHM version does not match runtime-lock.json")
     if pawnio["compatible_lhm"] != lhm["version"]:
         raise SetupError("PawnIO compatibility does not match the locked LHM version")
+    shared = data.get("shared_fan_module")
+    if not isinstance(shared, dict):
+        raise SetupError("runtime sources shared fan module metadata is missing")
+    for field in ("version", "file"):
+        if not isinstance(shared.get(field), str) or not shared[field].strip():
+            raise SetupError(f"runtime sources shared fan module {field} must be a non-empty string")
+    if not isinstance(shared.get("url"), str) or not shared["url"].startswith("https://"):
+        raise SetupError("runtime sources shared fan module URL must use HTTPS")
+    if isinstance(shared.get("size"), bool) or not isinstance(shared.get("size"), int) or shared["size"] <= 0:
+        raise SetupError("runtime sources shared fan module size must be a positive integer")
+    if not isinstance(shared.get("sha256"), str) or not _SHA256_RE.match(shared["sha256"]):
+        raise SetupError("runtime sources shared fan module sha256 is invalid")
+    if "archive_sha256" in shared and (
+        not isinstance(shared["archive_sha256"], str) or not _SHA256_RE.match(shared["archive_sha256"])
+    ):
+        raise SetupError("runtime sources shared fan module archive_sha256 is invalid")
+    if "source_commit" in shared and (
+        not isinstance(shared["source_commit"], str)
+        or not re.fullmatch(r"[0-9a-f]{40}", shared["source_commit"])
+    ):
+        raise SetupError("runtime sources shared fan module source_commit is invalid")
+    supplemental = _runtime_lock.get("supplemental_modules")
+    if (
+        not isinstance(supplemental, list)
+        or len(supplemental) != 1
+        or not isinstance(supplemental[0], dict)
+    ):
+        raise SetupError("runtime lock supplemental shared fan module is missing")
+    locked_module = supplemental[0]
+    if (
+        locked_module.get("file") != shared["file"]
+        or locked_module.get("version") != shared["version"]
+        or locked_module.get("size") != shared["size"]
+        or locked_module.get("sha256") != shared["sha256"]
+        or locked_module.get("source_key") != "shared_fan_module"
+    ):
+        raise SetupError("runtime sources shared fan module does not match runtime-lock.json")
     return data
 
 
@@ -580,6 +617,18 @@ def _print_pawnio_warnings(messages):
         print(f"  WARNING: {message}")
 
 
+def _check_shared_fan_module():
+    try:
+        from pawnio_shared import verified_module
+    except Exception as e:
+        return [f"Shared fan module verification failed: {e}"]
+    try:
+        verified_module()
+    except Exception as e:
+        return [f"Shared fan module verification failed: {e}"]
+    return []
+
+
 def run_preflight():
     messages = []
 
@@ -589,12 +638,14 @@ def run_preflight():
 
     messages.extend(_check_preflight_dependencies())
 
-    ok, manifest_messages = verify_lib_manifest(allow_extra_dlls=True)
+    ok, manifest_messages = verify_lib_manifest(allow_extra_dlls=False)
     if not ok:
         messages.extend(f"DLL runtime: {message}" for message in manifest_messages)
 
     if not messages:
         messages.extend(_check_lhm_bridge())
+
+    messages.extend(_check_shared_fan_module())
 
     return not messages, messages
 

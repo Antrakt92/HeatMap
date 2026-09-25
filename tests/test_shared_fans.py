@@ -1,12 +1,18 @@
 """Failure-path and ordering tests; no real hardware is opened."""
+import errno
+import json
+import os
+import tempfile
 from contextlib import nullcontext
 from copy import deepcopy
+from pathlib import Path
 import unittest
 from unittest import mock
 
 import case_fans
 import pawnio_shared
-from shared_fans import SharedFanSession, SHARED_NAMES, REGISTERS, PWM_REGISTERS
+from shared_fans import (SharedFanSession, SharedRecoveryJournal, SHARED_NAMES, REGISTERS,
+                         PWM_REGISTERS, SHARED_BOARD, SHARED_JOURNAL_NAME, SHARED_MODULE)
 
 
 class FakeRegisters:
@@ -171,6 +177,121 @@ class SharedFanTests(unittest.TestCase):
         for unused in (None, 'SYS6', [None], ['CPU Fan']):
             status = dict(state='active', controlled_channels=list(case_fans.ALL_TARGETS), unused_channels=unused)
             self.assertEqual(overlay._case_fan_mode(status), 'ERROR')
+
+
+class SharedRecoveryJournalTests(unittest.TestCase):
+    def setup_session(self, directory):
+        backend = FakeRegisters()
+        bridge = FakeBridge(backend.events)
+        journal = SharedRecoveryJournal(Path(directory) / SHARED_JOURNAL_NAME)
+        session = SharedFanSession(backend, bridge, bus=nullcontext, sleep=lambda _: None,
+                                   journal=journal)
+        return backend, bridge, journal, session
+
+    def test_killed_takeover_recovers_baseline_and_firmware_ownership(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backend, bridge, journal, session = self.setup_session(directory)
+            original = dict(backend.values)
+            session.prepare()
+            session.apply(80)
+            self.assertTrue(journal.path.exists())
+            self.assertEqual(bridge.mode, 0)
+            # Simulate kill -9: restore() is never called. A new worker start
+            # recovers the baseline and firmware ownership from the journal.
+            backend2 = FakeRegisters()
+            backend2.values = dict(backend.values)
+            backend2.fans = deepcopy(backend.fans)
+            bridge2 = FakeBridge(backend2.events)
+            bridge2.mode = 0
+            journal2 = SharedRecoveryJournal(Path(directory) / SHARED_JOURNAL_NAME)
+            self.assertTrue(journal2.recover(backend2, bridge2, bus=nullcontext))
+            self.assertEqual(backend2.values, original)
+            self.assertEqual(bridge2.mode, 1)
+            self.assertFalse(journal2.path.exists())
+            # A second start without a journal is an ordinary prepare().
+            session2 = SharedFanSession(
+                backend2, bridge2, bus=nullcontext, sleep=lambda _: None,
+                journal=SharedRecoveryJournal(Path(directory) / SHARED_JOURNAL_NAME))
+            session2.prepare()
+            session2.apply(80)
+            self.assertEqual(session2.restore(), [])
+            self.assertEqual(backend2.values, original)
+
+    def test_clean_shutdown_clears_journal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backend, bridge, journal, session = self.setup_session(directory)
+            original = dict(backend.values)
+            session.prepare()
+            session.apply(80)
+            self.assertTrue(journal.path.exists())
+            self.assertEqual(session.restore(), [])
+            self.assertFalse(journal.path.exists())
+            self.assertEqual(backend.values, original)
+            self.assertEqual(bridge.mode, 1)
+            self.assertFalse(journal.recover(backend, bridge, bus=nullcontext))
+
+    def test_journal_records_board_module_and_baseline_registers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backend, bridge, journal, session = self.setup_session(directory)
+            session.prepare()
+            session.apply(80)
+            saved = json.loads(journal.path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["board"], SHARED_BOARD)
+            self.assertEqual(saved["module"], SHARED_MODULE)
+            self.assertEqual(saved["version"], 1)
+            baseline = {int(key, 16): value for key, value in saved["baseline"].items()}
+            self.assertEqual(baseline, session.baseline)
+
+    def test_corrupt_or_foreign_journal_is_never_restored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backend, bridge, journal, session = self.setup_session(directory)
+            session.prepare()
+            session.apply(80)
+            saved = journal.path.read_bytes()
+            before = (dict(backend.values), bridge.mode, list(backend.events))
+            journal.path.write_bytes(b"{corrupt")
+            with self.assertRaisesRegex(RuntimeError, "preserved"):
+                journal.recover(backend, bridge, bus=nullcontext)
+            for mutate in (lambda doc: doc.update(board="OTHER_BOARD"),
+                           lambda doc: doc.update(module=dict(SHARED_MODULE, version="9.9.9")),
+                           lambda doc: doc.update(baseline={})):
+                doc = json.loads(saved)
+                mutate(doc)
+                journal.path.write_text(json.dumps(doc), encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "preserved"):
+                    journal.recover(backend, bridge, bus=nullcontext)
+            # Nothing was written to hardware and the journal is kept for inspection.
+            self.assertEqual((dict(backend.values), bridge.mode, list(backend.events)), before)
+            self.assertTrue(journal.path.exists())
+
+    def test_journal_write_failure_aborts_takeover_before_ec_disable(self):
+        # ENOSPC (or any publication failure) before bridge.write_mode(0) must
+        # abort the takeover loudly: firmware keeps ownership, nothing primed.
+        with tempfile.TemporaryDirectory() as directory:
+            backend, bridge, journal, session = self.setup_session(directory)
+            original = dict(backend.values)
+            session.prepare()
+            with mock.patch("shared_fans.os.replace",
+                            side_effect=OSError(errno.ENOSPC, "No space left on device")):
+                with self.assertRaises(OSError):
+                    session.apply(80)
+            self.assertFalse(session.touched)
+            self.assertEqual(bridge.mode, 1)
+            self.assertEqual(backend.values, original)
+            self.assertEqual([event for event in backend.events if event[0] == "register"], [])
+            self.assertFalse(journal.path.exists())
+
+    def test_failed_recovery_is_a_loud_error_never_a_silent_false(self):
+        # A journal that cannot be restored (bridge refuses EC=1) must raise
+        # with the journal preserved, not report "nothing to recover".
+        with tempfile.TemporaryDirectory() as directory:
+            backend, bridge, journal, session = self.setup_session(directory)
+            session.prepare()
+            session.apply(80)
+            bridge.fail = 1
+            with self.assertRaises(RuntimeError):
+                journal.recover(backend, bridge, bus=nullcontext)
+            self.assertTrue(journal.path.exists())
 
 
 class BridgeTransactionTests(unittest.TestCase):

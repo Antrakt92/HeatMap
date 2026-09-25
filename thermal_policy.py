@@ -46,18 +46,26 @@ def interpolate(value, points):
     return points[-1][1]
 
 
+def _curve_demand(data):
+    """Hottest normalized curve demand; callers check missing input first."""
+    demands = {key: interpolate(data[key], points) for key, points in CASE_FAN_CURVES.items()}
+    limiting = max(demands, key=demands.__getitem__)
+    return math.ceil(demands[limiting]), CASE_FAN_LABELS[limiting] + " curve"
+
+
 def case_fan_demand(data):
     """Use the hottest normalized demand, never average away a hot component."""
     # This explicit desktop profile requires CPU + all three AMD GPU readings.
     # Unknown/failed input must increase cooling, not look like a cool machine.
+    # Note: the gap override below is instantaneous. CaseAirflowPolicy gates it
+    # behind ten continuous seconds (gap_since) so a one-frame Core/Hotspot
+    # split cannot blast the fans; direct callers get the raw severity signal.
     missing = [CASE_FAN_LABELS[key] for key in CASE_FAN_CURVES if finite(data.get(key), 1) is None]
     if missing:
         return 100, "Missing temperature: " + ", ".join(missing) + "; full airflow"
     if delta_severity(data) == 2:
         return 100, "Large GPU hotspot gap: full airflow"
-    demands = {key: interpolate(data[key], points) for key, points in CASE_FAN_CURVES.items()}
-    limiting = max(demands, key=demands.__getitem__)
-    return math.ceil(demands[limiting]), CASE_FAN_LABELS[limiting] + " curve"
+    return _curve_demand(data)
 
 
 class CaseAirflowPolicy:
@@ -75,6 +83,7 @@ class CaseAirflowPolicy:
         self.gpu_id = None
         self.seen_running = set()
         self.stopped_since = {}
+        self.gap_since = None
 
     def _stalled_header(self, data, now):
         hot = any((finite(data.get(key), 1) or 0) >= threshold for key, threshold in (
@@ -107,13 +116,30 @@ class CaseAirflowPolicy:
             self.history.clear()
             self.last_time = None
             self.stopped_since.clear()
+            self.gap_since = None
             return 100, "Invalid sample time: full airflow"
         gpu_id = data.get("gpu_id")
         if (self.last_time is not None and (now <= self.last_time or now - self.last_time > 5)
                 or gpu_id != self.gpu_id):
             self.history.clear()
             self.stopped_since.clear()
+            self.gap_since = None
         self.last_time, self.gpu_id = now, gpu_id
+        if reason == "Large GPU hotspot gap: full airflow":
+            # A one-frame delta>=35 at hotspot>=80 is sensor noise until it
+            # persists. Require delta_severity == 2 continuously for ten
+            # seconds (mirroring ThermalAdvisor's gpu_gap window below) before
+            # granting full airflow; until then hold the temperature curves.
+            # Missing input still returns 100 above and never reaches this gate.
+            if self.gap_since is None:
+                self.gap_since = now
+            if now - self.gap_since < 10:
+                demand, reason = _curve_demand(data)
+            else:
+                self.history.clear()
+                return demand, reason
+        else:
+            self.gap_since = None
         stalled = self._stalled_header(data, now)
         if demand == 100:
             self.history.clear()

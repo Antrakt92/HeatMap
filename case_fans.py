@@ -9,12 +9,15 @@ import sys
 import threading
 import time
 import uuid
+from pathlib import Path
 
 import psutil
 
 from thermal_policy import CaseAirflowPolicy, FanRamp, case_fan_demand, finite
 from hardware_access_guard import require_hardware_access
-from shared_fans import SHARED_NAMES, open_shared_session, make_shared_computer, select_shared_sensors
+from shared_fans import (SHARED_NAMES, SHARED_JOURNAL_NAME, SharedRecoveryJournal,
+                         open_shared_session, make_shared_computer, recover_shared_journal,
+                         select_shared_sensors)
 from startup_readiness import StartupNotReady, StartupCancelled, wait_for_readiness
 from thermal_policy import CASE_FAN_LABELS
 
@@ -29,6 +32,13 @@ CHANNELS = {
 }
 MOTHERBOARD_REDISCOVERY_INTERVAL = 10.0
 MOTHERBOARD_REDISCOVERY_LIMIT = 5
+# LHM exposes no per-sample timestamp, so case freshness is derived from the
+# sample itself: a bit-identical temperature/fan snapshot means Update()
+# delivered nothing new. Real tachometer jitter advances the signature every
+# 2 s cycle; only a frozen pipe repeats it. Thresholds mirror the GPU worker
+# (gpu_fans.py:553-560): 6 s degrade to full airflow, 15 s terminal fault.
+CASE_STALE_DEGRADE_SECONDS = 6.0
+CASE_STALE_FAIL_SECONDS = 15.0
 
 
 class OwnerHeartbeatExpired(StartupCancelled):
@@ -566,6 +576,20 @@ def write_terminal_status(path, state, *, publisher=None, **details):
     return publication_error
 
 
+def _sensor_signature(data):
+    """Stable identity of one LHM snapshot for freshness tracking.
+
+    Non-finite readings map to None so NaN instability cannot fake freshness,
+    and extra keys (timestamps, volumes) never count as a fresh sample.
+    """
+    temps = tuple(finite(data.get(key), 1, 150) for key in
+                  ("cpu_temp", "gpu_core_temp", "gpu_hotspot_temp", "gpu_memory_temp"))
+    entries = data.get("fans", []) or []
+    fans = tuple((str(fan.get("id") or fan.get("name")), finite(fan.get("rpm"), 0, 10000))
+                 for fan in entries)
+    return (temps, fans)
+
+
 def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, commission=False):
     import overlay
     if not overlay._is_admin():
@@ -628,7 +652,13 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
             raise RuntimeError("Primary SYS1/SYS2 output modes are disabled; firmware configuration needs checking")
         initial_fan_mode = mode & 0x06
         if shared:
-            shared_session = open_shared_session(computer)
+            # The journal lives next to the case fan-status files (like the
+            # GPU worker's sibling recovery.json). An interrupted takeover
+            # (killed process, power loss) leaves the EC disabled with HeatMap
+            # duties; restore firmware ownership before any new takeover.
+            shared_journal = SharedRecoveryJournal(Path(status_path).parent / SHARED_JOURNAL_NAME)
+            recover_shared_journal(computer, shared_journal)
+            shared_session = open_shared_session(computer, journal=shared_journal)
         session = CaseFanSession(selected, shared_session)
         controlled_channels = list(ALL_TARGETS) if shared else [item[0] for item in session.controls]
         firmware_channels = [] if shared else [name for name in TARGETS if name not in controlled_channels]
@@ -647,14 +677,34 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
         started = time.monotonic()
         stall_since = {}
         verified_full_rpm = None
+        last_signature = None
+        last_fresh = started
         while not stop.is_set() and owner.is_running():
             _check_case_owner(stop, owner, heartbeat)
             require_hardware_access()
             data = overlay.read_sensors(computer)
             now = time.monotonic()
             _check_case_owner(stop, owner, heartbeat)
+            if not isinstance(data, dict):
+                raise RuntimeError("Invalid case fan temperature snapshot")
+            signature = _sensor_signature(data)
+            fresh = last_signature is None or signature != last_signature
+            if fresh:
+                last_signature, last_fresh = signature, now
+            stale_age = now - last_fresh
+            if stale_age > CASE_STALE_FAIL_SECONDS:
+                raise RuntimeError("Case sensor readings stopped updating")
             thermal_demand, _ = case_fan_demand(data)
-            demand, reason = airflow.update(data, now)
+            if fresh:
+                demand, reason = airflow.update(data, now)
+            else:
+                # Frozen snapshots must not feed rise history or earn cooling
+                # credit from repeated readings (mirrors gpu_fans.py:606-611).
+                demand, reason = case_fan_demand(data)
+                if stale_age > CASE_STALE_DEGRADE_SECONDS:
+                    demand, reason = 100, "Stale case sensor readings: full airflow"
+                if session.last_command is not None:
+                    demand = max(demand, session.last_command)
             policy_demand = demand
             readings = session.readings()
             if shared_session is not None:
@@ -688,6 +738,11 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
                 # FanRamp's fail-safe 100% startup hold on a calibrated profile.
                 ramp = FanRamp(value=demand)
             command = ramp.update(demand, now)
+            if not fresh and session.last_command is not None:
+                # No cooling credit from repeated metrics, including the short
+                # grace period before frozen readings become a full-airflow fault.
+                command = max(command, session.last_command)
+                ramp.cool_since = None
             if command != session.last_command:
                 check_before_command()
                 control_attempted = True

@@ -2392,5 +2392,134 @@ def _task_xml(command, arguments):
 </Task>'''
 
 
+class GpuLoadEngineSelectionTests(unittest.TestCase):
+    def read_gpu_sample(self, readings):
+        _modules, hardware, sensor_type = _fake_lhm_modules()
+        gpu = _FakeHardware("RX 7900 XT", hardware.GpuAmd, sensors=[
+            _FakeSensor(name, sensor_type.Load, value)
+            for name, value in readings
+        ])
+        candidates = {"gpus": []}
+        overlay._read_hardware_block(gpu, hardware, sensor_type,
+                                     overlay._empty_sensor_data(), candidates)
+        return candidates["gpus"][0][1]
+
+    def test_busiest_d3d_engine_wins_over_driver_activity(self):
+        sample = self.read_gpu_sample([
+            ("D3D 3D", 20), ("D3D Compute", 60),
+            ("D3D Copy", 50), ("GPU Core", 80),
+        ])
+        self.assertEqual(sample["gpu_load"], 60)
+        self.assertEqual(sample["gpu_load_sensor"], "d3d compute")
+
+    def test_video_engines_count_as_engine_utilization(self):
+        for engine in ("D3D Video Encode 0", "D3D Video Decode 1"):
+            with self.subTest(engine=engine):
+                self.assertTrue(overlay._is_gpu_load_sensor(engine))
+                sample = self.read_gpu_sample([(engine, 70), ("GPU Core", 99)])
+                self.assertEqual(sample["gpu_load"], 70)
+
+    def test_memory_and_bus_load_sensors_are_not_engines(self):
+        for name in ("D3D Dedicated Memory Used", "GPU Memory", "D3D Bus"):
+            with self.subTest(name=name):
+                self.assertFalse(overlay._is_gpu_load_sensor(name))
+
+
+class SensorGuideThresholdTests(unittest.TestCase):
+    def guide_text(self):
+        with mock.patch.object(overlay, "_show_info_message") as show:
+            overlay.OverlayApp.show_sensor_guide(object())
+        return show.call_args[0][1]
+
+    def test_guide_matches_application_thresholds(self):
+        text = self.guide_text()
+        self.assertIn("CPU: 70 / 85°C", text)
+        self.assertIn("980 PRO / 860 EVO: 55 / 70°C; other disks: 45 / 55°C.",
+                      text)
+        self.assertIn(
+            "Hotspot Δ: 25 / 35°C when Hotspot >=80°C; alarm after 10 seconds.",
+            text)
+        self.assertIn(
+            "Fan stall: previously running, then 0 RPM for 10 seconds under heat.",
+            text)
+
+    def test_guide_disk_line_follows_threshold_tables(self):
+        with mock.patch.dict(overlay._METRIC_THRESHOLDS, {"disk_temp": (1, 2)}):
+            text = self.guide_text()
+        self.assertIn("other disks: 1 / 2°C.", text)
+        self.assertNotIn("45 / 55°C", text)
+
+
+class SnapshotAgeBannerTests(unittest.TestCase):
+    def banner(self, snapshot_time, volume_snapshot_time, now, pause_reason):
+        return overlay.format_snapshot_age_banner(
+            snapshot_time, volume_snapshot_time, now, pause_reason)
+
+    def test_missing_snapshot_reports_uncached_inventory(self):
+        self.assertEqual(
+            self.banner(None, None, 100.0, None),
+            "\nSensor inventory: not yet cached; latest published data only.")
+
+    def test_fresh_snapshot_shows_age_without_historical_flag(self):
+        text = self.banner(90.0, None, 100.0, None)
+        self.assertIn("snapshot age: 10.0s", text)
+        self.assertNotIn("Historical", text)
+
+    def test_stale_snapshot_is_flagged_historical(self):
+        text = self.banner(80.0, None, 100.0, None)
+        self.assertIn("Historical snapshot", text)
+
+    def test_pause_reason_forces_historical_flag_and_is_quoted(self):
+        text = self.banner(99.0, None, 100.0, "paused: driver busy")
+        self.assertIn("Historical snapshot", text)
+        self.assertIn("paused: driver busy", text)
+
+
+class PeakGuardTests(unittest.TestCase):
+    def test_non_finite_readings_never_enter_peaks(self):
+        peaks = overlay._empty_peak_data()
+        overlay._update_peak_values(peaks, {
+            "cpu_temp": float("nan"),
+            "gpu_temp": float("inf"),
+            "gpu_temp_label": "CORE",
+            "ram_pct": float("nan"),
+            "gpu_hotspot_temp": float("nan"),
+            "gpu_memory_temp": float("inf"),
+            "disks": [{"name": "D:", "temp": float("nan")}],
+            "volumes": [{"name": "C:", "used_pct": float("nan")}],
+        })
+        self.assertEqual(peaks, overlay._empty_peak_data())
+
+    def test_valid_peak_survives_later_invalid_samples(self):
+        peaks = overlay._empty_peak_data()
+        overlay._update_peak_values(peaks, {
+            "cpu_temp": 60,
+            "gpu_temp": 55,
+            "gpu_temp_label": "CORE",
+            "ram_pct": 40,
+            "gpu_hotspot_temp": 70,
+            "gpu_memory_temp": 65,
+            "disks": [{"name": "D:", "temp": 38}],
+            "volumes": [{"name": "C:", "used_pct": 50}],
+        })
+        overlay._update_peak_values(peaks, {
+            "cpu_temp": float("nan"),
+            "gpu_temp": float("inf"),
+            "gpu_temp_label": "CORE",
+            "ram_pct": float("nan"),
+            "gpu_hotspot_temp": float("inf"),
+            "gpu_memory_temp": float("nan"),
+            "disks": [{"name": "D:", "temp": float("inf")}],
+            "volumes": [{"name": "C:", "used_pct": float("nan")}],
+        })
+        self.assertEqual(peaks["cpu_temp"], 60)
+        self.assertEqual(peaks["gpu_temp"], 55)
+        self.assertEqual(peaks["ram_pct"], 40)
+        self.assertEqual(peaks["gpu_hotspot_temp"], 70)
+        self.assertEqual(peaks["gpu_memory_temp"], 65)
+        self.assertEqual(peaks["disk_temp"], 38)
+        self.assertEqual(peaks["disk_used_pct"], 50)
+
+
 if __name__ == "__main__":
     unittest.main()

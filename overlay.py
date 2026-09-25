@@ -1484,6 +1484,26 @@ def _fresh_volume_data(snapshot, now):
     return data
 
 
+def format_snapshot_age_banner(snapshot_time, volume_snapshot_time, now, pause_reason):
+    """Pure sensor-inventory age banner for copy_diagnostics.
+
+    volume_snapshot_time is accepted for call-site symmetry (volume freshness
+    is rendered separately by the caller); only the inventory snapshot drives
+    this banner.
+    """
+    del volume_snapshot_time
+    if snapshot_time is None:
+        cache_context = "\nSensor inventory: not yet cached; latest published data only."
+    else:
+        age = max(0.0, now - snapshot_time)
+        cache_context = f"\nSensor inventory snapshot age: {age:.1f}s"
+        if age > SENSOR_STALE_SECONDS or pause_reason:
+            cache_context += "\nHistorical snapshot: the following sensor values are not current."
+    if pause_reason:
+        cache_context += "\n" + pause_reason
+    return cache_context
+
+
 def _empty_peak_data():
     return {
         "cpu_temp": None,
@@ -1590,9 +1610,11 @@ def _is_gpu_load_sensor(name):
     if "memory" in name or "bus" in name:
         return False
     if name == "d3d" or name.startswith("d3d ") or name == "gpu d3d":
+        # WHY: Windows reports busiest-engine utilization (3D/compute/copy/
+        # video encode/decode) as D3D load sensors. Video engines are engine
+        # utilization, not memory/bus counters, so the whole D3D prefix is
+        # accepted here; only memory/bus readings are excluded above.
         return True
-    if "video" in name:
-        return False
     return (
         name in ("gpu core", "gpu load", "gpu d3d", "d3d", "d3d 3d")
         or ("d3d" in name and ("gpu" in name or "3d" in name))
@@ -1611,26 +1633,40 @@ def _gpu_load_priority(name):
     return 20
 
 
+# WHY: sensor names checked against AmdGpu.cs of the LibreHardwareMonitor
+# version in use (see README). LHM also exports GPU VR VDDC/MVDD/SoC, Liquid
+# and PLX readings; a generic "gpu" match would silently overwrite the actual
+# die temperature, so only these aliases map to a temperature kind.
+LHM_AMD_GPU_TEMP_ALIASES = {
+    "gpu_memory_temp": ("memory", "vram"),
+    "gpu_hotspot_temp": ("hotspot", "hot spot", "junction"),
+    "gpu_core_temp": ("core", "gpu core", "gpu", "gpu temperature",
+                      "temperature", "edge", "gpu edge",
+                      "gpu core temperature"),
+}
+
+
 def _gpu_temperature_key(name):
     name = _normalized_sensor_name(name)
-    # WHY: LHM also exports GPU VR VDDC/MVDD/SoC, Liquid and PLX.
     # A generic "gpu" match silently overwrites the actual die temperature.
     if not name or any(marker in name for marker in (
         "warning", "critical", "threshold", "limit", "vr ", "vrm", "liquid", "plx",
     )):
         return None
-    if "memory" in name or "vram" in name:
+    if any(alias in name for alias in LHM_AMD_GPU_TEMP_ALIASES["gpu_memory_temp"]):
         return "gpu_memory_temp"
-    if "hotspot" in name or "hot spot" in name or "junction" in name:
+    if any(alias in name for alias in LHM_AMD_GPU_TEMP_ALIASES["gpu_hotspot_temp"]):
         return "gpu_hotspot_temp"
-    if name in ("core", "gpu core", "gpu", "gpu temperature", "temperature",
-                "edge", "gpu edge", "gpu core temperature"):
+    if name in LHM_AMD_GPU_TEMP_ALIASES["gpu_core_temp"]:
         return "gpu_core_temp"
     return None
 
 
 def _select_gpu_display_temperature(data):
     # SYNC: Hotspot and memory have independent rows and alert thresholds.
+    # SYNC: gpu_temp is a display alias of gpu_core_temp set here; color and
+    # alert tables key gpu_temp off this value, so read/render/alert paths
+    # stay synchronized.
     data["gpu_temp"] = data.get("gpu_core_temp")
     data["gpu_temp_label"] = "CORE" if data["gpu_temp"] is not None else None
 
@@ -2067,6 +2103,15 @@ _METRIC_THRESHOLDS = {
     "gpu_vram_pct": (90, 98),
 }
 
+# SYNC: mirrors thermal_policy.delta_severity (warn/critical gap with a
+# hotspot floor) and ThermalAdvisor.evaluate persistence (a gap/stall finding
+# is reported after this many continuous seconds). The sensor guide derives
+# its Δ/stall lines from these instead of hardcoded numbers.
+_GPU_GAP_WARN_DELTA = 25
+_GPU_GAP_CRITICAL_DELTA = 35
+_GPU_GAP_MIN_HOTSPOT = 80
+_FINDING_PERSISTENCE_SECONDS = 10
+
 
 def _metric_color(value, thresholds):
     if finite(value) is None:
@@ -2291,18 +2336,21 @@ def _format_gpu_temps(data):
 
 
 def _update_peak_values(peaks, data):
-    for key in ("cpu_temp", "ram_pct", "gpu_hotspot_temp", "gpu_memory_temp"):
-        value = data.get(key)
+    for key, minimum, maximum in (
+        ("cpu_temp", 1, 150), ("ram_pct", 0, 100),
+        ("gpu_hotspot_temp", 1, 150), ("gpu_memory_temp", 1, 150),
+    ):
+        value = finite(data.get(key), minimum, maximum)
         if value is not None and (peaks.get(key) is None or value > peaks[key]):
             peaks[key] = value
 
-    gpu_temp = data.get("gpu_temp")
+    gpu_temp = finite(data.get("gpu_temp"), 1, 150)
     if gpu_temp is not None and (peaks.get("gpu_temp") is None or gpu_temp > peaks["gpu_temp"]):
         peaks["gpu_temp"] = gpu_temp
         peaks["gpu_temp_label"] = data.get("gpu_temp_label")
 
     for disk in data.get("disks", []):
-        temp = disk.get("temp")
+        temp = finite(disk.get("temp"), 1, 150)
         if temp is not None and (peaks.get("disk_temp") is None or temp > peaks["disk_temp"]):
             peaks["disk_temp"] = temp
     for volume in data.get("volumes", []):
@@ -3043,15 +3091,13 @@ class OverlayApp:
             volume_context = (f"\nLatest volume space (age: {now - volume_snapshot[0]:.1f}s):\n"
                               + json.dumps(volumes, ensure_ascii=False))
         if snapshot is None:
-            cache_context = "\nSensor inventory: not yet cached; latest published data only."
+            cache_context = format_snapshot_age_banner(
+                None, None, now, getattr(self, "_hardware_pause_reason", None))
         else:
-            age = max(0.0, time.monotonic() - snapshot[0])
-            cache_context = f"\nSensor inventory snapshot age: {age:.1f}s"
-            if age > SENSOR_STALE_SECONDS or getattr(self, "_hardware_pause_reason", None):
-                cache_context += "\nHistorical snapshot: the following sensor values are not current."
-        pause = getattr(self, "_hardware_pause_reason", None)
-        if pause:
-            cache_context += "\n" + pause
+            cache_context = format_snapshot_age_banner(
+                snapshot[0],
+                volume_snapshot[0] if volume_snapshot is not None else None,
+                now, getattr(self, "_hardware_pause_reason", None))
         messages = getattr(self, "health_messages", [])
         health_context = "\nWarnings at request:\n" + "\n".join(messages) if messages else ""
         health_context += "\nCase fan controller:\n" + json.dumps(
@@ -3204,9 +3250,15 @@ class OverlayApp:
         ))
         limits += "\n" + "\n".join(f"{label}: {_METRIC_THRESHOLDS[key][0]} / {_METRIC_THRESHOLDS[key][1]}%" for key, label in (
             ("ram_pct", "RAM capacity"), ("gpu_vram_pct", "VRAM capacity"), ("disk_used", "Disk capacity")))
-        limits += "\n980 PRO / 860 EVO: 55 / 70°C; other disks: 45 / 55°C."
-        limits += "\nHotspot Δ: 25 / 35°C when Hotspot >=80°C; alarm after 10 seconds."
-        limits += "\nFan stall: previously running, then 0 RPM for 10 seconds under heat."
+        samsung_disk = _disk_temperature_thresholds("Samsung SSD 980 PRO")
+        generic_disk = _disk_temperature_thresholds("unknown disk")
+        limits += (f"\n980 PRO / 860 EVO: {samsung_disk[0]} / {samsung_disk[1]}°C;"
+                   f" other disks: {generic_disk[0]} / {generic_disk[1]}°C.")
+        limits += (f"\nHotspot Δ: {_GPU_GAP_WARN_DELTA} / {_GPU_GAP_CRITICAL_DELTA}°C"
+                   f" when Hotspot >={_GPU_GAP_MIN_HOTSPOT}°C;"
+                   f" alarm after {_FINDING_PERSISTENCE_SECONDS} seconds.")
+        limits += (f"\nFan stall: previously running, then 0 RPM"
+                   f" for {_FINDING_PERSISTENCE_SECONDS} seconds under heat.")
         _show_info_message("HeatMap sensor guide", meanings + limits +
                            "\n\nClick the warning panel to copy full diagnostics. Control sound with Alerts in the right-click menu.")
 
@@ -3888,18 +3940,20 @@ class OverlayApp:
             return
 
         alerts = []
-        for key, label in (
-            ("cpu_temp", "CPU"), ("gpu_temp", "GPU Core"),
-            ("gpu_hotspot_temp", "GPU Hotspot"), ("gpu_memory_temp", "GPU Memory"),
-            ("ram_pct", "RAM"),
+        for key, label, minimum, maximum in (
+            ("cpu_temp", "CPU", 1, 150), ("gpu_temp", "GPU Core", 1, 150),
+            ("gpu_hotspot_temp", "GPU Hotspot", 1, 150),
+            ("gpu_memory_temp", "GPU Memory", 1, 150),
+            ("ram_pct", "RAM", 0, 100),
+            ("gpu_vram_pct", "VRAM", 0, 100),
         ):
-            value = data.get(key)
+            value = finite(data.get(key), minimum, maximum)
             if value is not None and value >= _METRIC_THRESHOLDS[key][1]:
-                unit = "%" if key == "ram_pct" else "°C"
+                unit = "%" if key in ("ram_pct", "gpu_vram_pct") else "°C"
                 alerts.append(f"{label} {value}{unit}")
 
         for disk in data.get("disks", []):
-            dtemp = disk.get("temp")
+            dtemp = finite(disk.get("temp"), 1, 150)
             if dtemp is not None and dtemp >= _disk_temperature_thresholds(disk["name"])[1]:
                 alerts.append(f"{disk['name']} {dtemp}°C")
         for volume in data.get("volumes", []):

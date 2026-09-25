@@ -271,6 +271,115 @@ class CaseFanTests(unittest.TestCase):
         computer.Open.assert_not_called()
         self.assertIn("Cannot verify which hardware monitoring tools are running", publish.call_args.kwargs["reason"])
 
+    def test_sensor_signature_ignores_identity_and_nan_instability(self):
+        sample = dict(cpu_temp=50, gpu_core_temp=45, gpu_hotspot_temp=60, gpu_memory_temp=60,
+                      fans=[dict(id="fan-a", rpm=800)])
+        self.assertEqual(fans._sensor_signature(dict(sample)), fans._sensor_signature(dict(sample)))
+        self.assertEqual(fans._sensor_signature(dict(sample, cpu_temp=float("nan"))),
+                         fans._sensor_signature(dict(sample, cpu_temp=float("nan"))))
+        self.assertNotEqual(fans._sensor_signature(sample),
+                            fans._sensor_signature(dict(sample, cpu_temp=51)))
+        self.assertNotEqual(fans._sensor_signature(sample),
+                            fans._sensor_signature(dict(sample, fans=[dict(id="fan-a", rpm=801)])))
+
+    def run_frozen_worker(self, frozen, stop_at_reads=12, tick=0.0):
+        import overlay
+        import thermal_policy
+        computer, controls = fixture()
+        owner = mock.Mock()
+        owner.create_time.return_value = 1
+        owner.is_running.return_value = True
+        clock = [100.0]
+        reads = [0]
+
+        def read(_computer):
+            reads[0] += 1
+            if reads[0] >= stop_at_reads:
+                owner.is_running.return_value = False
+            return frozen
+
+        stop = mock.Mock()
+        stop.is_set.return_value = False
+
+        def wait(seconds):
+            clock[0] += tick
+            return False
+
+        stop.wait.side_effect = wait
+        updates = []
+        original_update = thermal_policy.CaseAirflowPolicy.update
+
+        def spy(self, data, now):
+            updates.append((now, len(self.history)))
+            return original_update(self, data, now)
+
+        reports = []
+        original_write = fans.write_status
+
+        def publish(path, state, **details):
+            reports.append(dict(state=state, **details))
+            return original_write(path, state, **details)
+
+        real_check = fans._check_case_owner
+
+        def check(stop_event, owner_process, heartbeat):
+            # Production refreshes the watchdog on every owner poll; without
+            # this the frozen mock heartbeat would expire together with the
+            # sensor stream and mask the stale-sensor fault under test.
+            heartbeat[0] = clock[0]
+            return real_check(stop_event, owner_process, heartbeat)
+
+        modules = {"clr": mock.Mock(), "LibreHardwareMonitor": mock.Mock(),
+                   "LibreHardwareMonitor.Hardware": NS(Computer=lambda: computer)}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict("sys.modules", modules), \
+             mock.patch.object(fans, "make_shared_computer", return_value=computer), \
+             mock.patch.object(overlay, "_is_admin", return_value=True), \
+             mock.patch.object(overlay, "_runtime_dll_errors", return_value=[]), \
+             mock.patch.object(fans.psutil, "Process", return_value=owner), \
+             mock.patch.object(fans.psutil, "process_iter", return_value=[]), \
+             mock.patch.object(fans.threading, "Thread"), \
+             mock.patch.object(fans.threading, "Event", return_value=stop), \
+             mock.patch.object(fans.time, "monotonic", side_effect=lambda: clock[0]), \
+             mock.patch.object(fans, "_check_case_owner", side_effect=check), \
+             mock.patch.object(fans.CaseAirflowPolicy, "update", spy), \
+             mock.patch.object(fans, "write_status", side_effect=publish), \
+             mock.patch.object(overlay, "read_sensors", side_effect=read):
+            path = os.path.join(directory, "status.json")
+            result = fans.worker(path, 7, 1,
+                                 full_rpm={name: 1200 for name in fans.INDEPENDENT_TARGETS})
+        return result, controls, reports, updates, reads[0]
+
+    def test_frozen_sensor_snapshot_never_earns_cooling_credit(self):
+        # One dict object returned for every sample: only the first may feed
+        # the airflow history, and no command may fall below the last one.
+        frozen = dict(cpu_temp=50, gpu_core_temp=45, gpu_hotspot_temp=60, gpu_memory_temp=60)
+        result, controls, reports, updates, total_reads = self.run_frozen_worker(frozen)
+        self.assertEqual(result, 0)
+        self.assertGreaterEqual(total_reads, 10)
+        self.assertEqual(len(updates), 1)
+        commands = [call.args[0] for call in controls[0].SetSoftware.call_args_list]
+        self.assertTrue(commands)
+        self.assertTrue(all(command >= commands[0] for command in commands))
+        for control in controls[:2]:
+            self.assertEqual([call.args[0] for call in control.SetSoftware.call_args_list], commands)
+        self.assertFalse(any("assist" in report.get("reason", "") for report in reports))
+
+    def test_frozen_sensor_snapshot_degrades_then_raises_terminal_fault(self):
+        # The same frozen dict for >6 s forces full airflow; past 15 s the
+        # worker must fail loudly instead of holding the last command forever.
+        frozen = dict(cpu_temp=50, gpu_core_temp=45, gpu_hotspot_temp=60, gpu_memory_temp=60)
+        result, controls, reports, _updates, total_reads = self.run_frozen_worker(
+            frozen, stop_at_reads=10 ** 9, tick=2.0)
+        self.assertEqual(result, 1)
+        self.assertGreaterEqual(total_reads, 10)
+        self.assertIn("Case sensor readings stopped updating", reports[-1]["reason"])
+        degraded = [report for report in reports if report.get("reason") ==
+                    "Stale case sensor readings: full airflow"]
+        self.assertTrue(degraded)
+        self.assertTrue(reports[-1]["restore_confirmed"])
+        for control in controls[:2]:
+            control.SetDefault.assert_called_once()
+
     def test_worker_restores_after_read_or_status_failure_and_after_owner_dies(self):
         import overlay
         for failure in ("read", "write", None):

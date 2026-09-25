@@ -160,7 +160,7 @@ class LibManifestTests(unittest.TestCase):
         ):
             self.assertEqual(setup.main(["--preflight"]), 0)
 
-        verify.assert_called_once_with(allow_extra_dlls=True)
+        verify.assert_called_once_with(allow_extra_dlls=False)
         download.assert_not_called()
         printed.assert_called_with("Preflight OK")
 
