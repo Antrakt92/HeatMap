@@ -30,7 +30,9 @@ import xml.etree.ElementTree as ET
 
 import psutil
 
-from thermal_policy import ThermalAdvisor, gpu_delta, delta_severity, finite
+from thermal_policy import (ThermalAdvisor, gpu_delta, delta_severity, finite,
+                            GPU_GAP_WARN_DELTA, GPU_GAP_CRITICAL_DELTA,
+                            GPU_GAP_MIN_HOTSPOT, GPU_GAP_PERSISTENCE_SECONDS)
 from case_fans import FanWorkerClient, full_rpm_reference
 from gpu_fans import GpuWorkerClient, mode_text as gpu_fan_mode_text
 from hardware_access_guard import HardwareAccessConflict, require_hardware_access
@@ -2103,14 +2105,10 @@ _METRIC_THRESHOLDS = {
     "gpu_vram_pct": (90, 98),
 }
 
-# SYNC: mirrors thermal_policy.delta_severity (warn/critical gap with a
-# hotspot floor) and ThermalAdvisor.evaluate persistence (a gap/stall finding
-# is reported after this many continuous seconds). The sensor guide derives
-# its Δ/stall lines from these instead of hardcoded numbers.
-_GPU_GAP_WARN_DELTA = 25
-_GPU_GAP_CRITICAL_DELTA = 35
-_GPU_GAP_MIN_HOTSPOT = 80
-_FINDING_PERSISTENCE_SECONDS = 10
+# Stall persistence mirrors ThermalAdvisor tach persistence (ten continuous
+# seconds); it is a separate policy from the Hotspot-gap window above, which
+# lives in thermal_policy.GPU_GAP_*.
+_STALL_PERSISTENCE_SECONDS = 10
 
 
 def _metric_color(value, thresholds):
@@ -3254,11 +3252,11 @@ class OverlayApp:
         generic_disk = _disk_temperature_thresholds("unknown disk")
         limits += (f"\n980 PRO / 860 EVO: {samsung_disk[0]} / {samsung_disk[1]}°C;"
                    f" other disks: {generic_disk[0]} / {generic_disk[1]}°C.")
-        limits += (f"\nHotspot Δ: {_GPU_GAP_WARN_DELTA} / {_GPU_GAP_CRITICAL_DELTA}°C"
-                   f" when Hotspot >={_GPU_GAP_MIN_HOTSPOT}°C;"
-                   f" alarm after {_FINDING_PERSISTENCE_SECONDS} seconds.")
+        limits += (f"\nHotspot Δ: {GPU_GAP_WARN_DELTA} / {GPU_GAP_CRITICAL_DELTA}°C"
+                   f" when Hotspot >={GPU_GAP_MIN_HOTSPOT}°C;"
+                   f" alarm after {GPU_GAP_PERSISTENCE_SECONDS} seconds.")
         limits += (f"\nFan stall: previously running, then 0 RPM"
-                   f" for {_FINDING_PERSISTENCE_SECONDS} seconds under heat.")
+                   f" for {_STALL_PERSISTENCE_SECONDS} seconds under heat.")
         _show_info_message("HeatMap sensor guide", meanings + limits +
                            "\n\nClick the warning panel to copy full diagnostics. Control sound with Alerts in the right-click menu.")
 

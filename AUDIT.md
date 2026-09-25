@@ -264,6 +264,24 @@ Native Tk regressions cover drive rows disappearing and returning, removal of
 their stale empty height, and the complete long warning panel at 100/150/200%
 scaling. They do not replace the physical display matrix above.
 
+## P3 - Worker-path duplication between case and GPU fan control
+
+`case_fans.py` and `gpu_fans.py` evolved in parallel and now duplicate the
+worker-status validator (~80 vs ~58 lines), the 15-second heartbeat protocol,
+the terminal-report payload shape, the atomic JSON journal file layer, the
+ramp-down logic (`FanRamp` vs `GpuRamp` with already-diverged constants), and
+the commissioning wait loops (`enable_case_fans.py` vs
+`tools/commission_gpu_fans.py`). Fixes to spoofing/stale bounds, timeouts, or
+restore sequencing must currently be applied in two places; the ramp holds
+(15s vs 10s) and deadbands have already diverged.
+
+Do not refactor these paths cosmetically: each dedup must preserve exact
+behavior and ride on the existing paired suites (`test_controller_heartbeat`,
+`test_fan_commission_audit`, `test_fan_activation`, `test_thermal_advisor`,
+`test_airflow_assist`, `test_gpu_conflict_recovery`, `test_shared_fans`).
+Single-sourced already: `OwnerHeartbeatExpired`, status-file helpers,
+`thermal_policy.GPU_GAP_*` gap constants, shared-EC recovery journal format.
+
 ## Parking - Update LibreHardwareMonitor and PawnIO atomically to the next bundle
 
 Promote when: a specific hardware fix/security reason warrants an upgrade, or the

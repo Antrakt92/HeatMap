@@ -14,6 +14,15 @@ CASE_FAN_LABELS = {
     "gpu_hotspot_temp": "GPU Hotspot", "gpu_memory_temp": "GPU Memory",
 }
 
+# Single source for the Hotspot-Core gap policy: warn/critical split with a
+# hotspot floor, granted only after this many continuous seconds. The case
+# controller (CaseAirflowPolicy), the warning panel (ThermalAdvisor) and the
+# overlay sensor guide all derive their numbers from these.
+GPU_GAP_WARN_DELTA = 25
+GPU_GAP_CRITICAL_DELTA = 35
+GPU_GAP_MIN_HOTSPOT = 80
+GPU_GAP_PERSISTENCE_SECONDS = 10
+
 
 def finite(value, minimum=0, maximum=150):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -32,9 +41,9 @@ def delta_severity(data):
     delta = gpu_delta(data)
     hotspot = finite(data.get("gpu_hotspot_temp"), 1)
     # A cold/idle delta alone is not evidence of a cooling problem.
-    if delta is None or hotspot is None or hotspot < 80:
+    if delta is None or hotspot is None or hotspot < GPU_GAP_MIN_HOTSPOT:
         return 0
-    return 2 if delta >= 35 else 1 if delta >= 25 else 0
+    return 2 if delta >= GPU_GAP_CRITICAL_DELTA else 1 if delta >= GPU_GAP_WARN_DELTA else 0
 
 
 def interpolate(value, points):
@@ -133,7 +142,7 @@ class CaseAirflowPolicy:
             # Missing input still returns 100 above and never reaches this gate.
             if self.gap_since is None:
                 self.gap_since = now
-            if now - self.gap_since < 10:
+            if now - self.gap_since < GPU_GAP_PERSISTENCE_SECONDS:
                 demand, reason = _curve_demand(data)
             else:
                 self.history.clear()
@@ -256,7 +265,7 @@ class ThermalAdvisor:
         if gap_level:
             active.add("gpu_gap")
             start = self.since.setdefault("gpu_gap", now)
-            if now - start >= 10:
+            if now - start >= GPU_GAP_PERSISTENCE_SECONDS:
                 findings.append(Finding("gpu_gap", gap_level,
                                         f"GPU hotspot gap +{gpu_delta(data)}°C: verify sensors / check cooling"))
         cpu_hot = (finite(data.get("cpu_temp")) or 0) >= 70
