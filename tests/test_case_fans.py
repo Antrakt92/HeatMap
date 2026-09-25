@@ -110,7 +110,8 @@ class CaseFanTests(unittest.TestCase):
         for rpm, pct in ((800, 100), (1200, None), (0, 100)):
             with self.subTest(rpm=rpm, pct=pct), self.assertRaises(RuntimeError):
                 fans.verify_full_airflow(baseline, [dict(name="SYS1", rpm=rpm, control_pct=pct)])
-        fans.verify_full_airflow(baseline, [dict(name="SYS1", rpm=1200, control_pct=100)])
+        self.assertIsNone(fans.verify_full_airflow(
+            baseline, [dict(name="SYS1", rpm=1200, control_pct=100)]))
 
     def test_silent_restore_failure_detected(self):
         self.assertTrue(fans.verify_restore([dict(name="SYS1", control_pct=None)], [dict(name="SYS1", control_pct=100)]))

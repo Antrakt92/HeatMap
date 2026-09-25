@@ -12,9 +12,14 @@ from gpu_fans import CURVES, GpuRamp, GpuSession, GpuWorkerClient, PROFILE, Reco
 import gpu_fans
 
 
+# Canonical driver-curve fixture shared by the GPU worker tests. Adapters keep
+# their own recording/failure behavior; only the starting points are common.
+DEFAULT_GPU_POINTS = [[30, 23], [50, 38], [56, 53], [63, 68], [70, 100]]
+
+
 class FakeAdapter:
     def __init__(self):
-        self.state = {'points': [[30, 23], [50, 38], [56, 53], [63, 68], [70, 100]], 'zero_rpm': True}
+        self.state = {'points': copy.deepcopy(DEFAULT_GPU_POINTS), 'zero_rpm': True}
         self.events = []
         self.fail_curve = False
         self.fail_zero = False

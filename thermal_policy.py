@@ -22,6 +22,15 @@ GPU_GAP_WARN_DELTA = 25
 GPU_GAP_CRITICAL_DELTA = 35
 GPU_GAP_MIN_HOTSPOT = 80
 GPU_GAP_PERSISTENCE_SECONDS = 10
+# Fan-tach persistence: a previously spinning tachometer at 0 RPM under load
+# faults only after this many continuous seconds. Separate policy from the
+# gap window above (different sensors, coincidental value); shared by the
+# advisor, both fan workers, and the overlay sensor guide.
+TACH_PERSISTENCE_SECONDS = 10
+# Frozen-sensor fail-safe shared by both fan workers: hold full airflow after
+# this long without an update, then fail loudly and restore firmware control.
+SENSOR_STALE_DEGRADE_SECONDS = 6.0
+SENSOR_STALE_FAIL_SECONDS = 15.0
 
 
 def finite(value, minimum=0, maximum=150):
@@ -292,7 +301,7 @@ class ThermalAdvisor:
                 timer_key = "tach_missing:" + key if rpm is None else key
                 active.add(timer_key)
                 start = self.since.setdefault(timer_key, now)
-                if now - start >= 10:
+                if now - start >= TACH_PERSISTENCE_SECONDS:
                     if rpm is None:
                         findings.append(Finding(timer_key, 1, f"{label}: tachometer unavailable under load"))
                     else:

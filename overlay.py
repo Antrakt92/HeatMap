@@ -32,7 +32,8 @@ import psutil
 
 from thermal_policy import (ThermalAdvisor, gpu_delta, delta_severity, finite,
                             GPU_GAP_WARN_DELTA, GPU_GAP_CRITICAL_DELTA,
-                            GPU_GAP_MIN_HOTSPOT, GPU_GAP_PERSISTENCE_SECONDS)
+                            GPU_GAP_MIN_HOTSPOT, GPU_GAP_PERSISTENCE_SECONDS,
+                            TACH_PERSISTENCE_SECONDS)
 from case_fans import FanWorkerClient, full_rpm_reference
 from gpu_fans import GpuWorkerClient, mode_text as gpu_fan_mode_text
 from hardware_access_guard import HardwareAccessConflict, require_hardware_access
@@ -2105,11 +2106,6 @@ _METRIC_THRESHOLDS = {
     "gpu_vram_pct": (90, 98),
 }
 
-# Stall persistence mirrors ThermalAdvisor tach persistence (ten continuous
-# seconds); it is a separate policy from the Hotspot-gap window above, which
-# lives in thermal_policy.GPU_GAP_*.
-_STALL_PERSISTENCE_SECONDS = 10
-
 
 def _metric_color(value, thresholds):
     if finite(value) is None:
@@ -3256,7 +3252,7 @@ class OverlayApp:
                    f" when Hotspot >={GPU_GAP_MIN_HOTSPOT}°C;"
                    f" alarm after {GPU_GAP_PERSISTENCE_SECONDS} seconds.")
         limits += (f"\nFan stall: previously running, then 0 RPM"
-                   f" for {_STALL_PERSISTENCE_SECONDS} seconds under heat.")
+                   f" for {TACH_PERSISTENCE_SECONDS} seconds under heat.")
         _show_info_message("HeatMap sensor guide", meanings + limits +
                            "\n\nClick the warning panel to copy full diagnostics. Control sound with Alerts in the right-click menu.")
 
@@ -4092,7 +4088,7 @@ class OverlayApp:
                     data = read_sensors(computer, update_storage=update_storage)
                     data.update(volume_data)
                     if update_storage:
-                        next_storage_update = time.monotonic() + 30
+                        next_storage_update = time.monotonic() + VOLUME_REFRESH_SECONDS
                         storage_failed = bool(data.get(SENSOR_STORAGE_FAILED_KEY))
                     if storage_failed:
                         # Cached LHM reads are not evidence that a failed native

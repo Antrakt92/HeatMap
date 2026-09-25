@@ -6,12 +6,13 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import gpu_fans
+from test_gpu_fans import DEFAULT_GPU_POINTS
 
 
 class Adapter:
     def __init__(self, now):
         self.identity = {'name': 'test GPU'}
-        self.state = {'points': [[30, 23], [50, 38], [56, 53], [63, 68], [70, 100]], 'zero_rpm': True}
+        self.state = {'points': copy.deepcopy(DEFAULT_GPU_POINTS), 'zero_rpm': True}
         self.writes = []
         self.now = now
         self.close = Mock()

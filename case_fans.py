@@ -13,7 +13,9 @@ from pathlib import Path
 
 import psutil
 
-from thermal_policy import CaseAirflowPolicy, FanRamp, _curve_demand, case_fan_demand, finite
+from thermal_policy import (CaseAirflowPolicy, FanRamp, _curve_demand, case_fan_demand, finite,
+                            SENSOR_STALE_DEGRADE_SECONDS, SENSOR_STALE_FAIL_SECONDS,
+                            TACH_PERSISTENCE_SECONDS)
 from hardware_access_guard import require_hardware_access
 from shared_fans import (SHARED_NAMES, SHARED_JOURNAL_NAME, SharedRecoveryJournal,
                          open_shared_session, make_shared_computer, recover_shared_journal,
@@ -35,10 +37,10 @@ MOTHERBOARD_REDISCOVERY_LIMIT = 5
 # LHM exposes no per-sample timestamp, so case freshness is derived from the
 # sample itself: a bit-identical temperature/fan snapshot means Update()
 # delivered nothing new. Real tachometer jitter advances the signature every
-# 2 s cycle; only a frozen pipe repeats it. Thresholds mirror the GPU worker
-# (gpu_fans.py:553-560): 6 s degrade to full airflow, 15 s terminal fault.
-CASE_STALE_DEGRADE_SECONDS = 6.0
-CASE_STALE_FAIL_SECONDS = 15.0
+# 2 s cycle; only a frozen pipe repeats it. Fail-safe thresholds live in
+# thermal_policy (shared with the GPU worker).
+# Case/GPU status reports older than this are treated as stale.
+STATUS_STALE_SECONDS = 10
 
 
 class OwnerHeartbeatExpired(StartupCancelled):
@@ -228,7 +230,7 @@ class FanWorkerClient:
                     valid_pid = exited and terminal and stamp is not None and stamp >= self.started - 2
             if not valid_pid or stamp is None or stamp < self.started - 2 or time.time() - stamp < -2:
                 return {"state": "error", "reason": "Case fan controller status is stale"}
-            if not (exited and terminal) and time.time() - stamp > 10:
+            if not (exited and terminal) and time.time() - stamp > STATUS_STALE_SECONDS:
                 return {"state": "error", "reason": "Case fan controller status is stale"}
             if exited and not terminal:
                 return {"state": "error", "reason": "Case fan controller exited unexpectedly; restart Windows if RPM stay abnormal"}
@@ -692,21 +694,22 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
             if fresh:
                 last_signature, last_fresh = signature, now
             stale_age = now - last_fresh
-            if stale_age > CASE_STALE_FAIL_SECONDS:
+            if stale_age > SENSOR_STALE_FAIL_SECONDS:
                 raise RuntimeError("Case sensor readings stopped updating")
             thermal_demand, _ = case_fan_demand(data)
             if fresh:
                 demand, reason = airflow.update(data, now)
             else:
                 # Frozen snapshots must not feed rise history or earn cooling
-                # credit from repeated readings (mirrors gpu_fans.py:606-611).
+                # credit from repeated readings (same rule as gpu_fans.py:606-611;
+                # FanRamp needs no value sync because it owns its value).
                 demand, reason = case_fan_demand(data)
                 if reason == "Large GPU hotspot gap: full airflow":
                     # Frozen gap frames bypass the ten-second hold in
                     # airflow.update above; hold the temperature curves like
                     # the fresh path until stale degradation takes over below.
                     demand, reason = _curve_demand(data)
-                if stale_age > CASE_STALE_DEGRADE_SECONDS:
+                if stale_age > SENSOR_STALE_DEGRADE_SECONDS:
                     demand, reason = 100, "Stale case sensor readings: full airflow"
                 if session.last_command is not None:
                     demand = max(demand, session.last_command)
@@ -722,7 +725,7 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
                 if fan["rpm"] is None or fan["rpm"] < 200:
                     demand, reason = 100, f"{fan['name']}: tachometer unavailable/stopped"
                     start = stall_since.setdefault(fan["name"], now)
-                    if now - start >= 10:
+                    if now - start >= TACH_PERSISTENCE_SECONDS:
                         raise RuntimeError(reason)
                 else:
                     stall_since.pop(fan["name"], None)

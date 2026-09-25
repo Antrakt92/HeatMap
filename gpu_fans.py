@@ -14,9 +14,11 @@ import uuid
 import psutil
 
 from case_fans import (FanWorkerClient, OwnerHeartbeatExpired, TerminalStatusWriteError, WorkerMutex,
-                       open_status_file, replace_status_file, write_status, write_terminal_status)
+                       open_status_file, replace_status_file, write_status, write_terminal_status,
+                       STATUS_STALE_SECONDS)
 from hardware_access_guard import require_hardware_access
-from thermal_policy import finite, interpolate
+from thermal_policy import (finite, interpolate, SENSOR_STALE_DEGRADE_SECONDS, SENSOR_STALE_FAIL_SECONDS,
+                            TACH_PERSISTENCE_SECONDS)
 from startup_readiness import StartupCancelled, StartupNotReady, wait_for_readiness
 
 PROFILE = 'gigabyte-rx7900xt-hotspot90'
@@ -387,7 +389,7 @@ class GpuWorkerClient(FanWorkerClient):
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     if not (exited and terminal):
                         raise ValueError('Cannot confirm GPU fan owner')
-            if not (exited and terminal) and time.time() - stamp > 10:
+            if not (exited and terminal) and time.time() - stamp > STATUS_STALE_SECONDS:
                 raise ValueError('GPU fan status is stale; restoration unconfirmed')
             if exited and not terminal:
                 raise ValueError('GPU fan worker exited; restoration unconfirmed')
@@ -553,10 +555,10 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
             fresh = stamp is not None and (last_stamp is None or stamp > last_stamp)
             if fresh:
                 last_stamp, last_fresh = stamp, now
-            elif now - last_fresh > 6:
+            elif now - last_fresh > SENSOR_STALE_DEGRADE_SECONDS:
                 data = dict(data, gpu_core_temp=None, gpu_hotspot_temp=None, gpu_memory_temp=None)
             requested, reason = demand(data)
-            if now - last_fresh > 15:
+            if now - last_fresh > SENSOR_STALE_FAIL_SECONDS:
                 raise RuntimeError('AMD GPU metrics stopped updating')
             policy_data = data if fresh else dict(data, **dict.fromkeys(CURVES))
             assist = commission or policy.update(policy_data, now)
@@ -587,7 +589,7 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
                 # Zero RPM at takeover needs time to spin up, not an immediate blast.
                 if now - takeover_time >= 6:
                     requested, reason = 100, 'GPU fan tachometer unavailable/stopped'
-                if now - stall_since >= 10:
+                if now - stall_since >= TACH_PERSISTENCE_SECONDS:
                     raise RuntimeError('GPU fan tachometer unavailable/stopped')
             else:
                 stall_since = None
