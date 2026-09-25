@@ -13,7 +13,7 @@ from pathlib import Path
 
 import psutil
 
-from thermal_policy import CaseAirflowPolicy, FanRamp, case_fan_demand, finite
+from thermal_policy import CaseAirflowPolicy, FanRamp, _curve_demand, case_fan_demand, finite
 from hardware_access_guard import require_hardware_access
 from shared_fans import (SHARED_NAMES, SHARED_JOURNAL_NAME, SharedRecoveryJournal,
                          open_shared_session, make_shared_computer, recover_shared_journal,
@@ -701,6 +701,11 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
                 # Frozen snapshots must not feed rise history or earn cooling
                 # credit from repeated readings (mirrors gpu_fans.py:606-611).
                 demand, reason = case_fan_demand(data)
+                if reason == "Large GPU hotspot gap: full airflow":
+                    # Frozen gap frames bypass the ten-second hold in
+                    # airflow.update above; hold the temperature curves like
+                    # the fresh path until stale degradation takes over below.
+                    demand, reason = _curve_demand(data)
                 if stale_age > CASE_STALE_DEGRADE_SECONDS:
                     demand, reason = 100, "Stale case sensor readings: full airflow"
                 if session.last_command is not None:

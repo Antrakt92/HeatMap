@@ -364,6 +364,24 @@ class CaseFanTests(unittest.TestCase):
             self.assertEqual([call.args[0] for call in control.SetSoftware.call_args_list], commands)
         self.assertFalse(any("assist" in report.get("reason", "") for report in reports))
 
+    def test_frozen_gap_snapshot_holds_curves_until_stale_degradation(self):
+        # A frozen Hotspot-Core split must not bypass the ten-second gap hold
+        # that fresh samples get in airflow.update: identical repeats hold the
+        # temperature curves until stale degradation takes over.
+        gap = dict(cpu_temp=50, gpu_core_temp=45, gpu_hotspot_temp=85, gpu_memory_temp=60)
+        result, controls, reports, updates, total_reads = self.run_frozen_worker(gap)
+        self.assertEqual(result, 0)
+        self.assertGreaterEqual(total_reads, 10)
+        self.assertEqual(len(updates), 1)
+        commands = [call.args[0] for call in controls[0].SetSoftware.call_args_list]
+        self.assertTrue(commands)
+        self.assertLess(commands[0], 100)
+        self.assertTrue(all(command == commands[0] for command in commands))
+        self.assertFalse(any("Large GPU hotspot gap" in report.get("reason", "")
+                             for report in reports))
+        self.assertFalse(any("Stale case sensor readings" in report.get("reason", "")
+                             for report in reports))
+
     def test_frozen_sensor_snapshot_degrades_then_raises_terminal_fault(self):
         # The same frozen dict for >6 s forces full airflow; past 15 s the
         # worker must fail loudly instead of holding the last command forever.

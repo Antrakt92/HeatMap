@@ -536,7 +536,9 @@ Verified environment: Python 3.13, pythonnet 3.1.0, psutil 7.2.2. Exact producti
     manifest already describes a newer version. An unverified backup is left in
     place for inspection and is never loaded automatically.
     Close any running HeatMap instance before restoring: Windows cannot atomically
-   replace the CLR DLL directory while a process has its assemblies loaded.
+    replace the CLR DLL directory while a process has its assemblies loaded.
+    Preflight also rejects unrecognized extra DLLs in `lib/`: they block the
+    elevated launch until the runtime is restored to the verified set.
 
    CPU temperature and motherboard fan sensors also require the PawnIO driver.
    Obtain a compatible installer through the verified process:
