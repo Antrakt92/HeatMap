@@ -816,11 +816,76 @@ def _remove_restore_tree(path, parent):
     shutil.rmtree(path)
 
 
-def _write_restore_journal(path, phase):
+def _runtime_snapshot(path):
+    """Record the exact DLL bytes present before replacing an older runtime."""
+    if not os.path.isdir(path):
+        return None
+    files = []
+    seen = set()
+    try:
+        for name in sorted(os.listdir(path), key=str.casefold):
+            if not name.lower().endswith(".dll"):
+                continue
+            dll_path = os.path.join(path, name)
+            if name.casefold() in seen or os.path.islink(dll_path) or not os.path.isfile(dll_path):
+                raise SetupError(f"cannot snapshot runtime DLL: {dll_path}")
+            seen.add(name.casefold())
+            size = os.path.getsize(dll_path)
+            if size <= 0:
+                raise SetupError(f"cannot snapshot empty runtime DLL: {dll_path}")
+            files.append({
+                "name": name,
+                "size": size,
+                "sha256": _sha256_file(dll_path),
+            })
+    except OSError as e:
+        raise SetupError(f"could not snapshot previous runtime: {e}") from e
+    return files or None
+
+
+def _snapshot_matches_runtime(path, files):
+    if not os.path.isdir(path) or not isinstance(files, list) or not files:
+        return False
+    expected = {}
+    for entry in files:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("name"), str)
+            or not re.fullmatch(r"[^/\\]+\.dll", entry["name"], re.IGNORECASE)
+            or entry["name"].casefold() in expected
+            or isinstance(entry.get("size"), bool)
+            or not isinstance(entry.get("size"), int)
+            or entry["size"] <= 0
+            or not isinstance(entry.get("sha256"), str)
+            or not _SHA256_RE.fullmatch(entry["sha256"])
+        ):
+            return False
+        expected[entry["name"].casefold()] = entry
+    try:
+        names = [name for name in os.listdir(path) if name.lower().endswith(".dll")]
+        actual = {name.casefold(): name for name in names}
+        if len(actual) != len(names) or set(actual) != set(expected):
+            return False
+        for key, entry in expected.items():
+            dll_path = os.path.join(path, actual[key])
+            if (
+                os.path.islink(dll_path)
+                or not os.path.isfile(dll_path)
+                or os.path.getsize(dll_path) != entry["size"]
+                or _sha256_file(dll_path) != entry["sha256"]
+            ):
+                return False
+    except OSError:
+        return False
+    return True
+
+
+def _write_restore_journal(path, phase, previous_files=None):
     staging = f"{path}.tmp"
     try:
         with open(staging, "w", encoding="utf-8") as f:
-            json.dump({"schema_version": 1, "phase": phase}, f)
+            json.dump({"schema_version": 2, "phase": phase,
+                       "previous_files": previous_files}, f)
             f.flush()
             os.fsync(f.fileno())
         os.replace(staging, path)
@@ -855,13 +920,19 @@ def _recover_runtime_transaction(lib_dir=LIB_DIR, manifest_path=MANIFEST_PATH):
             raise SetupError(f"could not read runtime restore journal: {e}") from e
         if (
             not isinstance(journal, dict)
-            or journal.get("schema_version") != 1
+            or journal.get("schema_version") not in (1, 2)
             or journal.get("phase") not in ("prepared", "backup-created", "published")
+            or (journal.get("schema_version") == 2 and (
+                "previous_files" not in journal or
+                (journal["previous_files"] is not None and
+                 not isinstance(journal["previous_files"], list))))
         ):
             raise SetupError(f"invalid runtime restore journal: {journal_path}")
 
     lib_valid = _runtime_is_valid(lib_dir, manifest_path)
     backup_valid = _runtime_is_valid(backup_dir, manifest_path)
+    if not backup_valid and journal and journal.get("schema_version") == 2:
+        backup_valid = _snapshot_matches_runtime(backup_dir, journal["previous_files"])
     if lib_valid:
         if os.path.lexists(backup_dir):
             _remove_restore_tree(backup_dir, parent)
@@ -931,7 +1002,8 @@ def _publish_runtime(staging_dir, lib_dir=LIB_DIR, manifest_path=MANIFEST_PATH):
     journal_path = f"{lib_dir}.runtime-restore.json"
     if os.path.lexists(backup_dir) or os.path.exists(journal_path):
         raise SetupError("runtime transaction state was not recovered before publish")
-    _write_restore_journal(journal_path, "prepared")
+    previous_files = _runtime_snapshot(lib_dir)
+    _write_restore_journal(journal_path, "prepared", previous_files)
     if os.path.lexists(lib_dir):
         try:
             os.replace(lib_dir, backup_dir)
@@ -945,7 +1017,7 @@ def _publish_runtime(staging_dir, lib_dir=LIB_DIR, manifest_path=MANIFEST_PATH):
                 f"could not move the current runtime; close HeatMap and retry: {e}"
             ) from e
         try:
-            _write_restore_journal(journal_path, "backup-created")
+            _write_restore_journal(journal_path, "backup-created", previous_files)
         except SetupError:
             os.replace(backup_dir, lib_dir)
             try:

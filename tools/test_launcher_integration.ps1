@@ -116,6 +116,8 @@ try {
     )
     [IO.File]::WriteAllText($launcher, $launcherText, [Text.UTF8Encoding]::new($false))
     New-Item -ItemType File -Path (Join-Path $checkout "overlay.py") | Out-Null
+    # Exercise the ordinary launch path; Codex task relay has separate tests.
+    'raise SystemExit(0)' | Set-Content -LiteralPath (Join-Path $checkout "codex_detach.py") -Encoding utf8
 
     @'
 import os

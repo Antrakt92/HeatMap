@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.8 — 2026-09-25
+
+- Restore the exact previous DLL set after an interrupted runtime upgrade only
+  when its saved hashes match; leave damaged backups for inspection.
+- Let a Codex-started launcher hand startup to the independent Windows logon
+  task, so closing Codex does not end the overlay.
+- Keep sensor monitoring available alongside recognized hardware tools while
+  pausing fan control when ownership is uncertain.
+- Exercise clean-room runtime restoration on Python 3.10, 3.13, and 3.14 in CI.
+
 ## 1.2.7 — 2026-09-18
 
 - Keep sensors and fan control running when a recognized GCC compiler is used.

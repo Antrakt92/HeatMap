@@ -522,9 +522,14 @@ Verified environment: Python 3.13, pythonnet 3.1.0, psutil 7.2.2. Exact producti
    `setup.py` restores the complete Windows runtime from the exact NuGet assets
    pinned in `runtime-lock.json`. Before replacing `lib/`, it verifies each
    package's SHA-256, each DLL's exact path/hash/size, and the entire staged
-   runtime against `lib_manifest.json`; if any check fails, the previous working
-   runtime is preserved. The explicit equivalent is `python setup.py --restore-runtime`.
-   Close any running HeatMap instance before restoring: Windows cannot atomically
+    runtime against `lib_manifest.json`; if any check fails, the previous working
+    runtime is preserved. The explicit equivalent is `python setup.py --restore-runtime`.
+    An interrupted replacement records the exact previous DLL set in a durable
+    restore journal before moving it. On the next restore, setup verifies those
+    bytes before recovering the previous set, including when the checked-out
+    manifest already describes a newer version. An unverified backup is left in
+    place for inspection and is never loaded automatically.
+    Close any running HeatMap instance before restoring: Windows cannot atomically
    replace the CLR DLL directory while a process has its assemblies loaded.
 
    CPU temperature and motherboard fan sensors also require the PawnIO driver.

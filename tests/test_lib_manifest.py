@@ -512,6 +512,86 @@ class LibManifestTests(unittest.TestCase):
             self.assertFalse(os.path.exists(backup_dir))
             self.assertFalse(os.path.exists(journal))
 
+    def test_recover_runtime_restores_previous_version_after_interrupted_upgrade(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = _write_runtime_fixture(tmpdir)
+            lib_dir = fixture["lib_dir"]
+            os.mkdir(lib_dir)
+            old_path = os.path.join(lib_dir, TEST_DLL_NAME)
+            with open(old_path, "wb") as f:
+                f.write(b"previous version")
+            staging_dir = os.path.join(tmpdir, "staging")
+            os.mkdir(staging_dir)
+            with open(os.path.join(staging_dir, TEST_DLL_NAME), "wb") as f:
+                f.write(TEST_DLL_DATA)
+
+            real_replace = os.replace
+            def interrupt_after_backup(source, destination):
+                if source == staging_dir and destination == lib_dir:
+                    raise KeyboardInterrupt("interrupted before publish")
+                return real_replace(source, destination)
+
+            with mock.patch.object(setup.os, "replace", side_effect=interrupt_after_backup):
+                with self.assertRaises(KeyboardInterrupt):
+                    setup._publish_runtime(staging_dir, lib_dir=lib_dir,
+                                           manifest_path=fixture["manifest_path"])
+
+            backup_dir = f"{lib_dir}.runtime-backup"
+            self.assertTrue(os.path.isdir(backup_dir))
+            setup._recover_runtime_transaction(lib_dir=lib_dir,
+                                               manifest_path=fixture["manifest_path"])
+            with open(old_path, "rb") as f:
+                self.assertEqual(f.read(), b"previous version")
+            self.assertFalse(os.path.exists(backup_dir))
+
+    def test_recover_runtime_rejects_tampered_previous_version_backup(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = _write_runtime_fixture(tmpdir)
+            lib_dir = fixture["lib_dir"]
+            os.mkdir(lib_dir)
+            with open(os.path.join(lib_dir, TEST_DLL_NAME), "wb") as f:
+                f.write(b"previous version")
+            staging_dir = os.path.join(tmpdir, "staging")
+            os.mkdir(staging_dir)
+            with open(os.path.join(staging_dir, TEST_DLL_NAME), "wb") as f:
+                f.write(TEST_DLL_DATA)
+
+            real_replace = os.replace
+            def interrupt_after_backup(source, destination):
+                if source == staging_dir and destination == lib_dir:
+                    raise KeyboardInterrupt("interrupted before publish")
+                return real_replace(source, destination)
+
+            with mock.patch.object(setup.os, "replace", side_effect=interrupt_after_backup):
+                with self.assertRaises(KeyboardInterrupt):
+                    setup._publish_runtime(staging_dir, lib_dir=lib_dir,
+                                           manifest_path=fixture["manifest_path"])
+
+            backup_dir = f"{lib_dir}.runtime-backup"
+            with open(os.path.join(backup_dir, TEST_DLL_NAME), "wb") as f:
+                f.write(b"tampered")
+            with self.assertRaisesRegex(setup.SetupError, "could not be recovered"):
+                setup._recover_runtime_transaction(lib_dir=lib_dir,
+                                                   manifest_path=fixture["manifest_path"])
+            self.assertTrue(os.path.isdir(backup_dir))
+
+    def test_recover_runtime_rejects_old_journal_with_unverified_previous_version(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = _write_runtime_fixture(tmpdir)
+            backup_dir = f"{fixture['lib_dir']}.runtime-backup"
+            os.mkdir(backup_dir)
+            with open(os.path.join(backup_dir, TEST_DLL_NAME), "wb") as f:
+                f.write(b"previous version")
+            journal = f"{fixture['lib_dir']}.runtime-restore.json"
+            with open(journal, "w", encoding="utf-8") as f:
+                json.dump({"schema_version": 1, "phase": "backup-created"}, f)
+
+            with self.assertRaisesRegex(setup.SetupError, "could not be recovered"):
+                setup._recover_runtime_transaction(lib_dir=fixture["lib_dir"],
+                                                   manifest_path=fixture["manifest_path"])
+            self.assertTrue(os.path.isdir(backup_dir))
+            self.assertTrue(os.path.isfile(journal))
+
     def test_recover_runtime_prefers_valid_published_runtime_and_cleans_backup(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fixture = _write_runtime_fixture(tmpdir)
