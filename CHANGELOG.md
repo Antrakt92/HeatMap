@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.3.0 — 2026-09-26
+
+- Share fan-worker infrastructure through a new dependency-free `fan_common`
+  module: heartbeat watchdog, status validation behind a contract matrix,
+  terminal compact-key policy, commissioning wait-loop, journal envelope, and
+  restore retry. Behavior is unchanged; the 19-row status contract locks every
+  intentional case/GPU difference (command bounds, channel checks, standby,
+  error wording and order).
+- Read GPU load from all D3D engine counters (3D, compute, copy, video) as the
+  README describes; keep AMD temperature aliases in a tested table; beep on
+  VRAM alerts; ignore non-finite readings in alerts and recorded peaks; build
+  the sensor guide from the live threshold tables.
+- Harden automatic fan control: hold full airflow on frozen sensor readings
+  and fault loudly after 15 seconds; require a 10-second continuous
+  Hotspot–Core gap before gap-driven full airflow (including frozen frames);
+  verify shared-EC PWM duties on restore; ride through transient command
+  feedback loss while keeping instant faults for real conflicts; accumulate
+  restore errors across the retry instead of overwriting them.
+- Recover an interrupted shared-controller takeover from a journaled baseline
+  on the next start, and restore verified firmware control explicitly.
+- Verify the signed shared fan module during preflight and at overlay startup
+  (tampering disables the shared profile instead of failing later); reject
+  unrecognized extra DLLs before elevated launch; re-check for a newly
+  started overlay before replacing the runtime; detect duplicate pins,
+  sanitize installer metadata, cap download sizes, and clean up restore locks.
+- Keep fresh volume capacity rows visible while hardware readings are stale;
+  retry the peek check when the window is mid-transition; warn on high disk
+  usage even when free space is unknown; document the 200 RPM case-assist
+  floor; match CPU fans by sensor identity across duplicate chip names.
+- Show the expected PawnIO installer hash in the repair dialog and re-verify
+  size and hash at presentation time; distinguish launcher relay crashes from
+  successful relays by exit code.
+- 868 automated tests pass (up from 799), including the new status contract
+  matrix, supply-chain guards, and hardware-failure simulations. Manual
+  reboot, gaming, Explorer and multi-monitor checks remain informational
+  follow-ups as defined in `AGENTS.md`.
+
 ## 1.2.8 — 2026-09-25
 
 - Restore the exact previous DLL set after an interrupted runtime upgrade only

@@ -39,7 +39,7 @@ from gpu_fans import GpuWorkerClient, mode_text as gpu_fan_mode_text
 from hardware_access_guard import HardwareAccessConflict, require_hardware_access
 from storage_identity import volume_disk_number
 
-VERSION = "1.2.8"
+VERSION = "1.3.0"
 
 
 # --- Paths ---
