@@ -1908,12 +1908,47 @@ class OverlayHelperTests(unittest.TestCase):
         with (
             mock.patch.object(overlay.os, "startfile", create=True) as startfile,
             mock.patch.object(overlay, "_show_info_message") as show_info,
+            mock.patch.object(overlay, "_pawnio_installer_metadata", return_value=None),
         ):
             app._finish_pawnio_repair(True, r"C:\verified\PawnIO.exe")
 
         self.assertFalse(app._pawnio_repair_running)
         startfile.assert_called_once_with(r"C:\verified")
         self.assertIn("hardware-smoke", show_info.call_args.args[1])
+
+    def test_finish_pawnio_repair_rejects_changed_installer(self):
+        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.running = True
+        app._pawnio_repair_running = True
+        app._set_menu_label = lambda key, label: None
+        metadata = {"size": 10, "sha256": "expected"}
+        with (
+            mock.patch.object(overlay, "_show_error_message") as show_error,
+            mock.patch.object(overlay, "_pawnio_installer_metadata", return_value=metadata),
+            mock.patch.object(overlay.os.path, "getsize", return_value=10),
+            mock.patch("setup._sha256_file", return_value="tampered"),
+        ):
+            app._finish_pawnio_repair(True, r"C:\verified\PawnIO.exe")
+
+        self.assertIn("changed after verification", show_error.call_args.args[1])
+        self.assertTrue(app._pawnio_repair_running is False)
+
+    def test_finish_pawnio_repair_shows_expected_hash(self):
+        app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.running = True
+        app._pawnio_repair_running = True
+        app._set_menu_label = lambda key, label: None
+        metadata = {"size": 10, "sha256": "expected"}
+        with (
+            mock.patch.object(overlay.os, "startfile", create=True),
+            mock.patch.object(overlay, "_show_info_message") as show_info,
+            mock.patch.object(overlay, "_pawnio_installer_metadata", return_value=metadata),
+            mock.patch.object(overlay.os.path, "getsize", return_value=10),
+            mock.patch("setup._sha256_file", return_value="expected"),
+        ):
+            app._finish_pawnio_repair(True, r"C:\verified\PawnIO.exe")
+
+        self.assertIn("expected", show_info.call_args.args[1])
 
     def test_sensor_loop_reinitializes_after_repeated_sensor_reinit_hints(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)

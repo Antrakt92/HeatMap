@@ -11,60 +11,27 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import overlay
 from enable_case_fans import close_previous_overlay
+from fan_common import verify_loop
 from gpu_fans import GpuWorkerClient
-from startup_readiness import STARTUP_TIMEOUT_SECONDS
 from thermal_policy import finite
 
 
+def _never_acquired(restored):
+    return (restored.get('control_attempted') is False and restored.get('baseline') is None
+            and restored.get('recovery_pending') is False and not restored.get('restore_errors'))
+
+
 def verify(client, samples, duration=8):
-    if finite(duration, 0, 3600) is None:
-        raise ValueError('Verification duration must be finite and between 0 and 3600 seconds')
-    client.start()
-    active_since = None
-    first_report = None
-    last_report = None
-    failure = None
-    try:
-        deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS + 30 + duration
-        while time.monotonic() < deadline:
-            status = client.poll()
-            if status['state'] in ('error', 'stopped', 'off'):
-                raise RuntimeError(status.get('reason', 'GPU fan controller stopped'))
-            if status['state'] == 'active':
-                if finite(status.get('verified_full_rpm'), 2500, 10000) is None:
-                    raise RuntimeError('GPU full-airflow verification evidence is missing or invalid')
-                stamp = finite(status.get('time'), 0, 1e12)
-                if stamp is None or (last_report is not None and stamp < last_report):
-                    raise RuntimeError('GPU verification timestamp is invalid or moved backward')
-                if last_report is None or stamp > last_report:
-                    samples.append(status)
-                    last_report = stamp
-                    if active_since is None:
-                        active_since, first_report = time.monotonic(), stamp
-                    if (time.monotonic() - active_since >= duration
-                            and stamp - first_report >= duration):
-                        break
-            else:
-                active_since = first_report = None
-            time.sleep(2)
-        else:
-            raise RuntimeError('GPU fan verification timed out')
-    except Exception as exc:
-        failure = exc
-    finally:
-        client.stop()
-        if client.process is not None:
-            client.process.wait(timeout=20)
-    restored = client.poll()
-    if (failure and restored.get('control_attempted') is False
-            and restored.get('baseline') is None and restored.get('recovery_pending') is False
-            and not restored.get('restore_errors')):
-        raise failure
-    if not restored.get('restore_confirmed') or restored.get('restore_errors'):
-        raise RuntimeError('GPU fan restoration not confirmed: ' + str(restored))
-    if failure:
-        raise failure
-    return restored
+    return verify_loop(
+        client, samples, duration,
+        evidence_ok=lambda status: finite(status.get('verified_full_rpm'), 2500, 10000) is not None,
+        never_acquired=_never_acquired,
+        stopped_message='GPU fan controller stopped',
+        evidence_message='GPU full-airflow verification evidence is missing or invalid',
+        timestamp_message='GPU verification timestamp is invalid or moved backward',
+        timeout_message='GPU fan verification timed out',
+        restore_message='GPU fan restoration not confirmed: ',
+    )
 
 
 def main():

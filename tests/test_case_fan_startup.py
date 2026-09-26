@@ -6,6 +6,7 @@ from unittest import mock
 
 import case_fans as fans
 import overlay
+from fan_common import OwnerHeartbeat
 from test_case_fans import fixture
 
 
@@ -35,7 +36,10 @@ class StartupDiscoveryTests(unittest.TestCase):
         with (mock.patch.object(fans, "write_status", side_effect=publish),
               mock.patch.object(fans, "require_hardware_access") as guard,
               mock.patch.object(fans.time, "monotonic", side_effect=lambda: self.clock[0])):
-            result = fans.wait_for_controls(self.computer, snapshot, self.stop, self.owner, [100], "unused", timeout=4)
+            heartbeat = OwnerHeartbeat(self.stop)
+            heartbeat.last_seen = 100.0
+            result = fans.wait_for_controls(self.computer, snapshot, self.stop, self.owner,
+                                            heartbeat, "unused", timeout=4)
         return result, guard.call_count
 
     def test_busy_first_read_then_tach_activation_succeeds_without_writes(self):
@@ -101,7 +105,9 @@ class StartupDiscoveryTests(unittest.TestCase):
                       mock.patch.object(fans.time, "monotonic", return_value=120 if cause == "heartbeat" else 100),
                       mock.patch.object(fans, "require_hardware_access", side_effect=RuntimeError("conflict") if cause == "conflict" else None),
                       self.assertRaises(RuntimeError)):
-                    fans.wait_for_controls(self.computer, read, self.stop, self.owner, [100], "unused")
+                    heartbeat = OwnerHeartbeat(self.stop)
+                    heartbeat.last_seen = 100.0
+                    fans.wait_for_controls(self.computer, read, self.stop, self.owner, heartbeat, "unused")
                 self.assertEqual(read.call_count, 0)
                 for control in self.controls:
                     control.SetSoftware.assert_not_called()

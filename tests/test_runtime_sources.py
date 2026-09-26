@@ -48,6 +48,18 @@ class RuntimeSourceTests(unittest.TestCase):
             with self.assertRaisesRegex(setup.SetupError, "thumbprint"):
                 setup._load_runtime_sources(source_path)
 
+    def test_runtime_sources_reject_path_escaping_pawnio_version(self):
+        with open(setup.RUNTIME_SOURCES_PATH, "r", encoding="utf-8") as f:
+            sources = json.load(f)
+        sources["pawnio"]["version"] = "../../x"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = os.path.join(tmpdir, "runtime_sources.json")
+            with open(source_path, "w", encoding="utf-8") as f:
+                json.dump(sources, f)
+
+            with self.assertRaisesRegex(setup.SetupError, "plain dotted version"):
+                setup._load_runtime_sources(source_path)
+
     def test_lhm_bridge_checks_add_reference_and_required_types(self):
         calls = []
         clr = SimpleNamespace(AddReference=lambda path: calls.append(path))

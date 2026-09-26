@@ -920,6 +920,9 @@ def _classify_autostart_task(
         and definition.principal_id == "Author"
         and _normalized_identity(definition.principal_user_id) == _normalized_identity(user_id)
         and definition.logon_type == "InteractiveToken"
+        # An absent RunLevel defaults to LeastPrivilege on current Windows;
+        # re-audit this assumption if Task Scheduler semantics ever change,
+        # since silent elevation would bypass the UAC consent this task relies on.
         and definition.run_level in ("", "LeastPrivilege")
         and definition.total_trigger_count == 1
         and definition.logon_trigger_count == 1
@@ -1579,11 +1582,28 @@ def _board_fan_name(board_name, sensor_name, identifier):
 def _select_cpu_fan(fan_sensors):
     if not fan_sensors:
         return None
-    for name, val in fan_sensors:
+    for entry in fan_sensors:
+        name, val = entry[0], entry[1]
         if _is_primary_cpu_fan_name(name):
-            return name, val
+            sensor_id = entry[2] if len(entry) > 2 else None
+            return name, val, sensor_id
     # Unknown Fan #1/System Fan #1 cannot be assumed to be a CPU cooler.
     return None
+
+
+def _match_board_fan(board_fans, name, rpm, sensor_id):
+    """Prefer the native sensor identity; name+RPM only breaks ties.
+
+    Duplicate tachometer names across chips with identical RPM resolve to
+    the originating chip instead of whichever enumerates first.
+    """
+    candidates = [fan for fan in board_fans
+                  if fan["name"].lower() == name and fan["rpm"] == rpm]
+    for fan in candidates:
+        if sensor_id is not None and fan.get("id") == sensor_id:
+            return fan
+    return next(fan for fan in board_fans
+                if fan["name"].lower() == name and fan["rpm"] == rpm)
 
 
 def _select_cpu_fan_control(control_sensors, fan_name, has_cpu_fan):
@@ -1961,7 +1981,7 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
                 })
                 board_fans.append(data["fans"][-1])
                 if val is not None:
-                    fan_sensors.append((name, val))
+                    fan_sensors.append((name, val, identifier))
                     if "cpu" in name and "optional" in name:
                         data["cpu_optional_fan"] = val
                         data["cpu_optional_fan_id"] = data["fans"][-1]["id"]
@@ -1989,9 +2009,8 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
         if data["cpu_fan"] is None:
             selected_fan = _select_cpu_fan(fan_sensors)
             if selected_fan is not None:
-                _name, data["cpu_fan"] = selected_fan
-                cpu_fan = next(fan for fan in board_fans
-                               if fan["name"].lower() == _name and fan["rpm"] == data["cpu_fan"])
+                _name, data["cpu_fan"], sensor_id = selected_fan
+                cpu_fan = _match_board_fan(board_fans, _name, data["cpu_fan"], sensor_id)
                 data["cpu_fan_id"] = cpu_fan["id"]
                 # Native identities disambiguate duplicate names across chips.
                 # Name matching remains a fallback only for unidentified sensors.
@@ -2492,6 +2511,19 @@ def _retire_unsupported_case_fan_profile(config):
     return True
 
 
+def _retire_broken_shared_module(config):
+    """Disable the shared four-fan profile when its signed module fails verification."""
+    if not config.get("case_fans_shared_enabled"):
+        return False
+    try:
+        from pawnio_shared import verified_module
+        verified_module()
+    except Exception:
+        config["case_fans_shared_enabled"] = False
+        return True
+    return False
+
+
 def _back_up_case_fan_config():
     if not os.path.isfile(CONFIG_PATH):
         return None
@@ -2647,6 +2679,35 @@ def prepare_verified_pawnio_installer():
         return False, str(e)
 
 
+def _pawnio_installer_metadata():
+    try:
+        from setup import _load_runtime_sources
+        metadata = _load_runtime_sources()["pawnio"]
+        if isinstance(metadata, dict):
+            return metadata
+    except Exception:
+        log.warning("Could not load PawnIO metadata for installer display", exc_info=True)
+    return None
+
+
+def _reverify_pawnio_installer(path, metadata):
+    """Fast size+hash recheck at presentation time (no Authenticode subprocess).
+
+    The download directory is user-writable and time passes between the
+    background verification and the manual installer run. Returns an error
+    string when the file no longer matches, else None.
+    """
+    try:
+        from setup import _sha256_file
+        if os.path.getsize(path) != metadata.get("size"):
+            return "installer size changed after verification"
+        if _sha256_file(path) != metadata.get("sha256"):
+            return "installer hash changed after verification"
+    except OSError as exc:
+        return f"installer unreadable after verification: {exc}"
+    return None
+
+
 # --- Main overlay class ---
 class OverlayApp:
     def __init__(self, autostart_result=None):
@@ -2654,7 +2715,9 @@ class OverlayApp:
         self.computer = None
         self.config, config_warning = load_config_result()
         self._config_status = STATUS_CONFIG_ADJUSTED if config_warning else None
-        if _retire_unsupported_case_fan_profile(self.config):
+        retired_board = _retire_unsupported_case_fan_profile(self.config)
+        retired_module = _retire_broken_shared_module(self.config)
+        if retired_board or retired_module:
             try:
                 backup = _back_up_case_fan_config()
             except OSError:
@@ -2664,7 +2727,9 @@ class OverlayApp:
                 if not saved:
                     log.warning("Could not persist disabled case-fan profile: %s", message)
                 else:
-                    log.warning("Retired unsupported case-fan profile; previous config: %s", backup)
+                    reason = ("broken shared fan module" if retired_module and not retired_board
+                              else "unsupported case-fan profile")
+                    log.warning("Retired %s; previous config: %s", reason, backup)
             self._config_status = STATUS_CONFIG_ADJUSTED
         try:
             self._monitor_coexistence = require_hardware_access("monitor") == "shared"
@@ -3311,6 +3376,17 @@ class OverlayApp:
             _show_error_message("PawnIO repair", f"Could not prepare PawnIO installer:\n{detail}")
             return
         installer_path = os.path.abspath(detail)
+        metadata = _pawnio_installer_metadata()
+        hash_note = ""
+        if metadata is not None:
+            changed = _reverify_pawnio_installer(installer_path, metadata)
+            if changed is not None:
+                _show_error_message("PawnIO repair",
+                                    f"Installer changed after verification:\n{changed}\n"
+                                    "Re-run Prepare verified PawnIO repair.")
+                return
+            hash_note = (f"\nExpected SHA-256:\n{metadata.get('sha256')}\n"
+                         "If time has passed, re-run Prepare to re-verify before running it.\n")
         try:
             os.startfile(os.path.dirname(installer_path))
         except Exception:
@@ -3318,7 +3394,8 @@ class OverlayApp:
         _show_info_message(
             "PawnIO repair ready",
             "Verified PawnIO installer is ready.\n\n"
-            f"{installer_path}\n\n"
+            f"{installer_path}\n"
+            f"{hash_note}"
             "Close HeatMap, run the installer as administrator, restart Windows, "
             "then run: python setup.py --hardware-smoke",
         )
@@ -3683,6 +3760,10 @@ class OverlayApp:
             ow = self.root.winfo_width()
             oh = self.root.winfo_height()
         except tk.TclError:
+            # Window in transition (shell change, destroy): re-poll instead of
+            # stranding the widget raised with no further checks scheduled.
+            log.debug("Peek geometry unavailable during window transition", exc_info=True)
+            retry()
             return
         over_overlay = ox <= mx <= ox + ow and oy <= my <= oy + oh
 
@@ -4263,7 +4344,10 @@ class OverlayApp:
 
         if sample_time is not None and time.monotonic() - sample_time > SENSOR_STALE_SECONDS:
             self._set_sensor_status(SENSOR_STATUS_STALE)
-            self._show_sensor_error(text="--", color="#888888")
+            # Stale hardware readings must not hide fresh volume capacity:
+            # same volume_data path as the error branch below.
+            self._show_sensor_error(text="--", color="#888888",
+                                    volume_data=_fresh_volume_data(volume_snapshot, time.monotonic()))
             self.root.after(2000, self.update_ui)
             return
 

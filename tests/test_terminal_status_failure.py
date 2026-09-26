@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import case_fans
+import fan_common
 import gpu_fans
 import overlay
 from test_case_fans import fixture
@@ -53,6 +54,33 @@ class TerminalStatusFailureTests(unittest.TestCase):
                 self.assertTrue(status['restore_confirmed'])
                 self.assertIn(details['reason'], status['reason'])
                 self.assertNotIn('stop_cause', status)
+
+    def test_gpu_compact_report_excludes_case_only_channel_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / 'status.json')
+            published = []
+
+            def publish(filename, state, **fields):
+                if not published:
+                    published.append(None)
+                    raise OSError(errno.ENOSPC, 'No space left on device')
+                published.append(dict(state=state, **fields))
+                case_fans.write_status(filename, state, **fields)
+
+            with patch.object(case_fans.time, 'time', return_value=100):
+                error = case_fans.write_terminal_status(
+                    path, 'stopped', publisher=publish, profile=gpu_fans.PROFILE,
+                    compact_keys=fan_common.GPU_TERMINAL_KEYS,
+                    reason='Saved GPU fan curve restored', restore_confirmed=True,
+                    restore_errors=[], control_attempted=True,
+                    controlled_channels=['System Fan #1'], firmware_channels=[],
+                    recovery_pending=False, settings_conflict=None)
+            compact = published[1]
+            self.assertIn('No space left', error)
+            self.assertNotIn('controlled_channels', compact)
+            self.assertNotIn('firmware_channels', compact)
+            self.assertIn('recovery_pending', compact)
+            self.assertIn('Saved GPU fan curve restored', compact['reason'])
 
     def run_controller(self, kind, failure, restore_fails=False):
         module = case_fans if kind == 'case' else gpu_fans
@@ -178,6 +206,25 @@ class TerminalStatusFailureTests(unittest.TestCase):
                 terminal = [item for item in attempts if 'restore_confirmed' in item]
                 self.assertEqual(len(terminal), 2)
                 self.assertIn('status_publication_error', attempts[-1])
+
+    def test_restore_retry_keeps_first_errors(self):
+        restore = Mock(side_effect=[["first fault"], []])
+        with patch.object(fan_common.time, "sleep") as sleep:
+            self.assertEqual(["first fault"], fan_common.restore_with_retry(restore))
+        sleep.assert_called_once_with(0.2)
+
+    def test_restore_retry_adds_changed_second_errors(self):
+        restore = Mock(side_effect=[["first fault"], ["second fault"]])
+        with patch.object(fan_common.time, "sleep"):
+            self.assertEqual(["first fault", "second fault"],
+                             fan_common.restore_with_retry(restore))
+
+    def test_clean_restore_skips_retry(self):
+        restore = Mock(return_value=[])
+        with patch.object(fan_common.time, "sleep") as sleep:
+            self.assertEqual([], fan_common.restore_with_retry(restore))
+        sleep.assert_not_called()
+        restore.assert_called_once()
 
 
 if __name__ == '__main__':

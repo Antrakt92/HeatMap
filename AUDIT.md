@@ -279,8 +279,12 @@ Do not refactor these paths cosmetically: each dedup must preserve exact
 behavior and ride on the existing paired suites (`test_controller_heartbeat`,
 `test_fan_commission_audit`, `test_fan_activation`, `test_thermal_advisor`,
 `test_airflow_assist`, `test_gpu_conflict_recovery`, `test_shared_fans`).
-Single-sourced already: `OwnerHeartbeatExpired`, status-file helpers,
+Single-sourced already: `fan_common` (heartbeat, status validation, terminal
+compact keys, commission wait-loop, journal envelope), status-file helpers,
 `thermal_policy.GPU_GAP_*` gap constants, shared-EC recovery journal format.
+Deliberately NOT unified: `FanRamp` vs `GpuRamp` (floors 60/30, holds 15/10,
+deadband 3/0, int/fractional vs float math are per-hardware policy; the
+classes cross-reference each other and frozen test tables pin the numbers).
 
 ## Parking - Update LibreHardwareMonitor and PawnIO atomically to the next bundle
 

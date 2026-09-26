@@ -148,6 +148,17 @@ class LibManifestTests(unittest.TestCase):
         runtime_check.assert_not_called()
         preflight.assert_not_called()
 
+    def test_cli_verify_maps_unexpected_module_error_to_exit_code(self):
+        with (
+            mock.patch.object(setup, "verify_lib_manifest", return_value=(True, [])),
+            mock.patch.object(setup, "_print_manifest_result"),
+            mock.patch("pawnio_shared.verified_module", side_effect=TypeError("synthetic shape")),
+            mock.patch("builtins.print") as printed,
+        ):
+            self.assertEqual(setup.main(["--verify"]), 1)
+        output = "\n".join(call.args[0] for call in printed.call_args_list)
+        self.assertIn("Shared fan module verification failed", output)
+
     def test_preflight_main_returns_success_when_checks_pass(self):
         with (
             mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),
@@ -221,6 +232,20 @@ class LibManifestTests(unittest.TestCase):
         )
 
         self.assertEqual(messages, [])
+
+    def test_known_good_versions_reject_duplicate_pins(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "constraints.txt")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("psutil==7.2.2\npsutil==9.9.9\n")
+            with self.assertRaisesRegex(ValueError, "duplicate constraint for package: psutil"):
+                setup._read_known_good_versions(path)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "constraints.txt")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("psutil==7.2.2\nPSUTIL==7.2.2\n")
+            with self.assertRaisesRegex(ValueError, "duplicate constraint"):
+                setup._read_known_good_versions(path)
 
     def test_preflight_main_warns_but_succeeds_when_pawnio_driver_missing(self):
         with (
@@ -419,6 +444,39 @@ class LibManifestTests(unittest.TestCase):
 
             urlopen.assert_not_called()
             recover.assert_not_called()
+
+    def test_restore_runtime_rejects_overlay_started_during_download(self):
+        package_data = _zip_bytes({TEST_PACKAGE_DLL_PATH: TEST_DLL_DATA})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = _write_runtime_fixture(tmpdir, package_data=package_data)
+            os.mkdir(fixture["lib_dir"])
+            current_path = os.path.join(fixture["lib_dir"], "current.dll")
+            with open(current_path, "wb") as f:
+                f.write(b"current")
+
+            with (
+                mock.patch.object(setup, "LIB_DIR", fixture["lib_dir"]),
+                mock.patch.object(setup, "_is_overlay_running", side_effect=[False, True]),
+                mock.patch.object(setup, "_recover_runtime_transaction"),
+            ):
+                with self.assertRaisesRegex(setup.SetupError, "started while the runtime was downloading"):
+                    setup.restore_runtime(**fixture, urlopen=lambda *_a, **_k: _FakeResponse(package_data))
+
+            with open(current_path, "rb") as f:
+                self.assertEqual(f.read(), b"current")
+
+    def test_restore_runtime_rejects_oversized_download(self):
+        package_data = _zip_bytes({TEST_PACKAGE_DLL_PATH: TEST_DLL_DATA})
+
+        class _EndlessResponse(_FakeResponse):
+            def read(self, size=-1):
+                return b"x" * (size if size is not None and size > 0 else 1024 * 1024)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = _write_runtime_fixture(tmpdir, package_data=package_data)
+            with mock.patch.object(setup, "_MAX_NUPKG_BYTES", 2 * 1024 * 1024):
+                with self.assertRaisesRegex(setup.SetupError, "exceeds"):
+                    setup.restore_runtime(**fixture, urlopen=lambda *_a, **_k: _EndlessResponse(b""))
 
     def test_restore_runtime_rejects_bad_zip_after_package_hash_passes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -735,8 +793,12 @@ class _FakeResponse:
     def __exit__(self, exc_type, exc, tb):
         return False
 
-    def read(self):
-        return self._data
+    def read(self, size=-1):
+        if size is not None and size >= 0:
+            chunk, self._data = self._data[:size], self._data[size:]
+            return chunk
+        data, self._data = self._data, b""
+        return data
 
 
 if __name__ == "__main__":

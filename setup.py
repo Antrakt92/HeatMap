@@ -33,6 +33,9 @@ RUNTIME_SOURCES_PATH = os.path.join(APP_DIR, "runtime_sources.json")
 RUNTIME_LOCK_PATH = os.path.join(APP_DIR, "runtime-lock.json")
 CONSTRAINTS_PATH = os.path.join(APP_DIR, "constraints-known-good.txt")
 MANIFEST_VERSION = 1
+# Refuse absurdly large NuGet downloads before buffering them: packages are a
+# few megabytes; anything beyond this is a compromised origin, not an update.
+_MAX_NUPKG_BYTES = 256 * 1024 * 1024
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MANIFEST_DLL_RE = re.compile(r"^lib/[^/\\]+\.dll$")
 _SOURCE_TYPES = {"runtime-lock"}
@@ -222,6 +225,7 @@ def _print_manifest_result(ok, messages):
 
 def _read_known_good_versions(constraints_path=CONSTRAINTS_PATH):
     versions = {}
+    seen = set()
     with open(constraints_path, "r", encoding="utf-8") as constraints_file:
         for raw_line in constraints_file:
             line = raw_line.partition("#")[0].strip()
@@ -232,6 +236,9 @@ def _read_known_good_versions(constraints_path=CONSTRAINTS_PATH):
             package_name, version = (part.strip() for part in line.split("==", 1))
             if not package_name or not version:
                 raise ValueError(f"invalid exact constraint: {line}")
+            if package_name.casefold() in seen:
+                raise ValueError(f"duplicate constraint for package: {package_name}")
+            seen.add(package_name.casefold())
             versions[package_name] = version
     if not versions:
         raise ValueError("known-good constraints are empty")
@@ -407,6 +414,9 @@ def _load_runtime_sources(path=None, runtime_lock_path=RUNTIME_LOCK_PATH):
     for field in ("version", "compatible_lhm", "url", "sha256"):
         if not isinstance(pawnio.get(field), str) or not pawnio[field].strip():
             raise SetupError(f"runtime sources PawnIO {field} must be a non-empty string")
+    # The version lands in a download filename; reject separators and escapes.
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", pawnio["version"]):
+        raise SetupError("runtime sources PawnIO version must be a plain dotted version")
     if not pawnio["url"].startswith("https://"):
         raise SetupError("runtime sources PawnIO URL must use HTTPS")
     if not _SHA256_RE.match(pawnio["sha256"]):
@@ -446,10 +456,6 @@ def _load_runtime_sources(path=None, runtime_lock_path=RUNTIME_LOCK_PATH):
         raise SetupError("runtime sources shared fan module size must be a positive integer")
     if not isinstance(shared.get("sha256"), str) or not _SHA256_RE.match(shared["sha256"]):
         raise SetupError("runtime sources shared fan module sha256 is invalid")
-    if "archive_sha256" in shared and (
-        not isinstance(shared["archive_sha256"], str) or not _SHA256_RE.match(shared["archive_sha256"])
-    ):
-        raise SetupError("runtime sources shared fan module archive_sha256 is invalid")
     if "source_commit" in shared and (
         not isinstance(shared["source_commit"], str)
         or not re.fullmatch(r"[0-9a-f]{40}", shared["source_commit"])
@@ -841,10 +847,25 @@ def _download_runtime_package(package, version, expected_hash, urlopen):
     request = urllib.request.Request(url, headers={"User-Agent": "HeatMap setup"})
     try:
         with urlopen(request, timeout=60, context=ssl.create_default_context()) as response:
-            data = response.read()
+            hasher = hashlib.sha256()
+            size = 0
+            chunks = []
+            while True:
+                piece = response.read(1024 * 1024)
+                if not piece:
+                    break
+                size += len(piece)
+                if size > _MAX_NUPKG_BYTES:
+                    raise SetupError(
+                        f"downloaded package for {package} {version} exceeds "
+                        f"{_MAX_NUPKG_BYTES} bytes; refusing a larger download"
+                    )
+                hasher.update(piece)
+                chunks.append(piece)
+            data = b"".join(chunks)
     except Exception as e:
         raise SetupError(f"error downloading {package} {version}: {e}") from e
-    actual_hash = hashlib.sha256(data).hexdigest()
+    actual_hash = hasher.hexdigest()
     if actual_hash != expected_hash:
         raise SetupError(
             f"NuGet hash mismatch for {package} {version}: "
@@ -1045,6 +1066,12 @@ def _runtime_restore_lock(app_dir=APP_DIR):
             msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
     finally:
         lock_file.close()
+        try:
+            # Best-effort cleanup: a live holder blocks Windows deletion, in
+            # which case the stale one-byte file simply remains for next time.
+            os.remove(lock_path)
+        except OSError:
+            pass
 
 
 def _publish_runtime(staging_dir, lib_dir=LIB_DIR, manifest_path=MANIFEST_PATH):
@@ -1178,6 +1205,13 @@ def restore_runtime(
             bridge_messages = bridge_checker(staging_dir)
             if bridge_messages:
                 raise SetupError("; ".join(bridge_messages))
+            if (
+                os.path.normcase(os.path.abspath(lib_dir)) == os.path.normcase(os.path.abspath(LIB_DIR))
+                and _is_overlay_running()
+            ):
+                raise SetupError(
+                    "HeatMap started while the runtime was downloading; close the overlay before restoring runtime"
+                )
             _publish_runtime(staging_dir, lib_dir=lib_dir, manifest_path=manifest_path)
             staging_dir = None
         finally:
@@ -1214,7 +1248,7 @@ def main(argv=None):
             from pawnio_shared import verified_module
             verified_module()
             print('Shared fan module verification OK')
-        except (OSError, ValueError, KeyError, RuntimeError) as exc:
+        except Exception as exc:
             print(f'Shared fan module verification failed: {exc}')
             ok = False
         return 0 if ok else 1

@@ -85,6 +85,19 @@ class AuditRegressionTests(unittest.TestCase):
             overlay.OverlayApp._check_alerts(app, app.sensor_data)
             beep.assert_called_once()
 
+    def test_stale_sensors_keep_fresh_volume_rows(self):
+        app = _update_ui_app()
+        app.sensor_data = dict(cpu_temp=50)
+        app._sensor_sample_time = 0
+        app._volume_snapshot = (
+            95, {"volumes": [dict(name="C:", used_pct=78.2, free_bytes=10 * 2 ** 30)],
+                 "volume_errors": []},
+        )
+        with mock.patch.object(overlay.time, "monotonic", return_value=100):
+            app.update_ui()
+        self.assertEqual(["disk_0"], app.disk_labels)
+        self.assertIn("78.2%", app.rows["disk_0_usage"].options["text"])
+
     def test_different_gpu_does_not_inherit_optional_sensor_expectations(self):
         advisor = ThermalAdvisor()
         self.findings(advisor, sample(gpu_id="amd"), 0)

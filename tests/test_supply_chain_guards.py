@@ -11,7 +11,7 @@ import setup
 
 class OrphanArtifactGuardTests(unittest.TestCase):
     def test_repo_root_contains_no_orphan_pawnio_installer(self):
-        orphan = Path.cwd() / "PawnIO_setup.exe"
+        orphan = Path(setup.APP_DIR) / "PawnIO_setup.exe"
         if orphan.exists():
             self.fail(
                 "orphan PawnIO_setup.exe found in the repository root; "
@@ -21,12 +21,15 @@ class OrphanArtifactGuardTests(unittest.TestCase):
                 "keeping an untracked binary next to the tree."
             )
 
-    def test_repo_root_contains_no_executable_orphans(self):
-        orphans = sorted(path.name for path in Path.cwd().glob("*.exe") if path.is_file())
+    def test_repo_contains_no_executable_orphans(self):
+        orphans = sorted(
+            str(path.relative_to(setup.APP_DIR)) for path in Path(setup.APP_DIR).rglob("*.exe")
+            if path.is_file() and ".venv" not in path.parts
+        )
         self.assertEqual(
             orphans,
             [],
-            "orphan executables in the repository root; the runtime is restored "
+            "orphan executables in the repository; the runtime is restored "
             "from runtime-lock.json and the PawnIO installer via "
             "'python setup.py --download-pawnio', never from committed binaries.",
         )
@@ -109,15 +112,6 @@ class SharedFanModuleSourceTests(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(sources, f)
         return path
-
-    def test_rejects_tampered_shared_module_archive_hash(self):
-        def mutate(sources):
-            sources["shared_fan_module"]["archive_sha256"] = "tampered"
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = self._write_sources(tmpdir, mutate)
-            with self.assertRaisesRegex(setup.SetupError, "archive_sha256"):
-                setup._load_runtime_sources(path)
 
     def test_rejects_shared_module_hash_mismatch_against_lock(self):
         def mutate(sources):

@@ -190,6 +190,12 @@ class CaseAirflowPolicy:
 
 @dataclass
 class FanRamp:
+    """Bounded case-fan fall: immediate rise, 15 s hold, ~2 points/s fall.
+
+    Cooling-rate twin of gpu_fans.GpuRamp (30% floor, 10 s hold, no deadband,
+    float math). The floors, holds and deadbands are per-hardware policy and
+    must stay different; keep both ramp test tables green when touching this.
+    """
     value: int = 100
     cool_since: float | None = None
     last_time: float | None = None
@@ -310,9 +316,13 @@ class ThermalAdvisor:
             used = finite(volume.get("used_pct"), 0, 100)
             free = finite(volume.get("free_bytes"), 0, 2**64 - 1)
             warning, critical = temperature_thresholds["disk_used"]
-            if used is not None and free is not None and used >= warning:
-                findings.append(Finding("volume:" + volume["name"], 2 if used >= critical else 1,
-                                        f"Volume {volume['name']} {round(used)}% full · {free / 2**30:.1f} GiB free"))
+            if used is not None and used >= warning:
+                if free is None:
+                    findings.append(Finding("volume:" + volume["name"], 2 if used >= critical else 1,
+                                            f"Volume {volume['name']} {round(used)}% full · free space unknown"))
+                else:
+                    findings.append(Finding("volume:" + volume["name"], 2 if used >= critical else 1,
+                                            f"Volume {volume['name']} {round(used)}% full · {free / 2**30:.1f} GiB free"))
         for error in data.get("volume_errors", []):
             findings.append(Finding("volume_error:" + error, 1, "Volume space unavailable: " + error))
         for disk in data.get("disks", []):

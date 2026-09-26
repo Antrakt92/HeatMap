@@ -134,10 +134,10 @@ class RediscoveryTests(unittest.TestCase):
                     elif fault == 'owner':
                         self.owner.is_running.return_value = False
                     elif fault == 'heartbeat':
-                        self.heartbeat[0] -= 16
+                        self.heartbeat.last_seen -= 16
                     else:
                         self.clock[0] += 60
-                        self.heartbeat[0] = self.clock[0]
+                        self.heartbeat.last_seen = self.clock[0]
                 self.on_disable = interrupt
                 with self.assertRaises((case_fans.StartupCancelled, case_fans.StartupNotReady)):
                     self.wait(lambda _computer: READY)
@@ -153,7 +153,7 @@ class RediscoveryTests(unittest.TestCase):
                         self.stop.is_set.return_value = True
                     else:
                         self.clock[0] += 60
-                        self.heartbeat[0] = self.clock[0]
+                        self.heartbeat.last_seen = self.clock[0]
                     return [self.ready_board]
                 self.on_enable = interrupt
                 with self.assertRaises((case_fans.StartupCancelled, case_fans.StartupNotReady)):
@@ -178,7 +178,7 @@ class RediscoveryTests(unittest.TestCase):
                 super().append(status)
                 if test.clock[0] >= 110:
                     test.clock[0] += 60
-                    test.heartbeat[0] = test.clock[0]
+                    test.heartbeat.last_seen = test.clock[0]
         self.statuses = SlowStatuses()
         with self.assertRaisesRegex(case_fans.StartupNotReady, 'timed out'):
             self.wait(lambda _computer: READY)

@@ -221,6 +221,13 @@ class ThermalPolicyTests(unittest.TestCase):
         self.assertIn("99% full", result[0].text)
         self.assertIn("4.0 GiB free", result[0].text)
 
+    def test_volume_warning_survives_unknown_free_space(self):
+        data = sample(volumes=[dict(name="C:", used_pct=99, free_bytes=None)])
+        result = self.findings(ThermalAdvisor(), data, 0)
+        self.assertEqual([(f.key, f.severity) for f in result], [("volume:C:", 2)])
+        self.assertIn("99% full", result[0].text)
+        self.assertIn("free space unknown", result[0].text)
+
     def test_physical_drive_temperature_warning_remains_independent_of_volume_usage(self):
         data = sample(disks=[dict(name="980 PRO", temp=75, used_pct=0)],
                       volumes=[dict(name="C:", used_pct=50, free_bytes=200 * 2**30)])
@@ -236,6 +243,20 @@ class ThermalPolicyTests(unittest.TestCase):
     def test_cpu_auto_duty_is_not_replaced_by_case_fan_duty(self):
         self.assertIsNone(overlay._select_cpu_fan_control([("system fan #1", 100)], "cpu fan", True))
         self.assertEqual(overlay._select_cpu_fan_control([("cpu fan", 70)], "cpu fan", True), 70)
+
+    def test_cpu_fan_selection_carries_sensor_identity(self):
+        self.assertEqual(overlay._select_cpu_fan([("cpu fan", 1200, "chip-a/fan/0")]),
+                         ("cpu fan", 1200, "chip-a/fan/0"))
+        self.assertEqual(overlay._select_cpu_fan([("cpu fan", 1200)]),
+                         ("cpu fan", 1200, None))
+        self.assertIsNone(overlay._select_cpu_fan([]))
+        self.assertIsNone(overlay._select_cpu_fan([("system fan #1", 800, "chip-a/fan/1")]))
+
+    def test_board_fan_match_prefers_identity_over_enumeration_order(self):
+        first = {"name": "CPU Fan", "rpm": 1200, "id": "chip-a/fan/0"}
+        second = {"name": "CPU Fan", "rpm": 1200, "id": "chip-b/fan/0"}
+        self.assertIs(overlay._match_board_fan([first, second], "cpu fan", 1200, "chip-b/fan/0"), second)
+        self.assertIs(overlay._match_board_fan([first, second], "cpu fan", 1200, None), first)
 
 
 if __name__ == "__main__":

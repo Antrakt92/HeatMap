@@ -100,6 +100,17 @@ class SharedFanTests(unittest.TestCase):
         self.assertEqual(session.restore(), [])
         self.assertEqual(backend.values[0x73], 175)
 
+    def test_unverified_pwm_duties_fail_restore(self):
+        backend, bridge, session = self.setup_session()
+        session.prepare()
+        session.apply(60)
+        real_read = backend.read
+        backend.read = lambda register: 0 if register == 0x63 else real_read(register)
+        errors = session.restore()
+        self.assertTrue(any('Shared PWM duties were not restored' in error for error in errors))
+        self.assertTrue(any('0x63' in error for error in errors))
+        self.assertFalse(session.restored)
+
     def test_failed_takeover_still_restores(self):
         for failure in ('ec', 0x63, 0x16, 0x73):
             backend, bridge, session = self.setup_session()

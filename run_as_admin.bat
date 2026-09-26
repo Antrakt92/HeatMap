@@ -8,7 +8,7 @@ set "POWERSHELL_EXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
 set "PY_EXE="
 set "PYW_EXE="
 set "PRECHECK_LOG="
-set "PREFLIGHT_FAILURES=%TEMP%\HeatMap_launcher_%RANDOM%%RANDOM%.txt"
+set "PREFLIGHT_FAILURES=%TEMP%\HeatMap_launcher_%RANDOM%%RANDOM%%RANDOM%.txt"
 set "CANDIDATE_PY=%APP_DIR%.venv\Scripts\python.exe"
 set "CANDIDATE_PYW=%APP_DIR%.venv\Scripts\pythonw.exe"
 call :probe_candidate
@@ -73,7 +73,7 @@ exit /b 0
 if defined PY_EXE exit /b 0
 if not exist "%CANDIDATE_PY%" exit /b 0
 if not exist "%CANDIDATE_PYW%" exit /b 0
-set "CANDIDATE_LOG=%TEMP%\HeatMap_preflight_%RANDOM%%RANDOM%.txt"
+set "CANDIDATE_LOG=%TEMP%\HeatMap_preflight_%RANDOM%%RANDOM%%RANDOM%.txt"
 "%CANDIDATE_PY%" "%SETUP_PATH%" --preflight > "%CANDIDATE_LOG%" 2>&1
 if errorlevel 1 goto candidate_failed
 set "PY_EXE=%CANDIDATE_PY%"

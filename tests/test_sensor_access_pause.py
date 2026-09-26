@@ -101,6 +101,21 @@ class SensorAccessPauseTests(unittest.TestCase):
         self.assertFalse(config['case_fans_enabled'])
         self.assertIn('case_fan_full_rpm', config)
 
+    def test_broken_shared_module_retires_only_the_shared_profile(self):
+        config = {'case_fans_enabled': True, 'case_fans_shared_enabled': True}
+        with mock.patch("pawnio_shared.verified_module", return_value="ok"):
+            self.assertFalse(overlay._retire_broken_shared_module(config))
+        self.assertTrue(config['case_fans_shared_enabled'])
+        with mock.patch("pawnio_shared.verified_module", side_effect=RuntimeError("tampered")):
+            self.assertTrue(overlay._retire_broken_shared_module(config))
+        self.assertFalse(config['case_fans_shared_enabled'])
+        self.assertTrue(config['case_fans_enabled'])
+
+    def test_intact_shared_profile_needs_no_module_check(self):
+        with mock.patch("pawnio_shared.verified_module") as verified:
+            self.assertFalse(overlay._retire_broken_shared_module({}))
+        verified.assert_not_called()
+
     def test_gcc_arrival_reopens_monitor_and_stops_fan_control(self):
         full = mock.Mock()
         shared = mock.Mock()

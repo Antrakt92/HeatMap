@@ -49,5 +49,14 @@ def relay_to_scheduled_task():
     return 1
 
 
+def main():
+    """Relay with distinct codes: an unexpected crash must never read as success."""
+    try:
+        return relay_to_scheduled_task()
+    except Exception as exc:
+        print(f"HeatMap launcher relay crashed unexpectedly: {exc}")
+        return 3
+
+
 if __name__ == "__main__":
-    raise SystemExit(relay_to_scheduled_task())
+    raise SystemExit(main())

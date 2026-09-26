@@ -13,8 +13,7 @@ import psutil
 
 import overlay
 from case_fans import FanWorkerClient, full_rpm_reference
-from thermal_policy import finite
-from startup_readiness import STARTUP_TIMEOUT_SECONDS
+from fan_common import verify_loop
 
 
 def close_previous_overlay():
@@ -55,58 +54,18 @@ def close_previous_overlay():
 
 
 def verify_worker(client, samples, duration=20):
-    if finite(duration, 0, 3600) is None:
-        raise ValueError("Verification duration must be finite and between 0 and 3600 seconds")
-    client.start()
     # Allow discovery, the 15-second full-airflow check, then sustained samples.
-    deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS + 30 + duration
-    active_since = None
-    first_stamp = None
-    last_stamp = None
-    failure = None
-    try:
-        while time.monotonic() < deadline:
-            status = client.poll()
-            if status["state"] in ("error", "stopped", "off"):
-                raise RuntimeError(status.get("reason", "Controller stopped before verification"))
-            if status["state"] == "active":
-                if full_rpm_reference(status.get("verified_full_rpm")) is None:
-                    raise RuntimeError("Case fan full-airflow verification evidence is missing or invalid")
-                stamp = finite(status.get("time"), 0, 1e12)
-                if stamp is None or (last_stamp is not None and stamp < last_stamp):
-                    raise RuntimeError("Case fan verification timestamp is invalid or moved backward")
-                if last_stamp is None or stamp > last_stamp:
-                    # The client can return a recent cached snapshot on a busy
-                    # status file. Re-reading it is not another hardware sample.
-                    samples.append(status)
-                    if active_since is None:
-                        active_since, first_stamp = time.monotonic(), stamp
-                    last_stamp = stamp
-                    if (time.monotonic() - active_since >= duration
-                            and stamp - first_stamp >= duration):
-                        break
-            else:
-                active_since = first_stamp = None
-            time.sleep(2)
-        else:
-            raise RuntimeError("Case fan verification timed out")
-    except Exception as exc:
-        failure = exc
-    finally:
-        client.stop()
-        if client.process is not None:
-            try:
-                client.process.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                raise RuntimeError("Native fan restore did not finish. Restart Windows before retrying.")
-    restored = client.poll()
-    if failure and overlay._case_fan_never_acquired(restored):
-        raise failure
-    if not restored.get("restore_confirmed") or restored.get("restore_errors"):
-        raise RuntimeError("Fan restore not confirmed: " + str(restored))
-    if failure:
-        raise failure
-    return restored
+    # Proof rules stay case-specific; the wait/stop/restore loop is shared.
+    return verify_loop(
+        client, samples, duration,
+        evidence_ok=lambda status: full_rpm_reference(status.get("verified_full_rpm")) is not None,
+        never_acquired=overlay._case_fan_never_acquired,
+        stopped_message="Controller stopped before verification",
+        evidence_message="Case fan full-airflow verification evidence is missing or invalid",
+        timestamp_message="Case fan verification timestamp is invalid or moved backward",
+        timeout_message="Case fan verification timed out",
+        restore_message="Fan restore not confirmed: ",
+    )
 
 
 def main():

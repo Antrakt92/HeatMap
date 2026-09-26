@@ -2,11 +2,13 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace as NS
 from unittest import mock
 
 import case_fans as fans
+import fan_common
 from hardware_access_guard import HardwareAccessConflict
 
 
@@ -327,7 +329,7 @@ class CaseFanTests(unittest.TestCase):
             # Production refreshes the watchdog on every owner poll; without
             # this the frozen mock heartbeat would expire together with the
             # sensor stream and mask the stale-sensor fault under test.
-            heartbeat[0] = clock[0]
+            heartbeat.last_seen = clock[0]
             return real_check(stop_event, owner_process, heartbeat)
 
         modules = {"clr": mock.Mock(), "LibreHardwareMonitor": mock.Mock(),
@@ -364,6 +366,98 @@ class CaseFanTests(unittest.TestCase):
         for control in controls[:2]:
             self.assertEqual([call.args[0] for call in control.SetSoftware.call_args_list], commands)
         self.assertFalse(any("assist" in report.get("reason", "") for report in reports))
+
+    def test_transient_missing_command_feedback_rides_through(self):
+        result, controls, reports = self.run_feedback_worker({2: None, 3: None})
+        self.assertEqual(result, 0)
+        self.assertTrue(any("command feedback unavailable" in report.get("reason", "")
+                            for report in reports))
+        for control in controls[:2]:
+            control.SetDefault.assert_called_once()
+
+    def test_persistent_missing_command_feedback_faults_with_restore(self):
+        result, controls, reports = self.run_feedback_worker(
+            {read: None for read in range(2, 10 ** 6)}, stop_at_reads=10 ** 9)
+        self.assertEqual(result, 1)
+        self.assertIn("command feedback unavailable", reports[-1]["reason"])
+        self.assertTrue(reports[-1]["restore_confirmed"])
+        for control in controls[:2]:
+            control.SetDefault.assert_called_once()
+
+    def run_feedback_worker(self, script, stop_at_reads=12, tick=2.0):
+        """Frozen sensors with scripted per-read control_pct overrides.
+
+        script maps 1-based overlay.read_sensors counts to a control_pct value
+        (None = missing feedback); unmapped reads keep the hardware value.
+        """
+        import overlay
+        import thermal_policy
+        computer, controls = fixture()
+        owner = mock.Mock()
+        owner.create_time.return_value = 1
+        owner.is_running.return_value = True
+        clock = [100.0]
+        reads = [0]
+        frozen = dict(cpu_temp=50, gpu_core_temp=45, gpu_hotspot_temp=60, gpu_memory_temp=60)
+
+        def read(_computer):
+            reads[0] += 1
+            if reads[0] >= stop_at_reads:
+                owner.is_running.return_value = False
+            # Advance temperatures slightly so the freshness signature never
+            # goes stale: only the scripted control_pct may look frozen.
+            return dict(frozen, cpu_temp=50 + reads[0] * 0.1)
+
+        stop = mock.Mock()
+        stop.is_set.return_value = False
+
+        def wait(seconds):
+            clock[0] += tick
+            return False
+
+        stop.wait.side_effect = wait
+        original_readings = fans.CaseFanSession.readings
+
+        def readings(session):
+            result = original_readings(session)
+            if reads[0] in script:
+                for fan in result:
+                    if fan["name"] in fans.INDEPENDENT_TARGETS:
+                        fan["control_pct"] = script[reads[0]]
+            return result
+
+        reports = []
+        original_write = fans.write_status
+
+        def publish(path, state, **details):
+            reports.append(dict(state=state, **details))
+            return original_write(path, state, **details)
+
+        real_check = fans._check_case_owner
+
+        def check(stop_event, owner_process, heartbeat):
+            heartbeat.last_seen = clock[0]
+            return real_check(stop_event, owner_process, heartbeat)
+
+        modules = {"clr": mock.Mock(), "LibreHardwareMonitor": mock.Mock(),
+                   "LibreHardwareMonitor.Hardware": NS(Computer=lambda: computer)}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict("sys.modules", modules), \
+             mock.patch.object(fans, "make_shared_computer", return_value=computer), \
+             mock.patch.object(overlay, "_is_admin", return_value=True), \
+             mock.patch.object(overlay, "_runtime_dll_errors", return_value=[]), \
+             mock.patch.object(fans.psutil, "Process", return_value=owner), \
+             mock.patch.object(fans.psutil, "process_iter", return_value=[]), \
+             mock.patch.object(fans.threading, "Thread"), \
+             mock.patch.object(fans.threading, "Event", return_value=stop), \
+             mock.patch.object(fans.time, "monotonic", side_effect=lambda: clock[0]), \
+             mock.patch.object(fans, "_check_case_owner", side_effect=check), \
+             mock.patch.object(fans.CaseFanSession, "readings", readings), \
+             mock.patch.object(fans, "write_status", side_effect=publish), \
+             mock.patch.object(overlay, "read_sensors", side_effect=read):
+            path = os.path.join(directory, "status.json")
+            result = fans.worker(path, 7, 1,
+                                 full_rpm={name: 1200 for name in fans.INDEPENDENT_TARGETS})
+        return result, controls, reports
 
     def test_frozen_gap_snapshot_holds_curves_until_stale_degradation(self):
         # A frozen Hotspot-Core split must not bypass the ten-second gap hold
@@ -436,6 +530,27 @@ class CaseFanTests(unittest.TestCase):
                     status = json.load(stream)
                 self.assertTrue(status["restore_confirmed"])
                 self.assertEqual(status["state"], "error" if failure else "stopped")
+
+    def test_main_failure_report_validates_as_error(self):
+        argv = ["case_fans.py", "--status", "unused.json",
+                "--owner-pid", "7", "--owner-created", "1"]
+        written = {}
+
+        def write(path, state, **details):
+            written.update(state=state, **details)
+
+        with (mock.patch.object(fans.sys, "argv", argv),
+              mock.patch.object(fans, "WorkerMutex", side_effect=RuntimeError("mutex held")),
+              mock.patch.object(fans, "write_status", side_effect=write)):
+            self.assertEqual(fans.main(), 1)
+        self.assertEqual(written["state"], "error")
+        self.assertEqual(written["profile"], fans.PROFILE)
+        self.assertIn("mutex held", written["reason"])
+        now = time.time()
+        reason, _pid = fan_common.check_status(
+            fans.CASE_STATUS_POLICY, dict(written), exited=True,
+            worker_pid=None, process_pid=os.getpid(), started=now - 1, now=now)
+        self.assertIsNone(reason)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,9 @@ import psutil
 from thermal_policy import (CaseAirflowPolicy, FanRamp, _curve_demand, case_fan_demand, finite,
                             SENSOR_STALE_DEGRADE_SECONDS, SENSOR_STALE_FAIL_SECONDS,
                             TACH_PERSISTENCE_SECONDS)
+from fan_common import (OwnerHeartbeat, OwnerHeartbeatExpired, check_guarded, check_owner,
+                      read_status_report, check_status, write_alive, restore_with_retry,
+                      StatusPolicy, CASE_TERMINAL_KEYS)
 from hardware_access_guard import require_hardware_access
 from shared_fans import (SHARED_NAMES, SHARED_JOURNAL_NAME, SharedRecoveryJournal,
                          open_shared_session, make_shared_computer, recover_shared_journal,
@@ -39,20 +42,13 @@ MOTHERBOARD_REDISCOVERY_LIMIT = 5
 # delivered nothing new. Real tachometer jitter advances the signature every
 # 2 s cycle; only a frozen pipe repeats it. Fail-safe thresholds live in
 # thermal_policy (shared with the GPU worker).
-# Case/GPU status reports older than this are treated as stale.
-STATUS_STALE_SECONDS = 10
-
-
-class OwnerHeartbeatExpired(StartupCancelled):
-    """Watchdog cancellation, distinct from an intentional owner shutdown."""
 
 
 def _check_case_owner(stop, owner, heartbeat):
     # An intentional stop or lost owner must never qualify for watchdog recovery.
-    if stop.is_set() or not owner.is_running():
-        raise StartupCancelled("Overlay owner stopped")
-    if time.monotonic() - heartbeat[0] > 15:
-        raise OwnerHeartbeatExpired("Case fan owner heartbeat expired")
+    # Kept as a thin wrapper: wait_for_controls and the test-suite address the
+    # case worker through this name.
+    check_owner(stop, owner, heartbeat, "Overlay owner stopped", "Case fan owner heartbeat expired")
 
 
 def open_status_file(path):
@@ -112,6 +108,49 @@ def replace_status_file(temporary, path):
     raise ctypes.WinError(error)
 
 
+def _case_extra_early(status):
+    """Command and channel checks, in historical order. Returns reason or None."""
+    if status.get("state") == "active" and finite(status.get("command_pct"), 60, 100) is None:
+        return "Invalid case fan controller command report"
+    discovering = (status.get("state") == "checking" and status.get("phase") in ("discovering", "waiting")
+                   and status.get("control_attempted") is False
+                   and status.get("baseline") == [])
+    if "controlled_channels" in status or "firmware_channels" in status:
+        controlled, firmware = status.get("controlled_channels"), status.get("firmware_channels")
+        if (not isinstance(controlled, list) or not isinstance(firmware, list)
+                or any(not isinstance(name, str) for name in controlled + firmware)
+                or controlled not in (list(INDEPENDENT_TARGETS), list(TARGETS), list(ALL_TARGETS), [])
+                or firmware != ([] if controlled == list(ALL_TARGETS) else
+                                [name for name in TARGETS if name not in controlled] if controlled else [])):
+            return "Invalid case fan controller channel report"
+        if status.get("state") in ("active", "checking") and not controlled and not discovering:
+            return "Missing case fan controller channels"
+    return None
+
+
+CASE_STATUS_POLICY = StatusPolicy(
+    profile=PROFILE,
+    states=("checking", "active", "error", "stopped"),
+    profile_error="Invalid case fan controller profile",
+    shape_error=None,
+    reason_error="Invalid case fan controller reason",
+    stop_cause_error="Invalid case fan controller stop cause",
+    restoration_error="Invalid case fan restoration report",
+    restoration_keys=("restore_confirmed", "control_attempted"),
+    state_error="Invalid case fan controller status",
+    launch_error="Case fan controller status is stale",
+    stale_error="Case fan controller status is stale",
+    exited_error="Case fan controller exited unexpectedly; restart Windows if RPM stay abnormal",
+    owner_first=False,
+    owner_foreign_error=None,
+    owner_unconfirmed_error=None,
+    opening_timeout=None,
+    opening_text="",
+    extra_early=_case_extra_early,
+    extra_late=None,
+)
+
+
 class FanWorkerClient:
     """UI-side heartbeat and status; all hardware ownership stays in the child."""
     def __init__(self, app_dir, full_rpm=None, shared=False, commission=False):
@@ -164,76 +203,24 @@ class FanWorkerClient:
             return {"state": "error", "reason": self.error}
         if self.process is None:
             return {"state": "off"}
-        if self.process.poll() is None:
-            try:
-                self.process.stdin.write("alive\n")
-                self.process.stdin.flush()
-            except (OSError, ValueError):
-                pass
+        exited = self.process.poll() is not None
+        if not exited:
+            write_alive(self.process)
         try:
-            try:
-                with open_status_file(self.status_path) as stream:
-                    snapshot = stream.read(65536)
-                status = json.loads(snapshot)
-            except (OSError, ValueError):
-                if self.last_status is None:
-                    raise
-                # A busy file must not manufacture an error while the last
-                # verified report is still fresh. All PID/expiry checks still run.
-                status = self.last_status
-            if not isinstance(status, dict) or status.get("profile") != PROFILE:
-                return {"state": "error", "reason": "Invalid case fan controller profile"}
-            if "reason" in status and not isinstance(status["reason"], str):
-                return {"state": "error", "reason": "Invalid case fan controller reason"}
-            if "stop_cause" in status and (status["stop_cause"] != "heartbeat_expired"
-                                            or status.get("state") != "error"):
-                return {"state": "error", "reason": "Invalid case fan controller stop cause"}
-            if (any(key in status and type(status[key]) is not bool
-                    for key in ("restore_confirmed", "control_attempted"))
-                    or "restore_errors" in status and (not isinstance(status["restore_errors"], list)
-                    or any(not isinstance(item, str) for item in status["restore_errors"]))):
-                return {"state": "error", "reason": "Invalid case fan restoration report"}
-            stamp = finite(status.get("time"), 0, 1e12)
-            if status.get("state") not in ("checking", "active", "error", "stopped"):
-                return {"state": "error", "reason": "Invalid case fan controller status"}
-            if status.get("state") == "active" and finite(status.get("command_pct"), 60, 100) is None:
-                return {"state": "error", "reason": "Invalid case fan controller command report"}
-            discovering = (status.get("state") == "checking" and status.get("phase") in ("discovering", "waiting")
-                           and status.get("control_attempted") is False
-                           and status.get("baseline") == [])
-            if "controlled_channels" in status or "firmware_channels" in status:
-                controlled, firmware = status.get("controlled_channels"), status.get("firmware_channels")
-                if (not isinstance(controlled, list) or not isinstance(firmware, list)
-                        or any(not isinstance(name, str) for name in controlled + firmware)
-                        or controlled not in (list(INDEPENDENT_TARGETS), list(TARGETS), list(ALL_TARGETS), [])
-                        or firmware != ([] if controlled == list(ALL_TARGETS) else
-                                        [name for name in TARGETS if name not in controlled] if controlled else [])):
-                    return {"state": "error", "reason": "Invalid case fan controller channel report"}
-                if status.get("state") in ("active", "checking") and not controlled and not discovering:
-                    return {"state": "error", "reason": "Missing case fan controller channels"}
-            exited = self.process.poll() is not None
-            terminal = status.get("state") in ("error", "stopped")
-            pid = status.get("pid")
-            valid_pid = (isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 and
-                         (pid == self.process.pid or pid == self.worker_pid))
-            if not valid_pid and isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
-                try:
-                    # Windows venv python[w].exe is a redirector whose child writes
-                    # the report. The root process remains alive until that child exits.
-                    child = psutil.Process(pid)
-                    valid_pid = any(parent.pid == self.process.pid for parent in child.parents())
-                    if valid_pid:
-                        self.worker_pid = pid
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    # A fast terminal result can precede the first poll. This path
-                    # is unique to this launch and must have been written after it.
-                    valid_pid = exited and terminal and stamp is not None and stamp >= self.started - 2
-            if not valid_pid or stamp is None or stamp < self.started - 2 or time.time() - stamp < -2:
-                return {"state": "error", "reason": "Case fan controller status is stale"}
-            if not (exited and terminal) and time.time() - stamp > STATUS_STALE_SECONDS:
-                return {"state": "error", "reason": "Case fan controller status is stale"}
-            if exited and not terminal:
-                return {"state": "error", "reason": "Case fan controller exited unexpectedly; restart Windows if RPM stay abnormal"}
+            now = time.time()
+            status, validate = read_status_report(
+                open_status_file, self.status_path, self.last_status,
+                exited=exited, started=self.started, now=now,
+                opening_timeout=None, opening_text="")
+            if not validate:
+                return status
+            reason, worker_pid = check_status(
+                CASE_STATUS_POLICY, status, exited=exited,
+                worker_pid=self.worker_pid, process_pid=self.process.pid,
+                started=self.started, now=now)
+            if reason is not None:
+                return {"state": "error", "reason": reason}
+            self.worker_pid = worker_pid
             self.last_status = status
             return status
         except (OSError, ValueError, TypeError, AttributeError):
@@ -549,9 +536,10 @@ class TerminalStatusWriteError(OSError):
     """Rollback finished, but both terminal reports failed to reach the owner."""
 
 
-def write_terminal_status(path, state, *, publisher=None, **details):
+def write_terminal_status(path, state, *, publisher=None, compact_keys=None, **details):
     """Publish rollback evidence, with one smaller report if full publication fails."""
     publisher = publisher or write_status
+    allowed_keys = compact_keys if compact_keys is not None else CASE_TERMINAL_KEYS
     try:
         publisher(path, state, **details)
         return None
@@ -560,10 +548,7 @@ def write_terminal_status(path, state, *, publisher=None, **details):
     # Disk exhaustion can reject the full diagnostic payload while a smaller
     # report still fits. Retain actual rollback/ownership evidence, never infer it
     # from publication success. A persistence fault must disable watchdog retry.
-    compact = {key: details[key] for key in (
-        "profile", "restore_confirmed", "restore_errors", "control_attempted",
-        "controlled_channels", "firmware_channels", "recovery_pending", "settings_conflict",
-    ) if key in details}
+    compact = {key: details[key] for key in allowed_keys if key in details}
     if details.get("baseline") == []:
         compact["baseline"] = []  # Preserve positive evidence of no case fan takeover.
     original_reason = details.get("reason", "Controller stopped")
@@ -610,19 +595,9 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
     computer.IsMotherboardEnabled = True
     session = None
     stop = threading.Event()
-    heartbeat = [time.monotonic()]
+    heartbeat = OwnerHeartbeat(stop)
 
-    def listen():
-        try:
-            for line in sys.stdin:
-                if line.strip() == "stop":
-                    break
-                if line.strip() == "alive":
-                    heartbeat[0] = time.monotonic()
-        finally:
-            stop.set()
-
-    threading.Thread(target=listen, daemon=True).start()
+    threading.Thread(target=heartbeat.listen, daemon=True).start()
     owner = psutil.Process(owner_pid)
     if abs(owner.create_time() - owner_created) > 0.01:
         raise RuntimeError("Overlay owner process changed")
@@ -637,10 +612,8 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
     discovery = {}
 
     def check_before_command():
-        _check_case_owner(stop, owner, heartbeat)
-        require_hardware_access()
-        # Process inspection may block; recheck the owner after the guard too.
-        _check_case_owner(stop, owner, heartbeat)
+        check_guarded(stop, owner, heartbeat, require_hardware_access,
+                      "Overlay owner stopped", "Case fan owner heartbeat expired")
 
     try:
         require_hardware_access()
@@ -678,6 +651,7 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
             session.apply(100)
         started = time.monotonic()
         stall_since = {}
+        feedback_missing_since = {}
         verified_full_rpm = None
         last_signature = None
         last_fresh = started
@@ -737,10 +711,26 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
                 verified_full_rpm = {fan["name"]: fan["rpm"] for fan in readings if fan['name'] != SHARED_NAMES[2]}
                 commissioned = True
             command_feedback_verified = commissioned and session.last_command is not None
-            if command_feedback_verified and any(fan["control_pct"] is None or abs(fan["control_pct"] -
-                                     (100 if shared and fan['name'] == SHARED_NAMES[2] else session.last_command)) > 3
-                     for fan in readings):
-                raise RuntimeError("Fan command readback differs; possible firmware/controller conflict")
+            if command_feedback_verified:
+                conflict = next((fan for fan in readings
+                                 if fan["control_pct"] is not None and abs(fan["control_pct"] -
+                                    (100 if shared and fan['name'] == SHARED_NAMES[2] else session.last_command)) > 3),
+                                None)
+                if conflict is not None:
+                    raise RuntimeError("Fan command readback differs; possible firmware/controller conflict")
+                # Missing feedback is not proof of a conflict: a transient LHM
+                # gap rides through at full airflow like a tachometer stall,
+                # while a persistently unreadable channel faults explicitly.
+                for fan in readings:
+                    if fan["control_pct"] is None:
+                        feedback_missing_since.setdefault(fan["name"], now)
+                    else:
+                        feedback_missing_since.pop(fan["name"], None)
+                if feedback_missing_since:
+                    demand, reason = 100, "Fan command feedback unavailable; full airflow"
+                    if any(now - start >= TACH_PERSISTENCE_SECONDS
+                           for start in feedback_missing_since.values()):
+                        raise RuntimeError(reason)
             if ramp is None:
                 # Initialize from the first current sample, without inheriting
                 # FanRamp's fail-safe 100% startup hold on a calibrated profile.
@@ -776,10 +766,7 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
     except Exception as exc:
         error = str(exc)
     finally:
-        restore_errors = session.restore() if session else []
-        if restore_errors:
-            time.sleep(0.2)
-            restore_errors = session.restore()
+        restore_errors = restore_with_retry(session.restore) if session else []
         if session and baseline:
             try:
                 # Close is also LHM's second native restore attempt (SetDefault
@@ -831,13 +818,17 @@ def main():
     args = parser.parse_args()
     try:
         with WorkerMutex():
-            return worker(args.status, args.owner_pid, args.owner_created, args.full_rpm, args.shared, args.commission)
+            return worker(args.status, args.owner_pid, args.owner_created, args.full_rpm,
+                          args.shared, args.commission)
     except TerminalStatusWriteError:
         return 1
     except Exception as exc:
-        write_status(args.status, "error", reason=str(exc))
+        # A bare reason would fail client validation ("Invalid profile") and
+        # mask the real cause. Stamp this process so the report validates as
+        # an error carrying its own reason; restoration stays unknown.
+        write_status(args.status, "error", profile=PROFILE, time=time.time(),
+                     pid=os.getpid(), reason=str(exc))
         return 1
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

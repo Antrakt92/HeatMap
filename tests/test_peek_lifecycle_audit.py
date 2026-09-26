@@ -78,6 +78,14 @@ class PeekLifecycleAuditTests(unittest.TestCase):
         app._peek_hide.assert_not_called()
         self.assertTrue(app.root.after_calls)
 
+    def test_geometry_query_failure_preserves_peek_and_retries(self):
+        app = self.make_app()
+        with mock.patch.object(overlay.user32, "GetCursorPos", side_effect=self.cursor_at(130, 160)), \
+             mock.patch.object(MovingRoot, "winfo_rootx", side_effect=overlay.tk.TclError("gone")):
+            app._peek_check_mouse()
+        app._peek_hide.assert_not_called()
+        self.assertTrue(app.root.after_calls)
+
     def test_release_returns_desktop_drag_inside_work_area(self):
         app = self.make_app()
         app.peek_visible = False

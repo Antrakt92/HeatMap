@@ -1,7 +1,6 @@
 """HeatMap GPU fan policy, isolated owner, heartbeat and verified rollback."""
 import argparse
 import copy
-import json
 import math
 import os
 from pathlib import Path
@@ -13,9 +12,11 @@ import uuid
 
 import psutil
 
-from case_fans import (FanWorkerClient, OwnerHeartbeatExpired, TerminalStatusWriteError, WorkerMutex,
-                       open_status_file, replace_status_file, write_status, write_terminal_status,
-                       STATUS_STALE_SECONDS)
+from case_fans import (FanWorkerClient, TerminalStatusWriteError, WorkerMutex,
+                       open_status_file, replace_status_file, write_status, write_terminal_status)
+import fan_common
+from fan_common import (OwnerHeartbeat, OwnerHeartbeatExpired, GPU_TERMINAL_KEYS,
+                        read_status_report, check_status, write_alive, StatusPolicy)
 from hardware_access_guard import require_hardware_access
 from thermal_policy import (finite, interpolate, SENSOR_STALE_DEGRADE_SECONDS, SENSOR_STALE_FAIL_SECONDS,
                             TACH_PERSISTENCE_SECONDS)
@@ -66,6 +67,13 @@ def demand(data):
 
 
 class GpuRamp:
+    """Bounded GPU fall: start at demand, immediate rise, 10 s hold, 2 points/s fall.
+
+    Cooling-rate twin of thermal_policy.FanRamp (60% floor, 15 s hold,
+    3-point deadband, fractional budget, int math). The floors, holds and
+    deadbands are per-hardware policy and must stay different; keep both
+    ramp test tables green when touching this.
+    """
     def __init__(self, initial=None):
         self.command = initial
         self.last_time = None
@@ -143,13 +151,8 @@ class RecoveryJournal:
                     states.append(state)
         payload = dict(profile=PROFILE, version=1, gpu=self.identity,
                        baseline=baseline, known_states=states)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_name(self.path.name + '.' + uuid.uuid4().hex + '.tmp')
+        temporary = fan_common.stage_json_payload(self.path, payload)
         try:
-            with temporary.open('w', encoding='utf-8') as stream:
-                json.dump(payload, stream)
-                stream.flush()
-                os.fsync(stream.fileno())
             replace_status_file(temporary, self.path)
         finally:
             temporary.unlink(missing_ok=True)
@@ -159,8 +162,7 @@ class RecoveryJournal:
 
     def recover(self, adapter, *, accept_external=False, before_write=None, check_cancelled=None):
         try:
-            with open_status_file(self.path) as stream:
-                saved = json.loads(stream.read(65536))
+            saved = fan_common.load_json_payload(self.path, open_status_file)
         except FileNotFoundError:
             return False
         except (OSError, ValueError) as exc:
@@ -315,6 +317,38 @@ def mode_text(status):
     return {'checking': 'Checking...', 'error': 'ERROR'}.get(state, 'Driver curve')
 
 
+def _gpu_extra_late(status):
+    """Command and standby checks, in historical order. Returns reason or None."""
+    if status.get("state") == "active" and finite(status.get("command_pct"), 30, 100) is None:
+        return "Invalid GPU fan command report"
+    if status.get("state") == "standby" and type(status.get("thermal_ready")) is not bool:
+        return "Invalid GPU fan standby report"
+    return None
+
+
+GPU_STATUS_POLICY = StatusPolicy(
+    profile=PROFILE,
+    states=("checking", "standby", "active", "error", "stopped"),
+    profile_error="Invalid GPU fan status",
+    shape_error="Invalid GPU fan status fields",
+    reason_error="Invalid GPU fan status reason",
+    stop_cause_error="Invalid GPU fan stop cause",
+    restoration_error="Invalid GPU restoration report",
+    restoration_keys=("restore_confirmed",),
+    state_error=None,
+    launch_error="GPU fan status belongs to another launch",
+    stale_error="GPU fan status is stale; restoration unconfirmed",
+    exited_error="GPU fan worker exited; restoration unconfirmed",
+    owner_first=True,
+    owner_foreign_error="Unexpected GPU fan owner",
+    owner_unconfirmed_error="Cannot confirm GPU fan owner",
+    opening_timeout=10,
+    opening_text="Opening AMD fan interface",
+    extra_early=None,
+    extra_late=_gpu_extra_late,
+)
+
+
 class GpuWorkerClient(FanWorkerClient):
     """Reuse the existing non-killing stop protocol, with an independent GPU owner."""
     def __init__(self, app_dir, *, commission=False):
@@ -349,77 +383,27 @@ class GpuWorkerClient(FanWorkerClient):
             return {'state': 'off'}
         exited = self.process.poll() is not None
         if not exited:
-            try:
-                self.process.stdin.write('alive\n')
-                self.process.stdin.flush()
-            except (OSError, ValueError):
-                pass
+            write_alive(self.process)
         try:
-            try:
-                with open_status_file(self.status_path) as stream:
-                    status = json.loads(stream.read(65536))
-            except (OSError, ValueError):
-                if self.last_status is None:
-                    if not exited and time.time() - self.started < 10:
-                        return {'state': 'checking', 'reason': 'Opening AMD fan interface'}
-                    raise
-                status = self.last_status
-            if not isinstance(status, dict) or status.get('profile') != PROFILE:
-                raise ValueError('Invalid GPU fan status')
-            state, stamp, pid = status.get('state'), finite(status.get('time'), 0, 1e12), status.get('pid')
-            terminal = state in ('error', 'stopped')
-            if (state not in ('checking', 'standby', 'active', 'error', 'stopped') or stamp is None or
-                    type(pid) is not int or pid <= 0):
-                raise ValueError('Invalid GPU fan status fields')
-            if 'reason' in status and not isinstance(status['reason'], str):
-                raise ValueError('Invalid GPU fan status reason')
-            if 'stop_cause' in status and (status['stop_cause'] != 'heartbeat_expired' or state != 'error'):
-                raise ValueError('Invalid GPU fan stop cause')
-            if ('restore_confirmed' in status and type(status['restore_confirmed']) is not bool or
-                    'restore_errors' in status and (not isinstance(status['restore_errors'], list) or
-                    any(not isinstance(item, str) for item in status['restore_errors']))):
-                raise ValueError('Invalid GPU restoration report')
-            if stamp < self.started - 2 or stamp > time.time() + 2:
-                raise ValueError('GPU fan status belongs to another launch')
-            if pid not in (self.process.pid, self.worker_pid):
-                try:
-                    if not any(parent.pid == self.process.pid for parent in psutil.Process(pid).parents()):
-                        raise ValueError('Unexpected GPU fan owner')
-                    self.worker_pid = pid
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    if not (exited and terminal):
-                        raise ValueError('Cannot confirm GPU fan owner')
-            if not (exited and terminal) and time.time() - stamp > STATUS_STALE_SECONDS:
-                raise ValueError('GPU fan status is stale; restoration unconfirmed')
-            if exited and not terminal:
-                raise ValueError('GPU fan worker exited; restoration unconfirmed')
-            if state == 'active' and finite(status.get('command_pct'), 30, 100) is None:
-                raise ValueError('Invalid GPU fan command report')
-            if state == 'standby' and type(status.get('thermal_ready')) is not bool:
-                raise ValueError('Invalid GPU fan standby report')
+            now = time.time()
+            status, validate = read_status_report(
+                open_status_file, self.status_path, self.last_status,
+                exited=exited, started=self.started, now=now,
+                opening_timeout=GPU_STATUS_POLICY.opening_timeout,
+                opening_text=GPU_STATUS_POLICY.opening_text)
+            if not validate:
+                return status
+            reason, worker_pid = check_status(
+                GPU_STATUS_POLICY, status, exited=exited,
+                worker_pid=self.worker_pid, process_pid=self.process.pid,
+                started=self.started, now=now)
+            if reason is not None:
+                raise ValueError(reason)
+            self.worker_pid = worker_pid
             self.last_status = status
             return status
         except (OSError, ValueError) as exc:
             return status_error(str(exc))
-
-
-class OwnerHeartbeat:
-    def __init__(self, stop):
-        self.stop = stop
-        self.last_seen = time.monotonic()
-
-    def expired(self):
-        return time.monotonic() - self.last_seen > 15
-
-    def listen(self):
-        try:
-            for line in sys.stdin:
-                if line.strip() == 'stop':
-                    break
-                if line.strip() == 'alive':
-                    self.last_seen = time.monotonic()
-        finally:
-            self.stop.set()
 
 
 def recovery_journal_exists(path):
@@ -458,15 +442,14 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
             raise RuntimeError('GPU controller owner process changed')
 
         def check_owner():
-            if stop.is_set() or not owner.is_running():
-                raise StartupCancelled('GPU owner stopped before takeover')
-            if heartbeat.expired():
-                raise OwnerHeartbeatExpired('GPU owner heartbeat expired')
+            fan_common.check_owner(stop, owner, heartbeat,
+                                   'GPU owner stopped before takeover',
+                                   'GPU owner heartbeat expired')
 
         def check_startup():
-            check_owner()
-            require_hardware_access()
-            check_owner()
+            fan_common.check_guarded(stop, owner, heartbeat, require_hardware_access,
+                                     'GPU owner stopped before takeover',
+                                     'GPU owner heartbeat expired')
 
         last_ready_stamp = None
         last_observed_stamp = None
@@ -631,17 +614,14 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
         touched = bool(session and session.touched)
         control_attempted = control_attempted or touched
         if session is not None:
-            restore_errors = session.restore()
-            if restore_errors:
-                time.sleep(0.2)
-                restore_errors = session.restore()
+            restore_errors = fan_common.restore_with_retry(session.restore)
         if adapter is not None:
             try:
                 adapter.close()
             except Exception as exc:
                 restore_errors.append(str(exc))
         publication_error = write_terminal_status(path, 'error' if error or restore_errors else 'stopped',
-                publisher=write_status, profile=PROFILE,
+                publisher=write_status, profile=PROFILE, compact_keys=GPU_TERMINAL_KEYS,
                 reason=error or ('GPU fan restore unconfirmed' if restore_errors else
                                 'GPU startup cancelled before takeover' if startup_cancelled else
                                 'Saved GPU fan curve restored' if control_attempted or recovered else

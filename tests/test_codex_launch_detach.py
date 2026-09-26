@@ -51,6 +51,11 @@ class CodexDetachTests(unittest.TestCase):
         ):
             self.assertEqual(codex_detach.relay_to_scheduled_task(), 2)
 
+    def test_unexpected_crash_is_neither_relay_nor_launch(self):
+        with mock.patch.object(codex_detach, "relay_to_scheduled_task",
+                               side_effect=RuntimeError("synthetic ancestry failure")):
+            self.assertEqual(codex_detach.main(), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

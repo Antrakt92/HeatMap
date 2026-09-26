@@ -1,13 +1,12 @@
 """Verified, opt-in ownership of the entire B550 IT8792E fan group."""
-import json
 import os
 import time
-import uuid
 from pathlib import Path
 
 from pawnio_shared import IsaBus, SignedEcBridge
 from thermal_policy import finite
 from startup_readiness import StartupNotReady
+import fan_common
 
 SHARED_NAMES = ('System Fan #4', 'System Fan #5 / Pump', 'System Fan #6 / Pump')
 CHIP = '/lpc/it8792e/0'
@@ -54,13 +53,8 @@ class SharedRecoveryJournal:
         payload = dict(profile=SHARED_JOURNAL_PROFILE, version=1, board=SHARED_BOARD,
                        module=dict(SHARED_MODULE),
                        baseline={f'{register:02X}': baseline[register] for register in REGISTERS})
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_name(self.path.name + '.' + uuid.uuid4().hex + '.tmp')
+        temporary = fan_common.stage_json_payload(self.path, payload)
         try:
-            with temporary.open('w', encoding='utf-8') as stream:
-                json.dump(payload, stream)
-                stream.flush()
-                os.fsync(stream.fileno())
             os.replace(temporary, self.path)
         finally:
             temporary.unlink(missing_ok=True)
@@ -80,9 +74,11 @@ class SharedRecoveryJournal:
         return {register: saved['baseline'][f'{register:02X}'] for register in REGISTERS}
 
     def recover(self, backend, bridge, bus=IsaBus):
+        def _open_utf8(path):
+            return open(path, encoding='utf-8')
+
         try:
-            with open(self.path, encoding='utf-8') as stream:
-                saved = json.loads(stream.read(65536))
+            saved = fan_common.load_json_payload(self.path, _open_utf8)
         except FileNotFoundError:
             return False
         except (OSError, ValueError) as exc:
@@ -322,6 +318,7 @@ class SharedFanSession:
             with self.bus():
                 # If a partial takeover failed before EC disable, leave firmware
                 # alone; do not fight a live automatic controller with duty writes.
+                wrote_pwm = False
                 try:
                     mode = self.bridge.read_mode()
                     if mode == 0:
@@ -330,6 +327,7 @@ class SharedFanSession:
                                 self.backend.write(register, self.baseline[register])
                             except Exception as exc:
                                 errors.append(str(exc))
+                        wrote_pwm = True
                     elif any(self.backend.read(r) != self.baseline[r] for r in (0x15, 0x16, 0x17)):
                         errors.append('Shared register modes changed while firmware owns outputs')
                 except Exception as exc:
@@ -343,6 +341,16 @@ class SharedFanSession:
                         errors.append('Shared firmware restoration was not confirmed')
                 except Exception as exc:
                     errors.append(str(exc))
+                if wrote_pwm:
+                    # Duties we wrote must read back; an unverified PWM leaves
+                    # the header at an unknown speed despite a clean mode check.
+                    try:
+                        mismatched = [f'{register:#04x}' for register in PWM_REGISTERS
+                                      if self.backend.read(register) != self.baseline[register]]
+                        if mismatched:
+                            errors.append('Shared PWM duties were not restored: ' + ', '.join(mismatched))
+                    except Exception as exc:
+                        errors.append(str(exc))
                 if self.backend.read(0x13) != self.baseline[0x13]:
                     errors.append('Shared output bits were not restored')
         except Exception as exc:

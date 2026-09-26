@@ -7,6 +7,7 @@ from unittest import mock
 
 import case_fans
 import shared_fans
+from fan_common import OwnerHeartbeat
 from test_case_fan_fallback import controller_topology
 
 
@@ -18,9 +19,10 @@ class CaseReadinessTests(unittest.TestCase):
         self.computer, self.channels = controller_topology()
         self.channels[shared_fans.SHARED_NAMES[2]].tach.Value = 0
         self.clock = [100.0]
-        self.heartbeat = [100.0]
         self.stop = mock.Mock()
         self.stop.is_set.return_value = False
+        self.heartbeat = OwnerHeartbeat(self.stop)
+        self.heartbeat.last_seen = 100.0
         self.owner = mock.Mock()
         self.owner.is_running.return_value = True
         self.statuses = []
@@ -28,7 +30,7 @@ class CaseReadinessTests(unittest.TestCase):
 
     def advance(self, seconds):
         self.clock[0] += seconds
-        self.heartbeat[0] = self.clock[0]
+        self.heartbeat.last_seen = self.clock[0]
         return False
 
     def wait(self, read, shared=True, timeout=60):

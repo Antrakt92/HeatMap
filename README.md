@@ -138,8 +138,11 @@ zero RPM while the relevant component is hot: CPU at 70°C or above; GPU Hotspot
 at 85°C, Core at 80°C, or memory at 85°C or above. Any of these heat sources counts
 for a case fan. A cool GPU in normal Zero RPM mode is not classified as faulty
 because the CPU is under load. An unused header reading zero from its first
-sample is not considered a fault. This is tachometer-based detection, not a
-guarantee that every physical fan on a splitter is spinning.
+sample is not considered a fault. Case-fan assistance additionally requires
+the header to have reported at least 200 RPM before stopping; a header that
+only ever spun slower still raises the panel warning above. This is
+tachometer-based detection, not a guarantee that every physical fan on a
+splitter is spinning.
 
 If the GPU exposes multiple tachometers, Fans shows them separately; a previously
 working channel stopping while the GPU is hot makes Fans red. For a single
@@ -189,7 +192,11 @@ the driver retains the last HeatMap curve, reaching 100% at 90°C at the driver'
 own temperature input. On its next startup, the GPU controller checks the journal
 of original settings and restores them if the GPU and current curve match a known
 HeatMap state. External changes are preserved and reported as a conflict. Normal
-shutdown removes the journal only after verified restoration.
+shutdown removes the journal only after verified restoration. A power loss in
+the milliseconds of a journal write can lose the journal itself (Windows cannot
+fsync directories); the next start then cannot distinguish a leftover HeatMap
+curve from a user curve, so it adopts the current settings as the baseline.
+After a power loss, compare the active curve with your Adrenalin profile.
 After a conflict, close other fan-control applications and toggle
 `Automatic GPU fans` OFF → ON: this explicitly accepts the current curve and
 Zero RPM setting. HeatMap verifies the GPU and journal, reads the current settings
@@ -505,7 +512,7 @@ available on GitHub.
 - 64-bit Windows
 - Administrator privileges (required to read sensors)
 
-Verified environment: Python 3.13, pythonnet 3.1.0, psutil 7.2.2. Exact production versions are pinned in `constraints-known-good.txt`; a separate CI lane checks newer allowed versions.
+Verified environment: Python 3.13, pythonnet 3.1.0, psutil 7.2.2. Exact production versions are pinned in `constraints-known-good.txt`; a separate CI lane checks newer allowed versions. CI exercises 3.10, 3.13, and 3.14; other 3.10+ versions are accepted but less covered.
 
 ### Steps
 
