@@ -37,7 +37,8 @@ from thermal_policy import (ThermalAdvisor, gpu_delta, delta_severity, finite,
 from case_fans import FanWorkerClient, full_rpm_reference
 from gpu_fans import GpuWorkerClient, mode_text as gpu_fan_mode_text
 from hardware_access_guard import HardwareAccessConflict, require_hardware_access
-from storage_identity import volume_disk_number
+from storage_identity import volume_disk_number, physical_disk_numbers
+from storage_probe import probe_disk, snapshot_data as storage_snapshot_data
 
 VERSION = "1.3.0"
 
@@ -2747,6 +2748,9 @@ class OverlayApp:
         self.running = True
         self._stop_event = threading.Event()
         self.sensor_data = {}
+        self._isolated_storage = True
+        self._storage_snapshot = {}
+        self._storage_numbers = set()
         self._sensor_sample_time = None
         self.lock = threading.Lock()
         self._desktop_fallback_ready = False
@@ -2966,6 +2970,8 @@ class OverlayApp:
         # --- Start sensor thread ---
         self.sensor_thread = threading.Thread(target=self.sensor_loop, daemon=True)
         self.sensor_thread.start()
+        self.storage_thread = threading.Thread(target=self.storage_loop, daemon=True)
+        self.storage_thread.start()
 
         # --- Start UI update loop ---
         self.update_ui()
@@ -3954,7 +3960,10 @@ class OverlayApp:
         )
         status = getattr(self, "_case_fan_status", {"state": "off"})
         messages = [item.text for item in self.thermal_findings]
+        messages.extend(data.get("storage_errors", []))
         severity = max((item.severity for item in self.thermal_findings), default=0)
+        if data.get("storage_errors"):
+            severity = max(severity, 1)
         missing = [label for key, label in (("cpu_temp", "CPU"), ("gpu_core_temp", "GPU Core"))
                    if data.get(key) is None]
         if self.config.get("case_fans_enabled", False):
@@ -4142,7 +4151,8 @@ class OverlayApp:
                     computer = None
                     if not self.running or self._stop_event.is_set():
                         break
-                    options = ({} if getattr(self, "config", {}).get("storage_temperatures_enabled", True)
+                    options = ({} if not getattr(self, "_isolated_storage", False)
+                               and getattr(self, "config", {}).get("storage_temperatures_enabled", True)
                                else {"storage_enabled": False})
                     if access_mode == "shared":
                         computer = init_hardware_monitor(coexistence=True, **options)
@@ -4174,6 +4184,13 @@ class OverlayApp:
                     data.update(volume_data)
                     if not getattr(self, "config", {}).get("storage_temperatures_enabled", True):
                         data["storage_temperatures_disabled"] = True
+                    elif getattr(self, "_isolated_storage", False):
+                        numbers = {volume["disk_number"] for volume in volume_data.get("volumes", [])
+                                   if type(volume.get("disk_number")) is int}
+                        with self.lock:
+                            storage_snapshot = dict(self._storage_snapshot)
+                            numbers.update(getattr(self, "_storage_numbers", set()))
+                        data.update(storage_snapshot_data(storage_snapshot, numbers, time.monotonic()))
                     if update_storage:
                         next_storage_update = time.monotonic() + VOLUME_REFRESH_SECONDS
                         storage_failed = bool(data.get(SENSOR_STORAGE_FAILED_KEY))
@@ -4230,6 +4247,62 @@ class OverlayApp:
             _close_hardware_monitor(computer)
             with self.lock:
                 self.computer = None
+
+    def storage_loop(self):
+        """Keep slow disk identification independent of the CPU/GPU sensor owner."""
+        retry_after = {}
+        def cancelled():
+            return (self._stop_event.is_set() or not self.running
+                    or bool(getattr(self, "_hardware_pause_reason", None)))
+
+        while not cancelled():
+            with self.lock:
+                volume_snapshot = getattr(self, "_volume_snapshot", None)
+            volumes = _fresh_volume_data(volume_snapshot, time.monotonic()) or {}
+            numbers = {volume["disk_number"] for volume in volumes.get("volumes", [])
+                       if type(volume.get("disk_number")) is int}
+            inventory = physical_disk_numbers()
+            with self.lock:
+                if inventory is not None:
+                    self._storage_numbers = inventory
+                numbers.update(getattr(self, "_storage_numbers", set()))
+            if not numbers or not self.config.get("storage_temperatures_enabled", True):
+                self._stop_event.wait(2)
+                continue
+            # Mounted volumes come first so a slow unmounted disk cannot delay
+            # the first useful temperatures for the visible drive rows.
+            mounted = {volume["disk_number"] for volume in volumes.get("volumes", [])
+                       if type(volume.get("disk_number")) is int}
+            for number in sorted(numbers, key=lambda number: (number not in mounted, number)):
+                if cancelled():
+                    return
+                if time.monotonic() < retry_after.get(number, 0):
+                    continue
+                try:
+                    require_hardware_access("monitor")
+                    sample = probe_disk(number, cancelled)
+                except HardwareAccessConflict:
+                    # The sensor owner publishes the pause and stops fan owners.
+                    return
+                except (OSError, ValueError) as exc:
+                    sample = {"disk_number": number, "error": str(exc)}
+                if sample is None or cancelled():
+                    return
+                if "error" in sample:
+                    # Do not hammer a driver/device that timed out. Healthy
+                    # disks retain the normal 30-second refresh interval.
+                    retry_after[number] = time.monotonic() + 300
+                else:
+                    retry_after.pop(number, None)
+                with self.lock:
+                    previous = self._storage_snapshot.get(number)
+                    if "error" in sample and previous:
+                        sample["name"] = previous[1].get("name", f"Disk {number}")
+                    self._storage_snapshot[number] = (time.monotonic(), sample)
+            with self.lock:
+                self._storage_snapshot = {number: entry for number, entry in self._storage_snapshot.items()
+                                          if number in numbers}
+            self._stop_event.wait(VOLUME_REFRESH_SECONDS)
 
     def _poll_fan_controller(self, attribute, setting):
         worker = getattr(self, attribute)
@@ -4673,6 +4746,7 @@ class OverlayApp:
         deadline = time.monotonic() + 5
         for name, worker in (
             ("Sensor", getattr(self, "sensor_thread", None)),
+            ("Storage", getattr(self, "storage_thread", None)),
             ("Diagnostics", getattr(self, "_diagnostics_thread", None)),
             ("Autostart", getattr(self, "_autostart_thread", None)),
         ):

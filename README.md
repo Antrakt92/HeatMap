@@ -289,12 +289,22 @@ mean the other fans are off. The command percentage and fraction of rated RPM
 (`~`) are not measured airflow; they cannot alone be used to compare different
 fan models.
 
-If native storage discovery hangs during startup, close HeatMap and set
-`"storage_temperatures_enabled": false` in `overlay_config.json`, then restart.
-This recovery option skips LHM storage discovery while retaining CPU, GPU,
-motherboard sensors and Windows volume fullness. Disk temperatures remain
-unavailable; Copy diagnostics reports `storage_temperatures_disabled: True`.
-The default is `true`. Restore it after resolving the storage-driver problem.
+Disk temperatures and model names are read in separate processes, one per
+physical disk confirmed by Windows device aliases. Mounted volumes are joined
+only through their confirmed disk extents; unmounted disks remain separate rows.
+Each probe has an eight-second timeout and refreshes approximately every
+30 seconds. Windows storage temperature properties are preferred; unsupported
+drivers fall back to direct identification with the pinned DiskInfoToolkit bundle,
+without global device enumeration. Secondary NVMe temperatures remain in diagnostics.
+The fallback retains the LHM SMART policy, including enabling SMART if initial
+attributes are unusable. The processes never control fans or modify user files.
+
+A slow disk cannot block CPU/GPU updates. Failed disks wait five minutes before
+retrying, while healthy disks keep updating. Expired readings are hidden after
+45 seconds; errors remain visible, and identified model names survive a later
+temperature timeout. Shutdown cancels the disposable storage readers.
+`"storage_temperatures_enabled": false` in `overlay_config.json` disables these
+probes explicitly; the default is `true`. Windows volume fullness remains available.
 
 Before opening sensors and at every poll, HeatMap checks for known monitoring
 and fan-control tools, AMD AtiSetup, and live `pnputil /add-driver /install`

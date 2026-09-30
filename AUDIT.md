@@ -1,14 +1,21 @@
 # HeatMap Audit Backlog
 
-## P2 - Native storage discovery can hang after driver installation
+Storage discovery is isolated per Windows-confirmed physical disk with bounded
+probes. Windows temperature properties and direct SMART identification restored
+all four mounted devices; global LHM storage discovery and Windows disk inventory
+queries can block on the affected machine. The fallback uses internal APIs of the
+integrity-verified pinned DiskInfoToolkit bundle, so runtime upgrades must revalidate
+constructor and SMART conversion compatibility. Expired readings and failures stay
+visible; CPU/GPU readings and Windows volume fullness remain independent.
 
-A bounded elevated component probe reproduced a storage-only Open timeout; CPU,
-GPU and motherboard discovery succeeded. The explicit
-`storage_temperatures_enabled=false` recovery option preserves their readings
-and Windows volume capacity. Storage temperatures remain unavailable until the
-underlying driver/device issue is resolved; its precise cause is unconfirmed.
-A blocked in-process native call cannot safely be interrupted by a Python timeout.
+## P2 - Disk 0 SATA I/O failures on the affected machine
 
+System events 129 (storahci controller resets) and 153 (Disk 0 I/O retries) were
+already present before this repair. The unmounted WD40EZAZ can expose model and
+temperature through Windows properties while direct SMART identification times out.
+The underlying device/controller/cable cause is unconfirmed. The app now bounds
+probes and backs off failed disks for five minutes; it does not repair Windows
+storage I/O, reconfigure the controller or alter disk contents.
 
 Sensor source/display audit and verified corrections:
 `docs/sensor-source-audit-2026-09-24.md`. The exact AMD PMLOG-versus-Windows activity

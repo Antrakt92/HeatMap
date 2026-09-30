@@ -22,7 +22,7 @@ def layout_app(scaling=1.333, height=720):
     with ExitStack() as stack:
         # Suppress dispatch, not just winsound.Beep: a delayed second beep could
         # otherwise outlive the fixture and run after the sound mock is removed.
-        for name in ("sensor_loop", "_check_alerts", "_schedule_embed", "_poll_screen_change", "_poll_peek_edge", "_poll_desktop_visibility"):
+        for name in ("sensor_loop", "storage_loop", "_check_alerts", "_schedule_embed", "_poll_screen_change", "_poll_peek_edge", "_poll_desktop_visibility"):
             stack.enter_context(mock.patch.object(overlay.OverlayApp, name))
         stack.enter_context(mock.patch.object(overlay.tk, "Tk", side_effect=hidden_root))
         stack.enter_context(mock.patch.object(overlay, "_get_monitor_areas", return_value=areas))
