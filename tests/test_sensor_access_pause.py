@@ -11,6 +11,29 @@ from test_sensor_lifecycle import sensor_app
 
 
 class SensorAccessPauseTests(unittest.TestCase):
+    def test_disabled_storage_recovers_other_sensors_in_full_and_shared_modes(self):
+        for mode in ('full', 'shared'):
+            with self.subTest(mode=mode):
+                app = sensor_app(2)
+                app.config = {'storage_temperatures_enabled': False}
+                app.fan_worker = mock.Mock(process=None)
+                app.gpu_fan_worker = mock.Mock(process=None)
+                computer = mock.Mock()
+                with (mock.patch.object(overlay, 'require_hardware_access', return_value=mode),
+                      mock.patch.object(overlay, 'init_hardware_monitor', return_value=computer) as initialize,
+                      mock.patch.object(overlay, 'read_sensors', return_value={'cpu_temp': 50, 'gpu_temp': 45}),
+                      mock.patch.object(overlay, '_read_volume_usage', return_value={'volumes': [{'name': 'C:', 'used_pct': 40}]}),
+                      mock.patch.object(app, '_cache_sensor_diagnostics'),
+                      mock.patch.object(overlay.psutil, 'cpu_percent')):
+                    app.sensor_loop()
+                expected = {'storage_enabled': False}
+                if mode == 'shared':
+                    expected['coexistence'] = True
+                initialize.assert_called_once_with(**expected)
+                self.assertEqual(app.sensor_data['cpu_temp'], 50)
+                self.assertEqual(app.sensor_data['volumes'][0]['used_pct'], 40)
+                self.assertTrue(app.sensor_data['storage_temperatures_disabled'])
+
     def test_monitor_arriving_between_poll_and_open_does_not_latch_pause(self):
         app = sensor_app(2)
         shared = mock.Mock()

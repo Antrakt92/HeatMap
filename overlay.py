@@ -1349,7 +1349,7 @@ def _close_hardware_monitor(computer):
             log.debug("Failed to close hardware monitor", exc_info=True)
 
 
-def init_hardware_monitor(*, coexistence=False):
+def init_hardware_monitor(*, coexistence=False, storage_enabled=True):
     """Initialize LibreHardwareMonitor via pythonnet."""
     if coexistence:
         require_hardware_access("monitor")
@@ -1367,7 +1367,9 @@ def init_hardware_monitor(*, coexistence=False):
         computer = Computer()
         computer.IsCpuEnabled = True
         computer.IsGpuEnabled = True
-        computer.IsStorageEnabled = True
+        # WHY: a blocked native storage probe otherwise prevents every sensor
+        # from opening. Allow explicit recovery without disabling CPU/GPU reads.
+        computer.IsStorageEnabled = storage_enabled
         # RAM usage comes from Windows. Avoid a second DDR5 SPD/SMBus poller
         # alongside other monitoring tools; it adds no readings used by the main memory row.
         computer.IsMemoryEnabled = not coexistence
@@ -2552,11 +2554,11 @@ def _normalize_config(cfg, defaults):
             invalid_keys.append(key)
         else:
             normalized[key] = int(value)
-    for key in ("peek_enabled", "alerts_enabled", "details_enabled", "case_fans_enabled", "case_fans_shared_enabled", "gpu_fans_enabled"):
+    for key in ("peek_enabled", "alerts_enabled", "details_enabled", "storage_temperatures_enabled", "case_fans_enabled", "case_fans_shared_enabled", "gpu_fans_enabled"):
         if key not in provided_keys:
             continue
         if not isinstance(normalized.get(key), bool):
-            normalized[key] = defaults.get(key, False)
+            normalized[key] = defaults.get(key, key == "storage_temperatures_enabled")
             invalid_keys.append(key)
     for key in ("gpu_fan_max_rpm", "cpu_fan_max_rpm"):
         if key not in provided_keys:
@@ -4140,11 +4142,13 @@ class OverlayApp:
                     computer = None
                     if not self.running or self._stop_event.is_set():
                         break
+                    options = ({} if getattr(self, "config", {}).get("storage_temperatures_enabled", True)
+                               else {"storage_enabled": False})
                     if access_mode == "shared":
-                        computer = init_hardware_monitor(coexistence=True)
+                        computer = init_hardware_monitor(coexistence=True, **options)
                     else:
                         try:
-                            computer = init_hardware_monitor()
+                            computer = init_hardware_monitor(**options)
                         except HardwareAccessConflict:
                             # A monitor can start between this poll and Open's
                             # stricter guard. Re-enter the loop for fan handback
@@ -4168,6 +4172,8 @@ class OverlayApp:
                     update_storage = time.monotonic() >= next_storage_update
                     data = read_sensors(computer, update_storage=update_storage)
                     data.update(volume_data)
+                    if not getattr(self, "config", {}).get("storage_temperatures_enabled", True):
+                        data["storage_temperatures_disabled"] = True
                     if update_storage:
                         next_storage_update = time.monotonic() + VOLUME_REFRESH_SECONDS
                         storage_failed = bool(data.get(SENSOR_STORAGE_FAILED_KEY))

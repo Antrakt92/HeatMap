@@ -1,5 +1,15 @@
 # HeatMap Audit Backlog
 
+## P2 - Native storage discovery can hang after driver installation
+
+A bounded elevated component probe reproduced a storage-only Open timeout; CPU,
+GPU and motherboard discovery succeeded. The explicit
+`storage_temperatures_enabled=false` recovery option preserves their readings
+and Windows volume capacity. Storage temperatures remain unavailable until the
+underlying driver/device issue is resolved; its precise cause is unconfirmed.
+A blocked in-process native call cannot safely be interrupted by a Python timeout.
+
+
 Sensor source/display audit and verified corrections:
 `docs/sensor-source-audit-2026-09-24.md`. The exact AMD PMLOG-versus-Windows activity
 accounting difference remains unresolved; the main GPU percentage now uses Windows

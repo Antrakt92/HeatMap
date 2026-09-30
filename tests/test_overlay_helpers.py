@@ -1376,6 +1376,34 @@ class OverlayHelperTests(unittest.TestCase):
         self.assertEqual(data["cpu_load"], 35)
         self.assertTrue(any("Bad GPU" in message for message in logs.output))
 
+    def test_storage_recovery_option_skips_native_storage_open(self):
+        modules, hardware_type, sensor_type = _fake_lhm_modules()
+        clr_module = ModuleType('clr')
+        clr_module.AddReference = lambda _path: None
+        modules['clr'] = clr_module
+        computer = _FakeInitComputer([])
+        def guarded_open():
+            if computer.IsStorageEnabled:
+                raise RuntimeError('storage driver is stuck')
+            computer.opened = True
+        computer.Open = guarded_open
+        modules['LibreHardwareMonitor.Hardware'].Computer = lambda: computer
+        with (mock.patch.dict(sys.modules, modules),
+              mock.patch.object(overlay, 'require_hardware_access'),
+              mock.patch.object(overlay.os.path, 'exists', return_value=True)):
+            self.assertIs(overlay.init_hardware_monitor(storage_enabled=False), computer)
+        self.assertTrue(computer.IsCpuEnabled)
+        self.assertTrue(computer.IsGpuEnabled)
+        self.assertTrue(computer.IsMotherboardEnabled)
+        self.assertFalse(computer.IsStorageEnabled)
+
+    def test_storage_recovery_config_requires_a_boolean(self):
+        for value in ('false', 0, None):
+            cfg, invalid = overlay._normalize_config(
+                {'storage_temperatures_enabled': value}, overlay._default_config())
+            self.assertTrue(cfg['storage_temperatures_enabled'])
+            self.assertIn('storage_temperatures_enabled', invalid)
+
     def test_init_hardware_monitor_sanity_check_skips_non_cpu_hardware(self):
         modules, HardwareType, SensorType = _fake_lhm_modules()
         clr_module = ModuleType("clr")
