@@ -165,7 +165,10 @@ immediately, even if it has never produced a reading.
 A separate **Cooling → Automatic GPU fans** toggle is available for the
 **Gigabyte RX 7900 XT Gaming OC**. HeatMap reads Core, Hotspot, and memory
 temperatures through the installed AMD ADLX and selects the highest speed
-requested by the three curves. On a cool card, `AUTO ready · Driver curve` means
+requested by the three curves. An integrated AMD adapter may coexist: HeatMap
+selects exactly one matching Gigabyte board by name and PCI/subsystem identity,
+independent of adapter order. Missing or duplicate matching boards block control.
+On a cool card, `AUTO ready · Driver curve` means
 HeatMap is monitoring while the fans remain on the saved driver curve. Control
 engages only in response to the GPU's own temperatures: **Core at 70°C, Hotspot
 at 85°C, or Memory at 85°C or above**. CPU temperature, case fans, and their errors

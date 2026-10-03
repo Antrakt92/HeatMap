@@ -5,6 +5,10 @@ Background GCC and independent GPU ownership policy:
 assistance; case/EC control remains exclusive, with known installer blocking and
 GPU curve/Zero RPM conflict checks retained. Extended simultaneous operation
 remains a hardware follow-up.
+ADLX GPU selection now permits an integrated AMD adapter beside exactly one
+matching Gigabyte RX 7900 XT; order, missing/duplicate matches and identity
+changes are covered by regressions. The read-only native probe matched the
+expected board and obtained all three temperatures without changing settings.
 
 Controller freshness and native-storage access ordering audit:
 `docs/controller-freshness-audit-2026-10-03.md`. Reordered tachometer records and

@@ -33,6 +33,23 @@ an external curve change beside GCC: the worker faults, preserves the changed
 settings and retains the recovery journal, without issuing further fan writes.
 Hosted execution is skipped under repository policy.
 
+## Native startup follow-up
+
+After the ordinary restart, the GPU worker reached ADLX and reported that more
+than one AMD GPU was enumerated. The former single-adapter requirement prevented
+the installed RX 7900 XT from starting beside integrated AMD graphics. Selection
+now enumerates identities and requires exactly one match for the existing name,
+vendor 1002, device 744c, subsystem 240c and subvendor 1458. All enumeration probes
+are released. The selected slot is reacquired and its identity rechecked before
+obtaining fan tuning; missing, duplicate or changed identities remain failures.
+
+A fresh read-only native probe selected the expected Gigabyte RX 7900 XT, read
+its saved curve/Zero RPM and obtained Core 45°C, Hotspot 46°C and Memory 60°C.
+This probe did not command fans. Four additional tests cover integrated-adapter
+order, wrong/duplicate boards, changed selection and failed identity reads.
+All 927 local tests and the same compilation/integrity/preflight/manifest gates
+passed after this adapter-selection repair.
+
 Manual follow-up after a normal elevated restart: leave GCC in its ordinary
 background/update-check state, confirm GPU diagnostics reach standby or active,
 and observe ordinary fan response under the user's normal workload. Compare
