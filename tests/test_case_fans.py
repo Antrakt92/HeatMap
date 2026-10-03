@@ -299,7 +299,7 @@ class CaseFanTests(unittest.TestCase):
             reads[0] += 1
             if reads[0] >= stop_at_reads:
                 owner.is_running.return_value = False
-            return frozen
+            return frozen(reads[0]) if callable(frozen) else frozen
 
         stop = mock.Mock()
         stop.is_set.return_value = False
@@ -351,6 +351,30 @@ class CaseFanTests(unittest.TestCase):
             result = fans.worker(path, 7, 1,
                                  full_rpm={name: 1200 for name in fans.INDEPENDENT_TARGETS})
         return result, controls, reports, updates, reads[0]
+
+    def test_reordered_frozen_fans_still_degrade_and_fault_with_verified_restore(self):
+        entries = [dict(id='fan-a', rpm=800), dict(id='fan-b', rpm=900)]
+        def snapshot(read_number):
+            return dict(cpu_temp=50, gpu_core_temp=45, gpu_hotspot_temp=60, gpu_memory_temp=60,
+                        fans=entries if read_number % 2 else list(reversed(entries)))
+        result, controls, reports, updates, _reads = self.run_frozen_worker(
+            snapshot, stop_at_reads=20, tick=2.0)
+        self.assertEqual(result, 1)
+        self.assertEqual(len(updates), 1)
+        self.assertTrue(any(report.get('reason') == 'Stale case sensor readings: full airflow'
+                            for report in reports))
+        self.assertIn('stopped updating', reports[-1]['reason'])
+        self.assertTrue(reports[-1]['restore_confirmed'])
+        for control in controls[:2]:
+            control.SetDefault.assert_called()
+
+    def test_signature_ordering_preserves_duplicate_missing_and_valid_tach_values(self):
+        entries = [dict(id='fan-a', rpm=None), dict(id='fan-a', rpm=800),
+                   dict(id='fan-b', rpm=float('nan'))]
+        self.assertEqual(fans._sensor_signature({'fans': entries}),
+                         fans._sensor_signature({'fans': list(reversed(entries))}))
+        self.assertNotEqual(fans._sensor_signature({'fans': entries}),
+                            fans._sensor_signature({'fans': entries[1:]}))
 
     def test_frozen_sensor_snapshot_never_earns_cooling_credit(self):
         # One dict object returned for every sample: only the first may feed
