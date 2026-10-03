@@ -209,6 +209,27 @@ class GpuStartupAuditTests(unittest.TestCase):
 
 
 class GpuAssistPolicyTests(unittest.TestCase):
+    def test_sampling_gap_cannot_complete_cooling_hold(self):
+        policy = gpu_fans.GpuAssistPolicy()
+        self.assertTrue(policy.update(sample(gpu_core_temp=70), 0))
+        self.assertTrue(policy.update(sample(), 1))
+        self.assertTrue(policy.update(sample(), 12))
+        for now in (14, 16, 18, 20, 21.9):
+            self.assertTrue(policy.update(sample(), now))
+        self.assertFalse(policy.update(sample(), 22))
+
+    def test_invalid_or_reversed_clock_restarts_cooling_evidence(self):
+        for bad_time in (float('nan'), False, 0, 1):
+            with self.subTest(now=bad_time):
+                policy = gpu_fans.GpuAssistPolicy()
+                self.assertTrue(policy.update(sample(gpu_core_temp=70), 0))
+                self.assertTrue(policy.update(sample(), 1))
+                self.assertTrue(policy.update(sample(), bad_time))
+                deadline = 12 if bad_time != bad_time or type(bad_time) is bool else bad_time + 10
+                for now in (2, 4, 6, 8, deadline - 0.1):
+                    self.assertTrue(policy.update(sample(), now))
+                self.assertFalse(policy.update(sample(), deadline))
+
     def test_partial_sensor_loss_cannot_start_or_end_assistance(self):
         policy = gpu_fans.GpuAssistPolicy()
         self.assertFalse(policy.update(sample(gpu_hotspot_temp=None, gpu_core_temp=90), 0))
@@ -223,6 +244,8 @@ class GpuAssistPolicyTests(unittest.TestCase):
                 self.assertTrue(policy.update(sample(), 1))
                 self.assertTrue(policy.update(sample(**extra), 9))
                 self.assertTrue(policy.update(sample(), 10))
+                for now in (12, 14, 16, 18):
+                    self.assertTrue(policy.update(sample(), now))
                 self.assertTrue(policy.update(sample(), 19.9))
                 self.assertFalse(policy.update(sample(), 20))
 
