@@ -40,8 +40,18 @@ class GpuAssistPolicy:
     def __init__(self):
         self.active = False
         self.cool_since = None
+        self.last_time = None
 
     def update(self, data, now):
+        if finite(now, 0, 1e15) is None:
+            self.cool_since, self.last_time = None, None
+            return self.active
+        # A blocked metrics call must not count as observed cooling. Use the
+        # same interval that makes missing worker samples degrade to full speed.
+        if self.last_time is not None and (now <= self.last_time or
+                now - self.last_time > SENSOR_STALE_DEGRADE_SECONDS):
+            self.cool_since = None
+        self.last_time = now
         valid = all(finite(data.get(key), 1, 150) is not None for key in CURVES)
         if not self.active:
             self.active = valid and any(data[key] >= limit for key, limit in ASSIST_ON.items())
