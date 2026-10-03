@@ -1,5 +1,10 @@
 # HeatMap Audit Backlog
 
+GPU policy review: `docs/gpu-policy-review-2026-10-03.md`. The existing cooling-first
+thresholds are retained after manufacturer-source review; complete-worker tests
+now explicitly cover Hotspot 40 idle, the full-speed boundary and cooling handback.
+Matched-load noise/temperature optimization and physical response remain open.
+
 Warning-panel follow-up: technical autostart and volume errors are summarized
 on the desktop and retained in Copy diagnostics. Disabled case control and normal
 startup waiting no longer produce warnings; pending restoration remains visible.
