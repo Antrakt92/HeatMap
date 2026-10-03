@@ -1,5 +1,11 @@
 # HeatMap Audit Backlog
 
+Background GCC and independent GPU ownership policy:
+`docs/gpu-gcc-coexistence-2026-10-03.md`. GCC alone no longer suppresses GPU
+assistance; case/EC control remains exclusive, with known installer blocking and
+GPU curve/Zero RPM conflict checks retained. Extended simultaneous operation
+remains a hardware follow-up.
+
 Controller freshness and native-storage access ordering audit:
 `docs/controller-freshness-audit-2026-10-03.md`. Reordered tachometer records and
 gaps between GPU samples no longer earn cooling credit. SMART construction now

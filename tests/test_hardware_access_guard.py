@@ -16,6 +16,17 @@ def process(name):
 
 
 class HardwareAccessGuardTests(unittest.TestCase):
+    def test_background_gcc_allows_gpu_only_and_other_conflicts_still_block(self):
+        with mock.patch.object(guard, 'hardware_conflicts', return_value=['gcc.exe']):
+            self.assertEqual(guard.require_hardware_access('gpu_control'), 'full')
+            with self.assertRaises(guard.HardwareAccessConflict):
+                guard.require_hardware_access('control')
+        for other in sorted((guard.CONFLICTING_PROCESS_NAMES - {'gcc.exe'}) | {'pnputil.exe'}):
+            with self.subTest(other=other), mock.patch.object(
+                    guard, 'hardware_conflicts', return_value=['gcc.exe', other]):
+                with self.assertRaises(guard.HardwareAccessConflict):
+                    guard.require_hardware_access('gpu_control')
+
     def test_all_monitor_combinations_share_reading_but_never_control(self):
         names = sorted(guard.CONFLICTING_PROCESS_NAMES - {'atisetup.exe'})
         for count in (1, 2, 3):

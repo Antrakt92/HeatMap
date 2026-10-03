@@ -17,7 +17,7 @@ from case_fans import (FanWorkerClient, TerminalStatusWriteError, WorkerMutex,
 import fan_common
 from fan_common import (OwnerHeartbeat, OwnerHeartbeatExpired, GPU_TERMINAL_KEYS,
                         read_status_report, check_status, write_alive, StatusPolicy)
-from hardware_access_guard import require_hardware_access
+from hardware_access_guard import require_hardware_access as _require_hardware_access
 from thermal_policy import (finite, interpolate, SENSOR_STALE_DEGRADE_SECONDS, SENSOR_STALE_FAIL_SECONDS,
                             TACH_PERSISTENCE_SECONDS)
 from startup_readiness import StartupCancelled, StartupNotReady, wait_for_readiness
@@ -33,6 +33,10 @@ LABELS = {'gpu_core_temp': 'Core', 'gpu_hotspot_temp': 'Hotspot', 'gpu_memory_te
 ASSIST_ON = {'gpu_core_temp': 70, 'gpu_hotspot_temp': 85, 'gpu_memory_temp': 85}
 ASSIST_OFF = {'gpu_core_temp': 60, 'gpu_hotspot_temp': 75, 'gpu_memory_temp': 75}
 RELEASE_HOLD_SECONDS = 10
+
+
+def require_hardware_access():
+    return _require_hardware_access("gpu_control")
 
 
 class GpuAssistPolicy:
