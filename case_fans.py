@@ -568,12 +568,14 @@ def _sensor_signature(data):
 
     Non-finite readings map to None so NaN instability cannot fake freshness,
     and extra keys (timestamps, volumes) never count as a fresh sample.
+    Enumeration order alone is not new hardware feedback.
     """
     temps = tuple(finite(data.get(key), 1, 150) for key in
                   ("cpu_temp", "gpu_core_temp", "gpu_hotspot_temp", "gpu_memory_temp"))
     entries = data.get("fans", []) or []
-    fans = tuple((str(fan.get("id") or fan.get("name")), finite(fan.get("rpm"), 0, 10000))
-                 for fan in entries)
+    readings = [(str(fan.get("id") or fan.get("name")), finite(fan.get("rpm"), 0, 10000))
+                for fan in entries]
+    fans = tuple(sorted(readings, key=lambda item: (item[0], -1 if item[1] is None else item[1])))
     return (temps, fans)
 
 
