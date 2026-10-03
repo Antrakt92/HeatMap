@@ -1,5 +1,7 @@
 """An unavailable native disk must not hide healthy disks or CPU/GPU samples."""
 import json
+import sys
+from types import SimpleNamespace as NS
 import unittest
 from unittest import mock
 
@@ -9,6 +11,27 @@ from test_sensor_lifecycle import sensor_app
 
 
 class StorageProbeTests(unittest.TestCase):
+    def test_conflict_after_windows_query_prevents_native_smart_constructor(self):
+        from hardware_access_guard import HardwareAccessConflict
+        constructor = mock.Mock()
+        constructor.GetParameters.return_value = [None, None]
+        descriptor_type, storage_type = mock.Mock(), mock.Mock()
+        storage_type.GetConstructors.return_value = [constructor]
+        assembly = mock.Mock()
+        assembly.GetType.side_effect = [descriptor_type, storage_type]
+        system = NS(Activator=mock.Mock(), Int32=int, Object=object,
+                    Array={object: lambda values: values})
+        reflection = NS(Assembly=mock.Mock(), BindingFlags=NS(Instance=1, NonPublic=2))
+        reflection.Assembly.LoadFrom.return_value = assembly
+        with (mock.patch.dict(sys.modules, {'clr': mock.Mock(), 'System': system, 'System.Reflection': reflection}),
+              mock.patch('setup.verify_lib_manifest', return_value=(True, [])),
+              mock.patch.object(storage_probe, 'disk_properties', return_value=None),
+              mock.patch.object(storage_probe, 'require_hardware_access', side_effect=[
+                  'full', HardwareAccessConflict('GPU driver installation started')])):
+            with self.assertRaises(HardwareAccessConflict):
+                storage_probe._native_sample(1)
+        constructor.Invoke.assert_not_called()
+
     def test_current_identification_is_not_overwritten_by_an_older_device_model(self):
         app = sensor_app(1)
         app.config = {}

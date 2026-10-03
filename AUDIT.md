@@ -1,5 +1,12 @@
 # HeatMap Audit Backlog
 
+Controller freshness and native-storage access ordering audit:
+`docs/controller-freshness-audit-2026-10-03.md`. Reordered tachometer records and
+gaps between GPU samples no longer earn cooling credit. SMART construction now
+rechecks hardware access after Windows queries. Five additional regressions bring
+local coverage to 914 passing tests; physical restoration and coexistence checks
+below remain open.
+
 Storage discovery is isolated per Windows-confirmed physical disk with bounded
 probes. Windows temperature properties and direct SMART identification restored
 all four mounted devices; global LHM storage discovery and Windows disk inventory
