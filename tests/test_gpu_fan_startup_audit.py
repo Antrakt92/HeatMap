@@ -96,6 +96,52 @@ class GpuStartupAuditTests(unittest.TestCase):
         self.assertTrue(any(report['state'] == 'standby' for report in reports))
         self.assertFalse(reports[-1]['control_attempted'])
 
+    def test_reported_idle_hotspot_40_never_commands_fans_for_two_minutes(self):
+        result, adapter, baseline, reports, journal = self.run_worker(
+            lambda *_: sample(gpu_core_temp=40, gpu_hotspot_temp=40, gpu_memory_temp=56),
+            stop_at=120)
+        self.assertEqual(result, 0)
+        self.assertEqual(adapter.writes, [])
+        self.assertEqual(adapter.snapshot(), baseline)
+        self.assertFalse(journal)
+        self.assertTrue(all(r['state'] == 'standby' for r in reports
+                            if r['state'] not in ('checking', 'stopped')))
+
+    def test_hotspot_worker_boundaries_without_startup_full_speed_pulse(self):
+        # Explicit expected floors test the complete worker, not just demand().
+        for hotspot, expected in ((40, None), (84, None), (84.9, None),
+                                  (85, 90), (89, 98), (89.5, 99), (90, 100), (95, 100)):
+            with self.subTest(hotspot=hotspot):
+                result, adapter, baseline, reports, journal = self.run_worker(
+                    lambda *_: sample(gpu_core_temp=40, gpu_hotspot_temp=hotspot,
+                                      gpu_memory_temp=56, gpu_fan=2000), stop_at=19)
+                self.assertEqual(result, 0)
+                commands = [r['command_pct'] for r in reports if r['state'] == 'active']
+                if expected is None:
+                    self.assertEqual(commands, [])
+                    self.assertEqual(adapter.writes, [])
+                else:
+                    self.assertTrue(commands)
+                    self.assertEqual(set(commands), {expected})
+                    self.assertEqual(adapter.writes[0][1], 'curve')
+                    self.assertEqual(min(speed for _, speed in adapter.writes[0][2]), expected)
+                self.assertEqual(adapter.snapshot(), baseline)
+                self.assertFalse(journal)
+
+    def test_hotspot_full_speed_releases_after_ten_seconds_of_all_cool_sensors(self):
+        result, adapter, baseline, reports, journal = self.run_worker(
+            lambda now, _: sample(gpu_core_temp=40, gpu_hotspot_temp=90 if now < 7 else 40,
+                                  gpu_memory_temp=56, gpu_fan=3000), stop_at=25)
+        self.assertEqual(result, 0)
+        active = [r for r in reports if r['state'] == 'active']
+        self.assertTrue(active)
+        self.assertTrue(all(r['command_pct'] == 100 for r in active))
+        standby = [r for r in reports if r['state'] == 'standby' and r['time'] >= 7]
+        self.assertEqual(standby[0]['time'], 17)
+        self.assertEqual(adapter.snapshot(), baseline)
+        self.assertFalse(journal)
+        self.assertTrue(reports[-1]['restore_confirmed'])
+
     def test_gpu_sensors_independently_activate_without_full_speed_pulse(self):
         for key, temperature in gpu_fans.ASSIST_ON.items():
             with self.subTest(key=key):
