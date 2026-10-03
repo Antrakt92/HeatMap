@@ -1274,7 +1274,7 @@ class AutostartReconcileResult:
     enabled: bool | None
 
 
-def reconcile_autostart_security():
+def reconcile_autostart_security(*, read_only=False):
     """Migrate enabled owned tasks while preserving absent/disabled preferences."""
     user_id, accepted_identities, identity_error = _resolve_autostart_identity()
     if identity_error:
@@ -1295,6 +1295,8 @@ def reconcile_autostart_security():
             return AutostartReconcileResult(False, False, owner_error, None)
         if definition.enabled.casefold() == "false" or definition.trigger_enabled.casefold() == "false":
             return AutostartReconcileResult(False, True, "disabled autostart preference preserved", False)
+        if read_only:
+            return AutostartReconcileResult(False, False, "Autostart task needs repair; toggle Autostart", None)
         ok, message = enable_autostart(expected_existing=definition)
         return AutostartReconcileResult(True, ok, message, True if ok else None)
     return AutostartReconcileResult(
@@ -2293,6 +2295,14 @@ def _health_summary(messages):
     lines = []
     for message in messages[:3]:
         text = " ".join(str(message).split())
+        # Keep raw errors in health_messages for Copy diagnostics, not on the desktop.
+        if text.startswith("Autostart:"):
+            text = "Autostart: check failed; click for details"
+        elif text.startswith("Volume space unavailable:"):
+            volume = re.match(r"Volume space unavailable: ([A-Z]:)(?:\s|$)", text)
+            text = ((volume[1] + " space unavailable") if volume else "Drive space unavailable") + "; click for details"
+        elif text == "Other monitor running: automatic case fan control paused":
+            text = "Case fans paused: Close other monitor to resume"
         lines.append(text if len(text) <= 130 else text[:85] + "…" + text[-40:])
     if len(messages) > 3:
         lines.append(f"+{len(messages) - 3} more — Copy diagnostics")
@@ -3838,13 +3848,16 @@ class OverlayApp:
         self._cursor_was_at_peek_edge = False
         self._schedule_peek_poll()
 
-    def start_autostart_check(self):
+    def start_autostart_check(self, *, read_only=False):
         """Run Scheduler inspection/migration without blocking window creation."""
-        if not self.running or getattr(self, "_autostart_thread", None) is not None:
+        thread = getattr(self, "_autostart_thread", None)
+        if (not self.running or (thread is not None
+                and (getattr(self, "_autostart_pending", False) or thread.is_alive()))):
             return
         self._autostart_pending = True
-        self._autostart_warning = ""
-        self._set_menu_label("autostart", "Autostart: Checking...")
+        if not read_only:
+            self._autostart_warning = ""
+            self._set_menu_label("autostart", "Autostart: Checking...")
         self._autostart_results = queue.Queue(maxsize=1)
         stop_event, results = self._stop_event, self._autostart_results
 
@@ -3854,7 +3867,8 @@ class OverlayApp:
             try:
                 if stop_event.is_set():
                     return
-                result = (reconcile_autostart_security() if _is_admin() else
+                result = (reconcile_autostart_security(read_only=True) if read_only else
+                          reconcile_autostart_security() if _is_admin() else
                           AutostartReconcileResult(False, True, "Read-only autostart check", is_autostart_enabled()))
             except Exception as exc:
                 log.exception("Autostart background check failed")
@@ -3883,6 +3897,13 @@ class OverlayApp:
             log.error("%s", _format_autostart_reconcile_error(result.changed, result.message))
         self._set_menu_label("autostart", "Autostart: ERROR" if not result.ok or result.enabled is None else
                             "Autostart: ON (UAC)" if result.enabled else "Autostart: OFF")
+        if not result.ok and not result.changed:
+            self.root.after(60000, self._retry_autostart_check)
+
+    def _retry_autostart_check(self):
+        if self.running and getattr(self, "_autostart_warning", ""):
+            # Reinspect only; never repeat task migration or silently change preferences.
+            self.start_autostart_check(read_only=True)
 
     def toggle_autostart(self):
         if getattr(self, "_autostart_pending", False):
@@ -3995,7 +4016,8 @@ class OverlayApp:
         if missing:
             messages.append("Unavailable: " + ", ".join(missing))
             severity = max(severity, 1)
-        if getattr(self, "_monitor_coexistence", False):
+        if (getattr(self, "_monitor_coexistence", False)
+                and self.config.get("case_fans_enabled", False)):
             messages.append("Other monitor running: automatic case fan control paused")
             severity = max(severity, 1)
         if status.get("state") == "error":
@@ -4016,7 +4038,8 @@ class OverlayApp:
             severity = 2
         for name, status in (("Case fans", getattr(self, "_case_fan_status", {})),
                              ("GPU fans", gpu_status)):
-            if status.get("state") == "checking" and status.get("phase") == "waiting":
+            if (status.get("state") == "checking" and status.get("phase") == "waiting"
+                    and (status.get("recovery_pending") or status.get("control_attempted"))):
                 context = "Recovery pending. " if status.get("recovery_pending") else ""
                 message = f"{name}: waiting for sensors. {context}" + status.get("reason", "")
                 if message not in messages:

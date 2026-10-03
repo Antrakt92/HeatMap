@@ -1,5 +1,12 @@
 # HeatMap Audit Backlog
 
+Warning-panel follow-up: technical autostart and volume errors are summarized
+on the desktop and retained in Copy diagnostics. Disabled case control and normal
+startup waiting no longer produce warnings; pending restoration remains visible.
+Failed autostart inspection is retried read-only, clearing on success. Local
+regressions cover these transitions. Elevated acceptance: after normal restart,
+check the compact panel, click-to-copy details, and disappearance after recovery.
+
 Background GCC and independent GPU ownership policy:
 `docs/gpu-gcc-coexistence-2026-10-03.md`. GCC alone no longer suppresses GPU
 assistance; case/EC control remains exclusive, with known installer blocking and
