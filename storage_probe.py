@@ -60,6 +60,9 @@ def _native_sample(number, identified=lambda sample: None):
                     if len(ctor.GetParameters()) == 2]
     if len(constructors) != 1:
         raise RuntimeError("Unsupported storage runtime constructor")
+    # The preceding Windows query and runtime verification can take seconds.
+    # Identification in the constructor already performs native disk I/O.
+    require_hardware_access("monitor")
     storage = constructors[0].Invoke(System.Array[System.Object](["", descriptor]))
     try:
         if not storage_type.GetProperty("IsValid", flags).GetValue(storage, None):
