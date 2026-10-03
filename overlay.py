@@ -4472,9 +4472,10 @@ class OverlayApp:
             volume_snapshot = getattr(self, "_volume_snapshot", None)
 
         if not data:
-            if any(getattr(self, key, {}).get("state") == "error"
+            volumes = _fresh_volume_data(volume_snapshot, time.monotonic())
+            if volumes is not None or any(getattr(self, key, {}).get("state") == "error"
                    for key in ("_case_fan_status", "_gpu_fan_status")):
-                self._show_sensor_error(text="--", color="#888888")
+                self._show_sensor_error(text="--", color="#888888", volume_data=volumes)
             else:
                 self._set_health_panel([], 0)
                 self._fit_content()
@@ -4483,9 +4484,11 @@ class OverlayApp:
 
         if getattr(self, "_hardware_pause_reason", None):
             self._set_sensor_status(None)
-            self._show_sensor_error(text="--", color="#888888")
+            self._show_sensor_error(text="--", color="#888888",
+                                    volume_data=_fresh_volume_data(volume_snapshot, time.monotonic()))
             fan_advice = _case_fan_advice(getattr(self, "_case_fan_status", {}))
-            self._set_health_panel(([fan_advice] if fan_advice else []) + [self._hardware_pause_reason], 2)
+            self._set_health_panel(([fan_advice] if fan_advice else []) + [self._hardware_pause_reason]
+                                   + [finding.text for finding in getattr(self, 'thermal_findings', [])], 2)
             self._fit_content()
             self._clamp_saved_position_to_visible_screen(persist=False)
             self.root.after(2000, self.update_ui)

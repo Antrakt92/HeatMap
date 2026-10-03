@@ -12,6 +12,11 @@ and per-volume freshness. CPU/GPU samples do not perform filesystem calls.
 Repair evidence and remaining acceptance boundaries:
 `docs/volume-isolation-audit-2026-10-03.md`.
 
+Worker status/recovery JSON rejects oversized documents and excessive parser
+nesting. Independent volume rows and pressure warnings remain visible during
+native initialization and hardware-access pauses. Regression and native Tk
+evidence: `docs/worker-json-and-startup-audit-2026-10-03.md`.
+
 ## P2 - Disk 0 SATA I/O failures on the affected machine
 
 System events 129 (storahci controller resets) and 153 (Disk 0 I/O retries) were
