@@ -6,7 +6,11 @@ all four mounted devices; global LHM storage discovery and Windows disk inventor
 queries can block on the affected machine. The fallback uses internal APIs of the
 integrity-verified pinned DiskInfoToolkit bundle, so runtime upgrades must revalidate
 constructor and SMART conversion compatibility. Expired readings and failures stay
-visible; CPU/GPU readings and Windows volume fullness remain independent.
+visible. Fixed-volume enumeration, filesystem capacity and extent queries now
+have the same bounded disposable-process isolation, with a separate owner thread
+and per-volume freshness. CPU/GPU samples do not perform filesystem calls.
+Repair evidence and remaining acceptance boundaries:
+`docs/volume-isolation-audit-2026-10-03.md`.
 
 ## P2 - Disk 0 SATA I/O failures on the affected machine
 

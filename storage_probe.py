@@ -155,21 +155,18 @@ def _validated_sample(result, number):
     return sample
 
 
-def probe_disk(number, cancelled=lambda: False, *, timeout=PROBE_TIMEOUT_SECONDS):
+def run_bounded_probe(worker, argument, consume, failure, cancelled, timeout):
     """Kill only this disposable storage probe on timeout/shutdown.
 
     Windows multiprocessing bypasses the venv redirector, so terminating this
     process cannot leave the actual native reader orphaned behind a shim.
     """
-    if type(number) is not int or not 0 <= number <= 0x7fffffff:
-        raise ValueError("Invalid physical disk number")
     if cancelled():
         return None
     context = multiprocessing.get_context("spawn")
     receive, send = context.Pipe(duplex=False)
-    process = context.Process(target=_probe_worker, args=(number, send), daemon=True)
+    process = context.Process(target=worker, args=(argument, send), daemon=True)
     started = False
-    metadata = {}
     try:
         process.start()
         started = True
@@ -180,16 +177,14 @@ def probe_disk(number, cancelled=lambda: False, *, timeout=PROBE_TIMEOUT_SECONDS
                 return None
             if receive.poll(min(0.1, max(0, deadline - time.monotonic()))):
                 result = json.loads(receive.recv_bytes(16384).decode("utf-8"))
-                sample = _validated_sample(result, number)
-                if result.get('phase') == 'identified':
-                    metadata = {'name': sample['name']}
-                    continue
-                return dict(metadata, **sample)
+                sample = consume(result)
+                if sample is not None:
+                    return sample
             if not process.is_alive():
                 break
-        return {"disk_number": number, **metadata, "error": "Storage probe timed out or exited without a reading"}
+        return failure("probe timed out or exited without a reading")
     except (OSError, EOFError, ValueError, RuntimeError) as exc:
-        return {"disk_number": number, **metadata, "error": "Storage probe failed: " + str(exc)[:300]}
+        return failure("probe failed: " + str(exc)[:300])
     finally:
         receive.close()
         send.close()
@@ -208,6 +203,27 @@ def probe_disk(number, cancelled=lambda: False, *, timeout=PROBE_TIMEOUT_SECONDS
                 # finalizer still closes process handles when it is collected.
                 from multiprocessing.process import _children
                 _children.discard(process)
+
+
+def probe_disk(number, cancelled=lambda: False, *, timeout=PROBE_TIMEOUT_SECONDS):
+    if type(number) is not int or not 0 <= number <= 0x7fffffff:
+        raise ValueError("Invalid physical disk number")
+    metadata = {}
+
+    def consume(result):
+        sample = _validated_sample(result, number)
+        if result.get('phase') == 'identified':
+            if 'error' in sample:
+                raise ValueError("Invalid storage identification message")
+            metadata['name'] = sample['name']
+            return None
+        return dict(metadata, **sample)
+
+    return run_bounded_probe(
+        _probe_worker, number, consume,
+        lambda error: {"disk_number": number, **metadata, "error": "Storage " + error},
+        cancelled, timeout,
+    )
 
 
 def snapshot_data(snapshot, numbers, now):

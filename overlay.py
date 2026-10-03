@@ -39,6 +39,7 @@ from gpu_fans import GpuWorkerClient, mode_text as gpu_fan_mode_text
 from hardware_access_guard import HardwareAccessConflict, require_hardware_access
 from storage_identity import volume_disk_number, physical_disk_numbers
 from storage_probe import probe_disk, snapshot_data as storage_snapshot_data
+from volume_probe import probe_volume
 
 VERSION = "1.3.0"
 
@@ -1490,7 +1491,17 @@ def _fresh_volume_data(snapshot, now):
     stamp, data = snapshot
     if finite(stamp, 0, 1e15) is None or not 0 <= now - stamp <= VOLUME_STALE_SECONDS:
         return None
-    return data
+    if not any('_sample_time' in volume for volume in data.get('volumes', [])):
+        return data
+    result = dict(data, volumes=[], volume_errors=list(data.get('volume_errors', [])))
+    for volume in data.get('volumes', []):
+        sample = dict(volume)
+        sample_time = sample.pop('_sample_time', stamp)
+        if finite(sample_time, 0, 1e15) is None or not 0 <= now - sample_time <= VOLUME_STALE_SECONDS:
+            result['volume_errors'].append(f"{sample.get('name', 'Volume')}: capacity reading expired")
+        else:
+            result['volumes'].append(sample)
+    return result
 
 
 def format_snapshot_age_banner(snapshot_time, volume_snapshot_time, now, pause_reason):
@@ -2749,6 +2760,7 @@ class OverlayApp:
         self._stop_event = threading.Event()
         self.sensor_data = {}
         self._isolated_storage = True
+        self._volume_snapshot = None
         self._storage_snapshot = {}
         self._storage_numbers = set()
         self._sensor_sample_time = None
@@ -2972,6 +2984,8 @@ class OverlayApp:
         self.sensor_thread.start()
         self.storage_thread = threading.Thread(target=self.storage_loop, daemon=True)
         self.storage_thread.start()
+        self.volume_thread = threading.Thread(target=self.volume_loop, daemon=True)
+        self.volume_thread.start()
 
         # --- Start UI update loop ---
         self.update_ui()
@@ -4116,7 +4130,6 @@ class OverlayApp:
         consecutive_reinit_hints = 0
         next_init_retry = 0
         next_storage_update = 0
-        next_volume_update = 0
         volume_data = {}
         storage_failed = False
         needs_reinit = computer is None
@@ -4132,12 +4145,9 @@ class OverlayApp:
                     next_init_retry = 0
                 if getattr(self, "_monitor_coexistence", False):
                     access_mode = "shared"  # Stay restricted until restart, even if the other tool exits.
-                if time.monotonic() >= next_volume_update:
-                    volume_data = _read_volume_usage()
-                    volume_time = time.monotonic()
-                    next_volume_update = volume_time + VOLUME_REFRESH_SECONDS
-                    with self.lock:
-                        self._volume_snapshot = (volume_time, volume_data)
+                with self.lock:
+                    snapshot = getattr(self, '_volume_snapshot', None)
+                volume_data = _fresh_volume_data(snapshot, time.monotonic()) or {'volumes': [], 'volume_errors': []}
                 if (computer is None or needs_reinit) and time.monotonic() >= next_init_retry:
                     if computer is not None:
                         log.warning("Reinitializing hardware monitor after incomplete sensor samples or read errors")
@@ -4248,6 +4258,66 @@ class OverlayApp:
             with self.lock:
                 self.computer = None
 
+    def volume_loop(self):
+        """A blocked filesystem or extent query cannot stall other sensor owners."""
+        retry_after = {}
+
+        def cancelled():
+            return self._stop_event.is_set() or not self.running
+
+        def publish(data):
+            with self.lock:
+                self._volume_snapshot = (time.monotonic(), {
+                    'volumes': sorted(data['volumes'], key=lambda volume: volume['name']),
+                    'volume_errors': list(data['volume_errors'])})
+
+        def read(mount=None):
+            try:
+                return probe_volume(mount, cancelled)
+            except (OSError, ValueError, RuntimeError) as exc:
+                return {'error': 'Volume probe failed: ' + str(exc)[:300]}
+
+        while not cancelled():
+            inventory = read()
+            if inventory is None or cancelled():
+                return
+            data = {'volumes': [], 'volume_errors': []}
+            if 'error' in inventory:
+                data['volume_errors'].append('Cannot enumerate local volumes: ' + inventory['error'])
+            else:
+                mounts = inventory['mounts']
+                retry_after = {mount: entry for mount, entry in retry_after.items() if mount in mounts}
+                with self.lock:
+                    previous = getattr(self, '_volume_snapshot', None)
+                if previous is not None:
+                    names = {mount[:2] for mount in mounts}
+                    data['volumes'] = [dict(volume, _sample_time=volume.get('_sample_time', previous[0]))
+                                       for volume in previous[1].get('volumes', []) if volume.get('name') in names]
+                publish(data)
+                # Publish each successful read before a later volume can block.
+                for mount in mounts:
+                    if cancelled():
+                        return
+                    retry = retry_after.get(mount)
+                    if retry and time.monotonic() < retry[0]:
+                        data['volumes'] = [volume for volume in data['volumes'] if volume['name'] != mount[:2]]
+                        data['volume_errors'].append(mount[:2] + ' ' + retry[1])
+                        publish(data)
+                        continue
+                    result = read(mount)
+                    if result is None or cancelled():
+                        return
+                    data['volumes'] = [volume for volume in data['volumes'] if volume['name'] != mount[:2]]
+                    if 'error' in result:
+                        retry_after[mount] = (time.monotonic() + 300, result['error'])
+                        data['volume_errors'].append(mount[:2] + ' ' + result['error'])
+                    else:
+                        retry_after.pop(mount, None)
+                        data['volumes'].append(dict(result['volume'], _sample_time=time.monotonic()))
+                    publish(data)
+            publish(data)
+            self._stop_event.wait(VOLUME_REFRESH_SECONDS)
+
     def storage_loop(self):
         """Keep slow disk identification independent of the CPU/GPU sensor owner."""
         retry_after = {}
@@ -4297,7 +4367,7 @@ class OverlayApp:
                 with self.lock:
                     previous = self._storage_snapshot.get(number)
                     if "error" in sample and previous:
-                        sample["name"] = previous[1].get("name", f"Disk {number}")
+                        sample.setdefault("name", previous[1].get("name", f"Disk {number}"))
                     self._storage_snapshot[number] = (time.monotonic(), sample)
             with self.lock:
                 self._storage_snapshot = {number: entry for number, entry in self._storage_snapshot.items()
@@ -4747,6 +4817,7 @@ class OverlayApp:
         for name, worker in (
             ("Sensor", getattr(self, "sensor_thread", None)),
             ("Storage", getattr(self, "storage_thread", None)),
+            ("Volumes", getattr(self, "volume_thread", None)),
             ("Diagnostics", getattr(self, "_diagnostics_thread", None)),
             ("Autostart", getattr(self, "_autostart_thread", None)),
         ):
