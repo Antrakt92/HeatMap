@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import gpu_fans
-from amd_gpu_fan import AdlxError, AmdGpuFan, require_single_gpu
+from amd_gpu_fan import AdlxError, AmdGpuFan, select_profile_gpu
 from startup_readiness import StartupNotReady
 from test_gpu_fans import DEFAULT_GPU_POINTS
 
@@ -234,11 +234,14 @@ class AdlxReadinessClassificationTests(unittest.TestCase):
                 AmdGpuFan()
 
     def test_only_zero_enumeration_is_retryable(self):
+        gpus = Mock()
+        gpus.call.return_value = 0
         with self.assertRaises(StartupNotReady):
-            require_single_gpu(0)
-        self.assertIsNone(require_single_gpu(1))
+            select_profile_gpu(gpus)
+        gpus.call.return_value = 33
         with self.assertRaises(AdlxError):
-            require_single_gpu(2)
+            select_profile_gpu(gpus)
+        gpus.child.assert_not_called()
 
     def test_only_documented_pending_or_inactive_metrics_retry(self):
         adapter = AmdGpuFan.__new__(AmdGpuFan)

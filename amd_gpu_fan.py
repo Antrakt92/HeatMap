@@ -35,11 +35,41 @@ def check(result, operation):
         raise AdlxError(f'{operation}: ADLX error {result}', result=result)
 
 
-def require_single_gpu(count):
+def gpu_identity(gpu):
+    return {key: gpu.get(slot, c.c_char_p).decode('utf-8') for key, slot in (
+        ('name', 7), ('vendor', 3), ('device', 14), ('subsystem', 16), ('subvendor', 17))}
+
+
+def supported_gpu(identity):
+    return (identity['name'] == 'AMD Radeon RX 7900 XT' and
+            tuple(identity[key].lower().removeprefix('0x') for key in
+                  ('vendor', 'device', 'subsystem', 'subvendor')) == ('1002', '744c', '240c', '1458'))
+
+
+def select_profile_gpu(gpus):
+    """Select one exact board identity, never the first adapter or an iGPU."""
+    count = gpus.call(3, result=c.c_uint)
     if count == 0:
         raise StartupNotReady('Waiting for AMD GPU enumeration')
-    if count != 1:
-        raise AdlxError('GPU fan profile requires exactly one AMD GPU')
+    if not 1 <= count <= 32:
+        raise AdlxError('Invalid AMD GPU enumeration count')
+    matches = []
+    for index in range(count):
+        with gpus.child(11, (c.c_uint,), (index,)) as candidate:
+            identity = gpu_identity(candidate)
+            if supported_gpu(identity):
+                matches.append((index, identity))
+    if len(matches) != 1:
+        raise AdlxError('GPU fan profile requires exactly one matching Gigabyte RX 7900 XT')
+    index, identity = matches[0]
+    selected = gpus.child(11, (c.c_uint,), (index,))
+    try:
+        if gpu_identity(selected) != identity:
+            raise AdlxError('AMD GPU identity changed during selection')
+    except Exception:
+        selected.close()
+        raise
+    return selected, identity
 
 
 class Interface:
@@ -114,14 +144,8 @@ class AmdGpuFan:
             self.initialized = True
             self.system = Interface(pointer)  # IADLXSystem is not reference-counted.
             with self.system.child(1) as gpus:
-                require_single_gpu(gpus.call(3, result=c.c_uint))
-                self.gpu = self.keep(gpus.child(11, (c.c_uint,), (0,)))
-            self.identity = {key: self.gpu.get(slot, c.c_char_p).decode('utf-8') for key, slot in (
-                ('name', 7), ('vendor', 3), ('device', 14), ('subsystem', 16), ('subvendor', 17))}
-            if (self.identity['name'] != 'AMD Radeon RX 7900 XT' or
-                    tuple(self.identity[key].lower().removeprefix('0x') for key in
-                          ('vendor', 'device', 'subsystem', 'subvendor')) != ('1002', '744c', '240c', '1458')):
-                raise AdlxError(f'Unsupported GPU fan profile: {self.identity}')
+                selected, self.identity = select_profile_gpu(gpus)
+                self.gpu = self.keep(selected)
             tuning = self.keep(self.system.child(8))
             supported = B()
             check(tuning.call(10, (P, c.POINTER(B)), (self.gpu.pointer, c.byref(supported))), 'Fan tuning support')
