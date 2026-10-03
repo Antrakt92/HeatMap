@@ -27,9 +27,6 @@ HEARTBEAT_TIMEOUT_SECONDS = 15
 STATUS_STALE_SECONDS = 10
 
 
-HEARTBEAT_TIMEOUT_SECONDS = 15
-
-
 # Terminal-report compact allowlists. When the full report does not fit
 # (ENOSPC), only these keys survive into the smaller report, so the status
 # client keeps rollback evidence. Per-worker: adding a key to a full report
@@ -116,10 +113,24 @@ def stage_json_payload(path, payload):
     return temporary
 
 
+JSON_PAYLOAD_LIMIT = 65536
+
+
+def _read_json_document(stream):
+    # Read one extra character so a valid prefix cannot hide an oversized tail.
+    payload = stream.read(JSON_PAYLOAD_LIMIT + 1)
+    if len(payload) > JSON_PAYLOAD_LIMIT:
+        raise ValueError('Worker JSON exceeds the size limit')
+    try:
+        return json.loads(payload)
+    except RecursionError as exc:
+        raise ValueError('Worker JSON nesting exceeds the parser limit') from exc
+
+
 def load_json_payload(path, opener):
     """Parse bounded JSON through opener(path). Errors propagate for callers to map."""
     with opener(path) as stream:
-        return json.loads(stream.read(65536))
+        return _read_json_document(stream)
 
 
 @dataclass(frozen=True)
@@ -165,7 +176,7 @@ def read_status_report(opener, path, last_status, *, exited, started, now,
     """
     try:
         with opener(path) as stream:
-            return json.loads(stream.read(65536)), True
+            return _read_json_document(stream), True
     except (OSError, ValueError):
         if last_status is None:
             if (opening_timeout is not None and not exited
