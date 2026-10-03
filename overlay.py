@@ -53,6 +53,13 @@ _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 _LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
 
+def _gpu_control_available():
+    try:
+        return require_hardware_access("gpu_control") == "full"
+    except HardwareAccessConflict:
+        return False
+
+
 def _get_log_path(env=None, app_dir=APP_DIR):
     env = os.environ if env is None else env
     local_appdata = env.get("LOCALAPPDATA")
@@ -2749,6 +2756,7 @@ class OverlayApp:
             self._monitor_coexistence = require_hardware_access("monitor") == "shared"
         except HardwareAccessConflict:
             self._monitor_coexistence = False
+        self._gpu_monitor_coexistence = not _gpu_control_available()
         self._driver_status = (
             SENSOR_STATUS_DRIVER_MISSING
             if not is_pawnio_driver_installed()
@@ -2976,7 +2984,7 @@ class OverlayApp:
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
         if self.config.get("case_fans_enabled", False) and not self._monitor_coexistence:
             self.fan_worker.start()
-        if self.config.get("gpu_fans_enabled", False) and not self._monitor_coexistence:
+        if self.config.get("gpu_fans_enabled", False) and not self._gpu_monitor_coexistence:
             self.gpu_fan_worker.start()
 
         # --- Start sensor thread ---
@@ -3921,7 +3929,7 @@ class OverlayApp:
         if enabled:
             with self.lock:
                 reason = ("GPU fans: Another monitoring tool leaves control with the driver"
-                          if getattr(self, "_monitor_coexistence", False) is True else
+                          if self._fan_control_paused("gpu_fan_worker") else
                           getattr(self, "_hardware_pause_reason", None))
                 process = self.gpu_fan_worker.process
                 if not reason and process is not None and process.poll() is None and process.stdin.closed:
@@ -3988,7 +3996,7 @@ class OverlayApp:
             messages.append("Unavailable: " + ", ".join(missing))
             severity = max(severity, 1)
         if getattr(self, "_monitor_coexistence", False):
-            messages.append("Other monitor running: automatic fan control paused")
+            messages.append("Other monitor running: automatic case fan control paused")
             severity = max(severity, 1)
         if status.get("state") == "error":
             messages.insert(0, _case_fan_advice(status))
@@ -4138,8 +4146,10 @@ class OverlayApp:
             while self.running and not self._stop_event.is_set():
                 access_mode = require_hardware_access("monitor")
                 if access_mode == "shared" and not getattr(self, "_monitor_coexistence", False):
-                    # Stop fan owners before switching to restricted LHM readings.
+                    # Hand back affected owners; GCC alone permits independent ADLX control.
                     self._monitor_coexistence = True
+                    if not getattr(self, "_gpu_monitor_coexistence", True):
+                        self._gpu_monitor_coexistence = not _gpu_control_available()
                     self._stop_fan_workers_for_monitor()
                     needs_reinit = computer is not None
                     next_init_retry = 0
@@ -4388,7 +4398,7 @@ class OverlayApp:
             eligible = (
                 self.running and self.config.get(setting, False)
                 and not getattr(self, "_hardware_pause_reason", None)
-                and not getattr(self, "_monitor_coexistence", False)
+                and not self._fan_control_paused(attribute)
                 and status.get("state") == "error"
                 and status.get("stop_cause") == "heartbeat_expired"
                 and status.get("restore_confirmed") is True
@@ -4422,7 +4432,7 @@ class OverlayApp:
             # command was sent), including pending GPU recovery/conflicts.
             safe_pause = (
                 (getattr(self, "_hardware_pause_reason", None)
-                 or getattr(self, "_monitor_coexistence", False))
+                 or self._fan_control_paused(attribute))
                 and status.get("restore_errors") == []
                 and not status.get("recovery_pending")
                 and not status.get("settings_conflict")
@@ -4441,7 +4451,7 @@ class OverlayApp:
         if not self.running:
             return
 
-        if getattr(self, "_monitor_coexistence", False) and self.config.get("gpu_fans_enabled", False):
+        if self._fan_control_paused("gpu_fan_worker") and self.config.get("gpu_fans_enabled", False):
             self._set_menu_label("gpu_fans", "Automatic GPU fans: PAUSED (other monitor)")
 
         if hasattr(self, "gpu_fan_worker"):
@@ -4746,8 +4756,16 @@ class OverlayApp:
         if hasattr(self, "canvas"):
             self._clamp_saved_position_to_visible_screen(persist=True)
 
-    def _stop_fan_workers(self):
+    def _fan_control_paused(self, attribute):
+        if attribute == "gpu_fan_worker":
+            return getattr(self, "_gpu_monitor_coexistence",
+                           getattr(self, "_monitor_coexistence", False))
+        return getattr(self, "_monitor_coexistence", False)
+
+    def _stop_fan_workers(self, *, keep_gpu=False):
         for label, attribute in (("GPU", "gpu_fan_worker"), ("Case", "fan_worker")):
+            if keep_gpu and attribute == "gpu_fan_worker":
+                continue
             worker = getattr(self, attribute, None)
             if worker is None:
                 continue
@@ -4759,9 +4777,12 @@ class OverlayApp:
                 log.exception("Failed to close %s controller heartbeat pipe", label)
 
     def _stop_fan_workers_for_monitor(self):
-        """Do not resume monitoring until all fan owners have finished handback."""
-        self._stop_fan_workers()
+        """Wait for affected owners' handback before shared LHM monitoring."""
+        keep_gpu = getattr(self, "_gpu_monitor_coexistence", True) is False
+        self._stop_fan_workers(keep_gpu=keep_gpu)
         for attribute in ("gpu_fan_worker", "fan_worker"):
+            if keep_gpu and attribute == "gpu_fan_worker":
+                continue
             worker = getattr(self, attribute, None)
             process = getattr(worker, "process", None)
             if process is None:

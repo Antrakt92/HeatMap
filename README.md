@@ -190,6 +190,12 @@ procedure and lasts 15 seconds. OFF or a normal HeatMap exit restores the previo
 curve and Zero RPM and verifies the result. CPU settings, voltages, clocks, and
 power limits are unchanged. Do not adjust fans through Adrenalin or another
 application at the same time: a curve mismatch stops the controller.
+Background Gigabyte Control Center may remain open for checking updates: its
+presence alone does not pause GPU assistance. HeatMap still checks the saved
+curve and Zero RPM before writes and at every GPU poll. A detected external
+change stops assistance and preserves those external settings. This is ownership
+verification, not detection of which GCC page is open. Known driver-installation
+processes and other competing hardware tools remain blocked.
 
 To test without enabling: `.venv\Scripts\python.exe tools\commission_gpu_fans.py`.
 To test, save ON, and restart HeatMap normally, run the same command with `--enable`
@@ -318,11 +324,12 @@ and fan-control tools, AMD AtiSetup, and live `pnputil /add-driver /install`
 operations. Monitoring tools share one policy, including CPU-Z, HWiNFO,
 FanControl, SIV, EasyTune, GCC and Ryzen Master, alone or together:
 HeatMap keeps read-only CPU, GPU, motherboard fan, and storage monitoring available
-while its automatic fan controllers remain paused. RAM usage comes from Windows; the additional DDR5
+while automatic case fan control remains paused. GPU assistance may continue
+beside GCC alone; other listed tools still pause GPU control. RAM usage comes from Windows; the additional DDR5
 SPD/SMBus inventory is disabled beside these tools. The control pause remains until
 HeatMap restarts, including if the other tools close during the session. Starting
 or closing additional monitoring tools does not stop sensor updates. When another
-tool starts, HeatMap confirms normal fan-controller handback before shared reads.
+tool starts, HeatMap confirms handback of the affected fan controllers before shared reads.
 An installer detected before the next sensor call pauses monitoring until restart;
 this cannot guarantee recovery from a driver removed during an in-flight native call.
 An empty secondary display adapter does not repeatedly reopen a healthy GPU monitor.

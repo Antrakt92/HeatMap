@@ -35,7 +35,8 @@ def sample(**extra):
 
 
 class GpuStartupAuditTests(unittest.TestCase):
-    def run_worker(self, values, stop_at=40, commission=False, on_wait=None, stop_on_snapshot=None):
+    def run_worker(self, values, stop_at=40, commission=False, on_wait=None, stop_on_snapshot=None,
+                   access_guard=None):
         now = [0]
         adapter = Adapter(now)
         baseline = adapter.snapshot()
@@ -78,7 +79,7 @@ class GpuStartupAuditTests(unittest.TestCase):
             stack.enter_context(patch.object(gpu_fans, 'OwnerHeartbeat', return_value=heartbeat))
             stack.enter_context(patch.object(gpu_fans.psutil, 'Process', return_value=owner))
             stack.enter_context(patch.object(gpu_fans.time, 'monotonic', side_effect=lambda: now[0]))
-            stack.enter_context(patch.object(gpu_fans, 'require_hardware_access'))
+            stack.enter_context(patch.object(gpu_fans, 'require_hardware_access', side_effect=access_guard))
             stack.enter_context(patch.object(gpu_fans, 'write_status', side_effect=lambda _path, state, **details:
                 reports.append(dict(time=now[0], state=state, **details))))
             result = gpu_fans.worker(str(Path(directory) / 'status.json'), 1, 1, commission=commission)

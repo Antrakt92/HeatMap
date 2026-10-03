@@ -125,6 +125,9 @@ class ExplicitRetryRoutingTests(unittest.TestCase):
         app.config = {'gpu_fans_enabled': False}
         app.lock = __import__('threading').Lock()
         app._hardware_pause_reason = None
+        app._monitor_coexistence = False
+        app._gpu_monitor_coexistence = False
+        app._fan_control_paused = lambda attribute: overlay.OverlayApp._fan_control_paused(app, attribute)
         app.gpu_fan_worker.process = None
         overlay.OverlayApp.toggle_gpu_fans(app)
         app.gpu_fan_worker.start.assert_called_once_with(accept_external=True)
