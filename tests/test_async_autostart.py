@@ -73,6 +73,17 @@ class AsyncAutostartTests(unittest.TestCase):
         inspect.assert_not_called()
         thread.assert_not_called()
 
+    def test_initial_checking_menu_state_still_starts_first_worker(self):
+        app = self.app()
+        app._autostart_pending = True
+        with mock.patch.object(overlay, '_is_admin', return_value=False), mock.patch.object(
+                overlay, 'is_autostart_enabled', return_value=False) as inspect:
+            app.start_autostart_check()
+            app._autostart_thread.join(3)
+            app._poll_autostart_check()
+        inspect.assert_called_once_with()
+        self.assertFalse(app._autostart_pending)
+
     def test_poll_after_quit_does_not_touch_tk_or_reschedule(self):
         app = self.app()
         app.running = False
@@ -96,7 +107,33 @@ class AsyncAutostartTests(unittest.TestCase):
         worker = factory.call_args.kwargs["target"]
         captured = [cell.cell_contents for cell in worker.__closure__]
         self.assertTrue(all(value is not app and value is not app.root for value in captured))
-        self.assertEqual(set(worker.__code__.co_freevars), {"results", "stop_event"})
+        self.assertEqual(set(worker.__code__.co_freevars), {"results", "stop_event", "read_only"})
+
+    def test_failed_check_schedules_readonly_retry_and_success_clears_warning(self):
+        app = self.app()
+        app._autostart_pending = True
+        app._autostart_results = queue.Queue()
+        app._autostart_results.put(overlay.AutostartReconcileResult(False, False, 'query failed', None))
+        app._poll_autostart_check()
+        app.root.after.assert_called_with(60000, app._retry_autostart_check)
+        with mock.patch.object(overlay, 'reconcile_autostart_security',
+                               return_value=overlay.AutostartReconcileResult(False, True, 'current', True)) as inspect:
+            app._retry_autostart_check()
+            app._autostart_thread.join(3)
+            app._poll_autostart_check()
+        inspect.assert_called_once_with(read_only=True)
+        self.assertEqual(app._autostart_warning, '')
+        app._set_menu_label.assert_called_with('autostart', 'Autostart: ON (UAC)')
+
+    def test_retry_does_not_run_after_quit_or_manual_success(self):
+        app = self.app()
+        with mock.patch.object(app, 'start_autostart_check') as start:
+            app._autostart_warning = ''
+            app._retry_autostart_check()
+            app.running = False
+            app._autostart_warning = 'Autostart: query failed'
+            app._retry_autostart_check()
+        start.assert_not_called()
 
     def test_successful_manual_repair_clears_previous_startup_warning(self):
         app = self.app()

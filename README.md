@@ -19,6 +19,13 @@ Temperature is joined to a volume only when Windows confirms a single physical d
 
 Capacity rows, warnings, alerts, and usage peaks all use Windows volume readings. The warning panel also shows free GiB, using the same 80% warning and 90% critical thresholds. Volume read failures remain visible in the panel and Copy diagnostics. Expired readings are not displayed as current, and fresh volume rows remain available if hardware-temperature readings fail.
 
+The warning panel shows current problems in brief; click it to copy full technical
+diagnostics. A competing monitor warns about paused case-fan control only when
+automatic case fans are enabled. Normal GPU standby and initial sensor waiting
+do not add warnings; pending restoration and controller errors remain visible.
+Failed autostart checks are reinspected every minute without changing task settings;
+a successful check removes the warning. Failed task migrations require manual repair.
+
 Fixed-volume discovery, capacity reads, and physical-disk mapping run in disposable
 processes with an eight-second deadline, separately from CPU/GPU and SMART reads.
 A failed volume is retried after five minutes; other volumes continue updating.

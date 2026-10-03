@@ -10,7 +10,7 @@ class ReadinessUiTests(TkTestCase):
         return dict(state='checking', phase='waiting', reason='Waiting for GPU Memory',
                     remaining_seconds=59, **changes)
 
-    def test_waiting_is_visible_before_first_sample_without_alerts(self):
+    def test_waiting_uses_cooling_row_before_first_sample_without_warning_noise(self):
         with layout_app() as app:
             app.sensor_data = {}
             app.fan_worker.poll = Mock(return_value=self.waiting(
@@ -21,8 +21,8 @@ class ReadinessUiTests(TkTestCase):
             app.update_ui()
             self.assertNotIn('case_fan_control', app.rows)
             self.assertIn('Waiting GPU', app.rows['gpu_fan_control'].cget('text'))
-            self.assertIn('Case fans: waiting for sensors.', app.health_label.cget('text'))
-            self.assertIn('GPU fans: waiting for sensors.', app.health_label.cget('text'))
+            self.assertNotIn('Case fans: waiting for sensors.', app.health_label.cget('text'))
+            self.assertNotIn('GPU fans: waiting for sensors.', app.health_label.cget('text'))
             self.assertEqual(overlay._case_fan_owner(app._case_fan_status, 'System Fan #4'), 'FW')
             app._check_alerts.assert_not_called()
 
