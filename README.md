@@ -19,6 +19,13 @@ Temperature is joined to a volume only when Windows confirms a single physical d
 
 Capacity rows, warnings, alerts, and usage peaks all use Windows volume readings. The warning panel also shows free GiB, using the same 80% warning and 90% critical thresholds. Volume read failures remain visible in the panel and Copy diagnostics. Expired readings are not displayed as current, and fresh volume rows remain available if hardware-temperature readings fail.
 
+Fixed-volume discovery, capacity reads, and physical-disk mapping run in disposable
+processes with an eight-second deadline, separately from CPU/GPU and SMART reads.
+A failed volume is retried after five minutes; other volumes continue updating.
+Each capacity reading retains its own age, so refreshing one volume cannot make
+another volume's old reading appear current. These queries require no fan takeover
+and do not install drivers or change disk contents.
+
 Temperatures and memory/disk usage are color-coded:
 
 - **Green** — below the warning threshold

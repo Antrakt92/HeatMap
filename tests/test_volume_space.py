@@ -183,6 +183,7 @@ class VolumeSpaceTests(TestCase):
     def test_volume_snapshot_is_published_even_when_hardware_reads_fail(self):
         app = sensor_app(2, mock.Mock())
         data = dict(volumes=[], volume_errors=['C: denied'])
+        app._volume_snapshot = (100, data)
         with mock.patch.object(overlay, 'require_hardware_access'), \
                 mock.patch.object(overlay, '_read_volume_usage', return_value=data), \
                 mock.patch.object(overlay, 'read_sensors', side_effect=OSError('LHM read failed')), \
@@ -192,19 +193,19 @@ class VolumeSpaceTests(TestCase):
         self.assertEqual(app._volume_snapshot, (100, data))
         self.assertIn('error', app.sensor_data)
 
-    def test_sensor_loop_refreshes_volume_data_every_30_seconds_and_copies_diagnostics(self):
-        app = sensor_app(17, mock.Mock())
-        reports = [dict(volumes=[dict(name='C:', total_bytes=100, free_bytes=2, used_pct=98)], volume_errors=[]),
-                   dict(volumes=[], volume_errors=['C: denied'])]
-        with mock.patch.object(overlay, 'require_hardware_access'), \
-                mock.patch.object(overlay, '_read_volume_usage', side_effect=reports) as volumes, \
-                mock.patch.object(overlay, 'read_sensors', side_effect=lambda *a, **k: sample()), \
+    def test_volume_worker_refreshes_every_30_seconds_and_copies_diagnostics(self):
+        app = sensor_app(2, mock.Mock())
+        report = dict(name='C:', total_bytes=100, free_bytes=2, used_pct=98)
+        replies = [{'mounts': ['C:\\']}, {'volume': report},
+                   {'mounts': ['C:\\']}, {'error': 'denied'}]
+        with mock.patch.object(overlay, 'probe_volume', side_effect=replies) as volumes, \
                 mock.patch.object(overlay.time, 'monotonic', side_effect=lambda: app._stop_event.now):
-            app.sensor_loop()
-        self.assertEqual(volumes.call_count, 2)
-        self.assertEqual(app.sensor_data['volumes'], [])
-        self.assertEqual(app.sensor_data['volume_errors'], ['C: denied'])
-        diagnostics = overlay.build_sensor_diagnostics(None, reports[0], is_admin=False, pawnio_installed=False)
+            app.volume_loop()
+        self.assertEqual(volumes.call_count, 4)
+        self.assertEqual(app._stop_event.now, 160)
+        self.assertEqual(app._volume_snapshot[1]['volumes'], [])
+        self.assertEqual(app._volume_snapshot[1]['volume_errors'], ['C: denied'])
+        diagnostics = overlay.build_sensor_diagnostics(None, dict(volumes=[report]), is_admin=False, pawnio_installed=False)
         self.assertIn('free_bytes', diagnostics)
         self.assertIn('C:', diagnostics)
 

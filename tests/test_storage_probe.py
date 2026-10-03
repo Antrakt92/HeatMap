@@ -9,6 +9,34 @@ from test_sensor_lifecycle import sensor_app
 
 
 class StorageProbeTests(unittest.TestCase):
+    def test_current_identification_is_not_overwritten_by_an_older_device_model(self):
+        app = sensor_app(1)
+        app.config = {}
+        app._storage_snapshot = {1: (80, {'disk_number': 1, 'name': 'Old SSD', 'temp': 40})}
+        app._volume_snapshot = None
+        with (mock.patch.object(overlay.time, 'monotonic', return_value=100),
+              mock.patch.object(overlay, 'physical_disk_numbers', return_value={1}),
+              mock.patch.object(overlay, 'require_hardware_access'),
+              mock.patch.object(overlay, 'probe_disk', return_value={
+                  'disk_number': 1, 'name': 'Replacement SSD', 'error': 'SMART timeout'})):
+            app.storage_loop()
+        self.assertEqual(app._storage_snapshot[1][1]['name'], 'Replacement SSD')
+        self.assertNotIn('temp', app._storage_snapshot[1][1])
+
+    def test_malformed_identification_error_is_reported_without_escaping_the_probe(self):
+        context = mock.Mock()
+        receive, send, process = mock.Mock(), mock.Mock(), mock.Mock()
+        context.Pipe.return_value = (receive, send)
+        context.Process.return_value = process
+        process.is_alive.return_value = False
+        receive.poll.return_value = True
+        receive.recv_bytes.return_value = json.dumps({
+            'disk_number': 1, 'phase': 'identified', 'error': 'failure'}).encode()
+        with mock.patch.object(storage_probe.multiprocessing, 'get_context', return_value=context):
+            result = storage_probe.probe_disk(1)
+        self.assertIn('Invalid storage identification', result['error'])
+        process.close.assert_called_once()
+
     def test_pending_kernel_io_cannot_force_an_unbounded_overlay_exit_join(self):
         context = mock.Mock()
         receive, send, process = mock.Mock(), mock.Mock(), mock.Mock()
@@ -138,6 +166,7 @@ class StorageProbeTests(unittest.TestCase):
         app._isolated_storage = True
         app._storage_snapshot = {3: (100, {'disk_number': 3, 'name': '980 PRO', 'temp': 45})}
         volumes = {'volumes': [{'name': 'C:', 'disk_number': 3, 'used_pct': 46}]}
+        app._volume_snapshot = (100, volumes)
         with (mock.patch.object(overlay.time, 'monotonic', return_value=100),
               mock.patch.object(overlay, 'require_hardware_access', return_value='full'),
               mock.patch.object(overlay, 'init_hardware_monitor', return_value=mock.Mock()) as initialize,

@@ -16,13 +16,14 @@ class SensorAccessPauseTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 app = sensor_app(2)
                 app.config = {'storage_temperatures_enabled': False}
+                app._volume_snapshot = (overlay.time.monotonic(), {'volumes': [{'name': 'C:', 'used_pct': 40}]})
                 app.fan_worker = mock.Mock(process=None)
                 app.gpu_fan_worker = mock.Mock(process=None)
                 computer = mock.Mock()
                 with (mock.patch.object(overlay, 'require_hardware_access', return_value=mode),
                       mock.patch.object(overlay, 'init_hardware_monitor', return_value=computer) as initialize,
                       mock.patch.object(overlay, 'read_sensors', return_value={'cpu_temp': 50, 'gpu_temp': 45}),
-                      mock.patch.object(overlay, '_read_volume_usage', return_value={'volumes': [{'name': 'C:', 'used_pct': 40}]}),
+                      mock.patch.object(overlay, '_read_volume_usage', side_effect=AssertionError('blocking filesystem call')),
                       mock.patch.object(app, '_cache_sensor_diagnostics'),
                       mock.patch.object(overlay.psutil, 'cpu_percent')):
                     app.sensor_loop()
