@@ -67,7 +67,7 @@ class B850PolicyTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertEqual(self.demand(**{key: temperature})[0], 100)
         self.assertEqual(self.demand(gpu_hotspot_temp=85)[0], 90)
-        self.assertEqual(self.demand(gpu_hotspot_temp=84.9)[0], 72)
+        self.assertEqual(self.demand(gpu_hotspot_temp=77.9)[0], 72)
 
     def test_unknown_feedback_or_stopped_cpu_does_not_reduce_airflow(self):
         for key, value in (("cpu_temp", None), ("gpu_fan", None), ("cpu_fan", 0),
@@ -76,6 +76,20 @@ class B850PolicyTests(unittest.TestCase):
                 self.assertEqual(self.demand(**{key: value})[0], 100)
         self.assertEqual(b850.synchronized_demand(sample(), None, 3442)[0], 100)
         self.assertEqual(self.demand(cpu_fan=500, cpu_optional_fan=500)[0], b850.MIN_DUTY)
+
+    def test_actual_duty_cannot_mask_stopped_cpu_tachometer(self):
+        for key in ("cpu_fan", "cpu_optional_fan"):
+            with self.subTest(key=key):
+                value, reason, _fractions = self.demand(**{key: 0, key + "_pct": 65})
+                self.assertEqual(value, 100)
+                self.assertIn("stopped", reason)
+
+    def test_actual_duty_cannot_mask_missing_fan_telemetry(self):
+        for key in ("cpu_fan", "cpu_optional_fan", "gpu_fan"):
+            with self.subTest(key=key):
+                value, reason, _fractions = self.demand(**{key: None, key + "_pct": 65})
+                self.assertEqual(value, 100)
+                self.assertIn("Missing", reason)
 
 
 class B850SessionTests(unittest.TestCase):
@@ -134,11 +148,44 @@ class B850SessionTests(unittest.TestCase):
         session = self.session()
         session.apply(72)
         self.backend.values[b850.DUTIES[0]] = 211
-        with self.assertRaises(RuntimeError):
-            session.check()
+        session.check()
         self.assertEqual(session.restore(), [])
         self.assertEqual(self.backend.values[b850.DUTIES[0]], 211)
         self.assertTrue(all(self.backend.values[b850.MODES[i]] == 0xC0 for i in (1, 2, 3)))
+
+    def test_owned_output_enable_change_stops_without_more_commands(self):
+        session = self.session()
+        session.apply(72)
+        self.backend.values[0x13] ^= 4
+        before = list(self.backend.writes)
+        with self.assertRaises(RuntimeError):
+            session.check()
+        with self.assertRaises(RuntimeError):
+            session.apply(85)
+        self.assertEqual(self.backend.writes, before)
+        self.assertTrue(session.restore())
+
+    def test_cpu_firmware_duty_changes_do_not_stop_case_assistance(self):
+        session = self.session()
+        session.apply(72)
+        self.backend.values[b850.DUTIES[0]] = 211
+        self.backend.values[b850.DUTIES[4]] = 213
+        session.check()
+        session.apply(85)
+        self.assertEqual(self.backend.values[b850.DUTIES[0]], 211)
+        self.assertEqual(self.backend.values[b850.DUTIES[4]], 213)
+        self.assertEqual(session.restore(), [])
+
+    def test_cpu_duty_changes_during_native_calls_do_not_spoil_restore_proof(self):
+        original_snapshot = self.backend.snapshot
+        def changing_snapshot():
+            self.backend.values[b850.DUTIES[0]] += 1
+            return original_snapshot()
+        self.backend.snapshot = changing_snapshot
+        session = self.session()
+        session.apply(72)
+        self.assertEqual(session.restore(), [])
+        self.assertFalse(self.journal.exists())
 
     def test_bad_journal_and_disabled_modes_refuse_without_writes(self):
         for fault in ("disabled", "manual", "bad_journal"):
@@ -241,6 +288,11 @@ class B850WorkerTests(unittest.TestCase):
                 data["gpu_memory_temp"] = float("nan")
             elif fault == "read_failure" and clock.now >= 103:
                 raise OSError("sensor read failed")
+            elif fault == "normal_gpu_full":
+                data["gpu_fan_pct"] = 100
+            elif fault == "stopped_cpu":
+                data["cpu_fan"] = 0
+                data["cpu_fan_pct"] = 65
             elif not commission and clock.now >= 104:
                 data["gpu_hotspot_temp"] = 90
             return data
@@ -263,7 +315,8 @@ class B850WorkerTests(unittest.TestCase):
               mock.patch.object(b850.fan_common, "OwnerHeartbeat", return_value=heartbeat),
               mock.patch.object(b850.time, "monotonic", side_effect=lambda: clock.now),
               mock.patch.object(case_fans, "write_status") as publish,
-              mock.patch.object(case_fans, "write_terminal_status") as terminal):
+              mock.patch.object(case_fans, "write_terminal_status",
+                  return_value="disk publication failed" if fault == "terminal_publication" else None) as terminal):
             result = b850.worker(path, 7, 1, {name: 1250 for name in b850.TARGETS}, commission)
         computer.Close.assert_called_once_with()
         return result, publish, terminal.call_args.kwargs, backend
@@ -272,11 +325,25 @@ class B850WorkerTests(unittest.TestCase):
         result, publish, terminal, backend = self.run_worker()
         self.assertEqual(result, 0)
         commands = [call.kwargs["command_pct"] for call in publish.call_args_list if "command_pct" in call.kwargs]
-        self.assertEqual(commands[0], 72)
+        self.assertEqual(commands[0], 60)
         self.assertIn(100, commands)
         self.assertTrue(terminal["restore_confirmed"])
         self.assertEqual(terminal["restore_errors"], [])
         self.assertTrue(all(backend.values[r] == 0xC0 for r in b850.MODES))
+
+    def test_normal_full_gpu_duty_rises_over_several_seconds(self):
+        result, publish, terminal, _backend = self.run_worker(fault="normal_gpu_full")
+        self.assertEqual(result, 0)
+        commands = [call.kwargs["command_pct"] for call in publish.call_args_list if "command_pct" in call.kwargs]
+        self.assertEqual(commands[:3], [60, 80, 100])
+        self.assertTrue(terminal["restore_confirmed"])
+
+    def test_stopped_cpu_with_valid_duty_bypasses_normal_acceleration(self):
+        result, publish, terminal, _backend = self.run_worker(fault="stopped_cpu")
+        self.assertEqual(result, 0)
+        commands = [call.kwargs["command_pct"] for call in publish.call_args_list if "command_pct" in call.kwargs]
+        self.assertEqual(commands[0], 100)
+        self.assertTrue(terminal["restore_confirmed"])
 
     def test_invalid_startup_identity_or_temperature_sends_no_commands(self):
         for fault in ("identity", "temperature"):
@@ -291,6 +358,11 @@ class B850WorkerTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertTrue(terminal["control_attempted"])
         self.assertTrue(terminal["restore_confirmed"])
+
+    def test_terminal_publication_failure_does_not_report_success_exit(self):
+        result, _publish, terminal, _backend = self.run_worker(fault="terminal_publication")
+        self.assertTrue(terminal["restore_confirmed"])
+        self.assertEqual(result, 1)
 
     def test_transient_startup_zero_waits_then_arms_without_bypassing_tach(self):
         result, publish, terminal, backend = self.run_worker(fault="startup_zero")

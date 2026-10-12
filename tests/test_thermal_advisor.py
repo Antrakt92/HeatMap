@@ -47,7 +47,7 @@ class ThermalPolicyTests(unittest.TestCase):
         self.assertEqual(values, sorted(values))
 
     def test_ramp_immediate_up_delayed_down_and_deadband(self):
-        ramp = FanRamp()
+        ramp = FanRamp(value=100)
         self.assertEqual(ramp.update(60, 0), 100)
         self.assertEqual(ramp.update(60, 14), 100)
         self.assertEqual(ramp.update(60, 16), 98)
@@ -57,7 +57,7 @@ class ThermalPolicyTests(unittest.TestCase):
         self.assertEqual(ramp.update(60, 35), 100)
 
     def test_ramp_duplicate_and_backward_timestamps_cannot_accelerate_cooling(self):
-        ramp = FanRamp()
+        ramp = FanRamp(value=100)
         ramp.update(60, 0)
         ramp.update(60, 14)
         self.assertEqual(ramp.update(60, 16), 98)
@@ -67,22 +67,22 @@ class ThermalPolicyTests(unittest.TestCase):
         self.assertEqual(ramp.update(60, 16.5), 97)
 
     def test_cooling_hold_time_is_not_banked_as_a_decrease_budget(self):
-        ramp = FanRamp()
+        ramp = FanRamp(value=100)
         self.assertEqual(ramp.update(60, 0), 100)
         self.assertEqual(ramp.update(60, 15), 100)
         self.assertEqual(ramp.update(60, 15.25), 100)
         self.assertEqual(ramp.update(60, 15.5), 99)
 
     def test_ramp_subsecond_updates_share_the_two_points_per_second_budget(self):
-        ramp = FanRamp(cool_since=0, last_time=15)
+        ramp = FanRamp(value=100, cool_since=0, last_time=15)
         values = [ramp.update(60, 15 + step / 8) for step in range(1, 9)]
         self.assertEqual(values, [100, 100, 100, 99, 99, 99, 99, 98])
         self.assertEqual(ramp.update(60, 1000), 88, "A long pause must retain the five-second cap")
 
     def test_ramp_restarts_cooling_delay_after_an_emergency_rise(self):
-        ramp = FanRamp(cool_since=0, last_time=15)
+        ramp = FanRamp(value=100, cool_since=0, last_time=15)
         ramp.update(60, 15.25)
-        self.assertEqual(ramp.update(100, 15.25), 100)
+        self.assertEqual(ramp.update(100, 15.25, emergency=True), 100)
         self.assertEqual(ramp.update(60, 16), 100)
         self.assertEqual(ramp.update(60, 30.75), 100)
         self.assertEqual(ramp.update(60, 31), 100)

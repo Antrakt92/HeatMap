@@ -22,21 +22,46 @@ SHARED_JOURNAL_NAME = 'shared-recovery.json'
 SHARED_JOURNAL_PROFILE = 'b550-aorus-pro-ac-shared-takeover'
 
 
+def _command_registers(baseline, percent):
+    command = dict(baseline)
+    command.update({r: baseline[r] & 0x7F for r in (0x15, 0x16, 0x17)})
+    value = round(percent * 255 / 100)
+    command.update({0x63: value, 0x6B: 255, 0x73: value})
+    return command
+
+
+def _restore_conflict(current, mode, baseline, expected, pending):
+    if current[0x13] != baseline[0x13]:
+        return 'Shared output registers changed; external settings preserved'
+    if mode == 1:
+        # Firmware may update duty immediately after regaining ownership.
+        if any(current[r] != baseline[r] for r in (0x15, 0x16, 0x17)):
+            return 'Shared register modes changed while firmware owns outputs; settings preserved'
+        return None
+    if mode != 0 or any(current[r] not in (baseline[r], expected[r], pending[r])
+                         for r in REGISTERS[1:]):
+        return 'Shared fan controller settings changed; external settings preserved'
+    return None
+
+
 class SharedRecoveryJournal:
     """Durable takeover evidence for the shared EC fan group.
 
     Journal format (shared-recovery.json, next to the case fan-status files,
     like the GPU worker's sibling recovery.json)::
 
-        {"profile": "b550-aorus-pro-ac-shared-takeover", "version": 1,
+        {"profile": "b550-aorus-pro-ac-shared-takeover", "version": 2,
          "board": "B550_AORUS_PRO_AC",
          "module": {"file": "hardware_modules/IsaBridgeEC.bin", "version": "0.2.10"},
-         "baseline": {"13": 119, "15": 128, ...}}  # two-digit hex register keys
+         "baseline": {"13": 119, "15": 128, ...},
+         "expected": {...}, "pending": {...}}  # two-digit hex register keys
 
     The journal is written atomically (temp file + fsync + os.replace) before
-    bridge.write_mode(0), mirroring gpu_fans.py RecoveryJournal.before_write.
-    A new worker recovers EC=1 plus the baseline before any new takeover and
-    deletes the journal only after read_mode() == 1 with matching registers.
+    every command, mirroring gpu_fans.py RecoveryJournal.before_write. Expected
+    and pending states cover native calls that partly succeed before raising.
+    A new worker restores only a known unfinished command. Legacy journals have
+    no ownership proof and may only be retired after firmware has already
+    regained its original register modes. Unknown settings are never overwritten.
     Anything else (missing file excluded) raises with settings preserved and
     keeps the file: kill -9 and kernel hangs during the native calls remain
     uncovered, like on the GPU path.
@@ -45,14 +70,12 @@ class SharedRecoveryJournal:
     def __init__(self, path):
         self.path = Path(path)
 
-    def before_takeover(self, baseline):
-        if (not isinstance(baseline, dict) or set(baseline) != set(REGISTERS)
-                or any(type(value) is not int or not 0 <= value <= 255
-                       for value in baseline.values())):
-            raise RuntimeError('Invalid shared recovery snapshot; no new command sent')
-        payload = dict(profile=SHARED_JOURNAL_PROFILE, version=1, board=SHARED_BOARD,
+    def before_write(self, baseline, expected, pending):
+        payload = dict(profile=SHARED_JOURNAL_PROFILE, version=2, board=SHARED_BOARD,
                        module=dict(SHARED_MODULE),
-                       baseline={f'{register:02X}': baseline[register] for register in REGISTERS})
+                       **{name: {f'{r:02X}': state[r] for r in REGISTERS}
+                          for name, state in (('baseline', baseline), ('expected', expected), ('pending', pending))})
+        self._decode(payload)
         temporary = fan_common.stage_json_payload(self.path, payload)
         try:
             os.replace(temporary, self.path)
@@ -64,14 +87,32 @@ class SharedRecoveryJournal:
 
     def _decode(self, saved):
         if (not isinstance(saved, dict) or saved.get('profile') != SHARED_JOURNAL_PROFILE
-                or type(saved.get('version')) is not int or saved['version'] != 1
+                or type(saved.get('version')) is not int or saved['version'] not in (1, 2)
                 or saved.get('board') != SHARED_BOARD or saved.get('module') != SHARED_MODULE
                 or not isinstance(saved.get('baseline'), dict)
                 or set(saved['baseline']) != {f'{register:02X}' for register in REGISTERS}
                 or any(type(value) is not int or not 0 <= value <= 255
                        for value in saved['baseline'].values())):
             raise RuntimeError('Shared recovery journal identity or settings invalid; settings preserved')
-        return {register: saved['baseline'][f'{register:02X}'] for register in REGISTERS}
+        baseline = {r: saved['baseline'][f'{r:02X}'] for r in REGISTERS}
+        if baseline[0x13] & 7 != 7:
+            raise RuntimeError('Shared recovery baseline output modes invalid; settings preserved')
+        if saved['version'] == 1:
+            return baseline, None, None
+        states = []
+        for key in ('expected', 'pending'):
+            state = saved.get(key)
+            if (not isinstance(state, dict) or set(state) != {f'{r:02X}' for r in REGISTERS}
+                    or any(type(v) is not int or not 0 <= v <= 255 for v in state.values())):
+                raise RuntimeError('Shared recovery command invalid; settings preserved')
+            state = {r: state[f'{r:02X}'] for r in REGISTERS}
+            if state != baseline and (state[0x13] != baseline[0x13]
+                    or any(state[r] != baseline[r] & 0x7F for r in (0x15, 0x16, 0x17))
+                    or state[0x6B] != 255 or state[0x63] != state[0x73]
+                    or not round(255 * 60 / 100) <= state[0x63] <= 255):
+                raise RuntimeError('Unknown shared recovery command; settings preserved')
+            states.append(state)
+        return baseline, *states
 
     def recover(self, backend, bridge, bus=IsaBus):
         def _open_utf8(path):
@@ -83,11 +124,17 @@ class SharedRecoveryJournal:
             return False
         except (OSError, ValueError) as exc:
             raise RuntimeError(f'Shared recovery journal unreadable; settings preserved: {exc}') from exc
-        baseline = self._decode(saved)
+        baseline, expected, pending = self._decode(saved)
         with bus():
             current = {register: backend.read(register) for register in REGISTERS}
             mode = bridge.read_mode()
-            if mode == 1 and current == baseline:
+            if expected is None and (mode != 1 or any(current[r] != baseline[r]
+                                                        for r in (0x13, 0x15, 0x16, 0x17))):
+                raise RuntimeError('Legacy shared recovery journal lacks ownership proof; settings preserved')
+            conflict = _restore_conflict(current, mode, baseline, expected or baseline, pending or baseline)
+            if conflict:
+                raise RuntimeError(conflict)
+            if mode == 1:
                 self.clear()
                 return False
             errors = []
@@ -242,6 +289,7 @@ class SharedFanSession:
         self.baseline = None
         self.touched = False
         self.restored = False
+        self.expected = self.pending = None
 
     def prepare(self):
         with self.bus():
@@ -272,11 +320,16 @@ class SharedFanSession:
                 self.baseline = {r: self.backend.read(r) for r in REGISTERS}
                 if self.baseline[0x13] & 7 != 7:
                     raise RuntimeError('Shared-fan output modes changed before activation')
-                if self.journal is not None:
-                    # Durable evidence precedes the EC disable; a publication
-                    # failure aborts the takeover while firmware still owns
-                    # the outputs. Mirrors gpu_fans.py RecoveryJournal.before_write.
-                    self.journal.before_takeover(self.baseline)
+                self.expected = dict(self.baseline)
+            else:
+                if self.bridge.read_mode() != 0:
+                    raise RuntimeError('Shared fan ownership was lost')
+                self._check_modes()
+            pending = _command_registers(self.baseline, percent)
+            if self.journal is not None:
+                self.journal.before_write(self.baseline, self.expected, pending)
+            self.pending = pending  # Durable intent covers each partial write.
+            if not self.touched:
                 self.touched = True  # A failed native call may already have written.
                 self.bridge.write_mode(0)
                 self.sleep(0.5)
@@ -288,12 +341,12 @@ class SharedFanSession:
                     self.backend.write(register, 255 if register == 0x6B else value)
                 for register in (0x15, 0x16, 0x17):
                     self.backend.write(register, self.baseline[register] & 0x7F)
-            elif self.bridge.read_mode() != 0:
-                raise RuntimeError('Shared fan ownership was lost')
-            self._check_modes()
             self.backend.write(0x63, value)  # SYS5
             self.backend.write(0x6B, 255)    # Unused SYS6; do not leave a stopped output.
             self.backend.write(0x73, value)  # SYS4
+            if {r: self.backend.read(r) for r in REGISTERS} != pending:
+                raise RuntimeError('Shared fan command readback mismatch')
+            self.expected = pending
 
     def check(self):
         with self.bus():
@@ -303,12 +356,8 @@ class SharedFanSession:
                 self._check_modes()
 
     def _check_modes(self):
-        # Equal PWM feedback does not prove manual control: another controller
-        # can restore an automatic mode while duty temporarily remains unchanged.
-        if (self.backend.read(0x13) != self.baseline[0x13]
-                or any(self.backend.read(r) != self.baseline[r] & 0x7F
-                       for r in (0x15, 0x16, 0x17))):
-            raise RuntimeError('Shared fan output or manual mode changed')
+        if {r: self.backend.read(r) for r in REGISTERS} != self.expected:
+            raise RuntimeError('Shared fan output, duty or manual mode changed')
 
     def restore(self):
         if not self.touched or self.restored:
@@ -316,11 +365,16 @@ class SharedFanSession:
         errors = []
         try:
             with self.bus():
+                current = {r: self.backend.read(r) for r in REGISTERS}
+                mode = self.bridge.read_mode()
+                conflict = _restore_conflict(current, mode, self.baseline,
+                                              self.expected, self.pending)
+                if conflict:
+                    return [conflict]
                 # If a partial takeover failed before EC disable, leave firmware
                 # alone; do not fight a live automatic controller with duty writes.
                 wrote_pwm = False
                 try:
-                    mode = self.bridge.read_mode()
                     if mode == 0:
                         for register in REGISTERS[1:]:
                             try:
@@ -328,15 +382,14 @@ class SharedFanSession:
                             except Exception as exc:
                                 errors.append(str(exc))
                         wrote_pwm = True
-                    elif any(self.backend.read(r) != self.baseline[r] for r in (0x15, 0x16, 0x17)):
-                        errors.append('Shared register modes changed while firmware owns outputs')
                 except Exception as exc:
                     errors.append(str(exc))
                 # Attempt the known original EC mode even if an earlier read or
                 # register restore failed. Keep that failure as unconfirmed proof.
                 try:
-                    self.bridge.write_mode(1)
-                    self.sleep(0.5)
+                    if mode == 0:
+                        self.bridge.write_mode(1)
+                        self.sleep(0.5)
                     if self.bridge.read_mode() != 1:
                         errors.append('Shared firmware restoration was not confirmed')
                 except Exception as exc:

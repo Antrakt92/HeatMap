@@ -16,8 +16,21 @@ COOL = dict(cpu_temp=40, gpu_core_temp=40, gpu_hotspot_temp=60, gpu_memory_temp=
 
 class CaseFanStartupAuditTests(unittest.TestCase):
     def run_worker(self, reference, snapshots=None, mutate=None, commission=False,
-                   cancellation=None):
+                   cancellation=None, shared=False):
         computer, controls = fixture()
+        backend = FakeRegisters()
+        backend.values.update({0x63: 128, 0x6B: 255, 0x73: 128})
+        backend.readings = lambda: [dict(name=name, rpm=rpm,
+            control_pct=round(backend.values[register] * 100 / 255))
+            for name, rpm, register in zip(shared_fans.SHARED_NAMES, (650, 1100, 0), (0x73, 0x63, 0x6B))]
+        bridge = FakeBridge(backend.events)
+        shared_session = shared_fans.SharedFanSession(backend, bridge, bus=nullcontext, sleep=lambda _: None)
+        if shared:
+            for sensor in computer.Hardware[0].SubHardware[1].Sensors:
+                if sensor.SensorType == 'Fan' and sensor.Name == shared_fans.SHARED_NAMES[2]:
+                    sensor.Value = 0
+            shared_session.prepare()
+        shared_session.close = mock.Mock()
         stop = threading.Event()
         clock = [100.0]
         owner = mock.Mock()
@@ -62,6 +75,8 @@ class CaseFanStartupAuditTests(unittest.TestCase):
 
         with (mock.patch.dict('sys.modules', {'clr': mock.Mock()}),
               mock.patch.object(case_fans, 'make_shared_computer', return_value=computer),
+              mock.patch.object(case_fans, 'recover_shared_journal'),
+              mock.patch.object(case_fans, 'open_shared_session', return_value=shared_session),
               mock.patch.object(case_fans, 'require_hardware_access', side_effect=hardware_guard),
               mock.patch.object(case_fans.CaseFanSession, 'readings', readings),
               mock.patch.object(case_fans.psutil, 'Process', return_value=owner),
@@ -74,7 +89,7 @@ class CaseFanStartupAuditTests(unittest.TestCase):
               mock.patch.object(overlay, '_is_admin', return_value=True),
               mock.patch.object(overlay, '_runtime_dll_errors', return_value=[]),
               mock.patch.object(overlay, 'read_sensors', side_effect=read)):
-            result = case_fans.worker('unused', 7, 1, full_rpm=reference, commission=commission)
+            result = case_fans.worker('unused', 7, 1, full_rpm=reference, commission=commission, shared=shared)
         return result, controls, reports
 
     def test_calibrated_cool_restart_starts_at_current_demand_without_full_sweep(self):
@@ -89,6 +104,15 @@ class CaseFanStartupAuditTests(unittest.TestCase):
         self.assertEqual(reports[0]['command_pct'], 60)
         self.assertTrue(active)
         self.assertTrue(all(report['verified_full_rpm'] is None for report in active))
+
+    def test_unused_full_duty_header_does_not_force_connected_fans_to_full_on_restart(self):
+        reference = {name: 1200 for name in case_fans.ALL_TARGETS[:-1]}
+        result, controls, reports = self.run_worker(reference, shared=True)
+        self.assertEqual(result, 0)
+        commands = [report['command_pct'] for report in reports if 'command_pct' in report]
+        self.assertEqual(commands, [60, 60])
+        for control in controls[:2]:
+            control.SetSoftware.assert_called_once_with(60.0)
 
     def test_unknown_or_other_profile_still_requires_full_airflow_validation(self):
         for reference in (None, {}, {name: 1200 for name in case_fans.ALL_TARGETS[:-1]},

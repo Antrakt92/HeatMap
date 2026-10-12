@@ -1,5 +1,8 @@
 import unittest
 from unittest import mock
+import os
+from pathlib import Path
+import tempfile
 
 import enable_case_fans as activation
 
@@ -49,6 +52,34 @@ class ActivationTests(unittest.TestCase):
              mock.patch.object(activation.ctypes, "WinDLL") as native:
             activation.close_previous_overlay()
         native.assert_not_called()
+
+    def test_activation_uses_saved_b850_profile_and_preserves_muted_alerts(self):
+        reference = {f"System Fan #{number}": 1250 for number in (1, 2, 3)}
+        config = dict(case_fans_b850_enabled=True, case_fans_shared_enabled=False,
+                      case_fan_full_rpm=reference, alerts_enabled=False)
+        def verified(_client, samples):
+            samples.append(dict(verified_full_rpm=reference))
+            return dict(restore_confirmed=True)
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.dict(os.environ, LOCALAPPDATA=directory),
+            mock.patch.object(activation.overlay, "_is_admin", return_value=True),
+            mock.patch.object(activation.subprocess, "run", return_value=mock.Mock(returncode=0)),
+            mock.patch.object(activation, "close_previous_overlay"),
+            mock.patch.object(activation.overlay, "acquire_single_instance", return_value=True),
+            mock.patch.object(activation.overlay, "release_single_instance"),
+            mock.patch.object(activation.overlay, "load_config_result", return_value=(config, None)),
+            mock.patch.object(activation.overlay, "CONFIG_PATH", str(Path(directory) / "absent.json")),
+            mock.patch.object(activation.overlay, "save_config", return_value=(True, "")),
+            mock.patch.object(activation.overlay, "enable_autostart", return_value=(True, "")),
+            mock.patch.object(activation, "FanWorkerClient") as client,
+            mock.patch.object(activation, "verify_worker", side_effect=verified),
+            mock.patch.object(activation.subprocess, "Popen", return_value=mock.Mock(pid=7)),
+            mock.patch.object(activation.overlay, "_show_error_message"),
+        ):
+            self.assertEqual(activation.main(), 0)
+        self.assertTrue(client.call_args.kwargs.get("b850"))
+        self.assertFalse(config["alerts_enabled"])
 
     def verify_reports(self, reports, samples):
         clock = [0.0]

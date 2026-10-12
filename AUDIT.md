@@ -1,5 +1,15 @@
 # HeatMap Audit Backlog
 
+Deep fan/runtime/storage audit (2026-10-12): confirmed failures are closed in the
+[current audit](docs/audit-and-gpu-targets-2026-10-12.md), including scoped B850
+ownership, PWM masking stopped tachs, shared-journal ownership/partial recovery,
+activation profile/preferences, storage queued replies and independent capacity,
+config-save concurrency, setup aliases/bounded downloads/PnP guards and ADLX
+validation. GPU control now combines a separately installed balanced driver
+profile with bounded temperature feedback and gradual ordinary acceleration;
+independent full-temperature/failure protection remains immediate. Fresh exact-board
+ADLX activity is preferred over generation-less D3D counters when available.
+
 B850 reboot follow-up (2026-10-12): an early SYS1 zero stopped activation before
 commands although all three physical fans were reported spinning. Twenty later
 read-only samples showed positive SYS1/2/3 RPM. Startup now waits within its
@@ -13,8 +23,10 @@ GPU utilization follow-up: this boot's copied Windows D3D percentage disagreed
 with driver activity/power at idle and with ADLX during gaming. A separate Windows
 GPU Engine query also returned values above 100%. These counters are not evidence
 of thermal load. Temperature evaluation uses the exact GPU's fresh ADLX readings,
-board power and clocks; the counter-provider/source discrepancy needs a separate
-matched-sample investigation before changing the display policy.
+board power and clocks. The display now uses validated fresh ADLX activity from
+the exact selected GPU when its worker is available. The D3D provider anomaly and
+upstream early-return handle cleanup remain separately documented candidates;
+their runtime cause has not been established and DLLs were not changed.
 
 B850 SYS1/2/3 assistance now uses the greater CPU/GPU fan fraction and independent
 thermal protection, with exact register ownership, interrupted-write recovery and

@@ -5,6 +5,7 @@ SDK/Include/{ISystem,IGPUTuning,IGPUManualFanTuning,IPerformanceMonitoring2}.h.
 No clock, voltage, power or ResetToFactory entry points are exposed.
 """
 import ctypes as c
+import math
 import os
 from contextlib import contextmanager
 
@@ -203,6 +204,8 @@ class AmdGpuFan:
             error_index = I(-1)
             result = self.fan.call(6, (P, c.POINTER(I)), (states.pointer, c.byref(error_index)))
             check(result, f'Validate fan curve (point {error_index.value})')
+            if error_index.value != -1:
+                raise AdlxError(f'Invalid fan curve reported by driver (point {error_index.value})')
             check(self.fan.call(7, (P,), (states.pointer,)), 'Apply fan curve')
 
     def set_zero_rpm(self, enabled):
@@ -233,6 +236,13 @@ class AmdGpuFan:
                             raise
                         values[key] = None
                 values['timestamp_ms'] = metrics.get(3, c.c_int64)
+                # Optional activity is display evidence, never a fan prerequisite.
+                try:
+                    load = metrics.get(4, c.c_double)
+                except AdlxError:
+                    load = None
+                values['gpu_load'] = (load if type(load) in (int, float)
+                                      and 0 <= load <= 100 and math.isfinite(load) else None)
                 return values
 
     def close(self):

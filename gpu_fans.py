@@ -24,15 +24,53 @@ from startup_readiness import StartupCancelled, StartupNotReady, wait_for_readin
 
 PROFILE = 'gigabyte-rx7900xt-hotspot90'
 CURVES = {
-    'gpu_core_temp': ((40, 30), (50, 45), (60, 65), (70, 85), (75, 100)),
-    'gpu_hotspot_temp': ((50, 30), (60, 45), (75, 70), (85, 90), (90, 100)),
-    'gpu_memory_temp': ((55, 30), (65, 45), (75, 65), (85, 85), (90, 100)),
+    'gpu_core_temp': ((40, 30), (55, 40), (65, 60), (70, 85), (75, 100)),
+    'gpu_hotspot_temp': ((50, 30), (65, 40), (80, 65), (85, 90), (90, 100)),
+    'gpu_memory_temp': ((55, 30), (70, 40), (80, 60), (85, 85), (90, 100)),
 }
 LABELS = {'gpu_core_temp': 'Core', 'gpu_hotspot_temp': 'Hotspot', 'gpu_memory_temp': 'Memory'}
 # Application intervention thresholds, not hardware temperature limits.
-ASSIST_ON = {'gpu_core_temp': 70, 'gpu_hotspot_temp': 85, 'gpu_memory_temp': 85}
-ASSIST_OFF = {'gpu_core_temp': 60, 'gpu_hotspot_temp': 75, 'gpu_memory_temp': 75}
+TARGETS = {'gpu_core_temp': 60, 'gpu_hotspot_temp': 80, 'gpu_memory_temp': 80}
+ASSIST_ON = {'gpu_core_temp': 60, 'gpu_hotspot_temp': 78, 'gpu_memory_temp': 78}
+ASSIST_OFF = {'gpu_core_temp': 50, 'gpu_hotspot_temp': 68, 'gpu_memory_temp': 68}
 RELEASE_HOLD_SECONDS = 10
+BALANCED_DRIVER_POINTS = ((30, 23), (50, 35), (70, 60), (80, 75), (90, 100))
+
+
+def emergency_cooling(data):
+    return any(finite(data.get(key), 1, 150) is None or data[key] >= points[-1][0]
+               for key, points in CURVES.items())
+
+
+class GpuTemperatureTarget:
+    """Bounded feedback floor; independent curves always retain thermal protection."""
+    def __init__(self):
+        self.floor = 30.0
+        self.last_time = None
+
+    def update(self, data, now):
+        base, reason = demand(data)
+        if emergency_cooling(data) or finite(now, 0, 1e15) is None:
+            self.floor, self.last_time = 100.0, None
+            return 100, reason
+        if self.last_time is not None and now < self.last_time:
+            self.floor, self.last_time = 100.0, None
+            return 100, 'Invalid control clock'
+        elapsed = 0 if self.last_time is None else min(2, now - self.last_time)
+        self.last_time = now
+        # Normalize headroom: Core's 15 C margin and Hotspot/Memory's 10 C
+        # margins must exert comparable feedback, rather than compare raw C.
+        errors = {key: (data[key] - target) * 10 / (CURVES[key][-1][0] - target)
+                  for key, target in TARGETS.items()}
+        key = max(errors, key=errors.__getitem__)
+        error = errors[key]
+        if error > 2:
+            self.floor = min(100, self.floor + min(6, error / 2) * elapsed)
+        elif error < -2:
+            self.floor = max(30, self.floor - elapsed)
+        if self.floor > base:
+            return math.ceil(self.floor), LABELS[key] + ' target'
+        return base, reason
 
 
 def require_hardware_access():
@@ -81,7 +119,7 @@ def demand(data):
 
 
 class GpuRamp:
-    """Bounded GPU fall: start at demand, immediate rise, 10 s hold, 2 points/s fall.
+    """Normal rise 10 points/s; emergency bypass; 10 s hold, 2 points/s fall.
 
     Cooling-rate twin of thermal_policy.FanRamp (60% floor, 15 s hold,
     3-point deadband, fractional budget, int math). The floors, holds and
@@ -93,18 +131,21 @@ class GpuRamp:
         self.last_time = None
         self.cool_since = None
 
-    def update(self, target, now):
+    def update(self, target, now, *, emergency=False):
         if finite(target, 30, 100) is None or finite(now, 0, 1e15) is None:
             self.command, self.cool_since = 100, None
             return 100
         if self.command is None:
-            self.command = target
+            self.command = 30
         if self.last_time is not None and now < self.last_time:
             self.command, self.cool_since = 100, None
         elapsed = 0 if self.last_time is None else min(2, now - self.last_time)
         self.last_time = now
+        if emergency:
+            self.command, self.cool_since = 100, None
+            return 100
         if target >= self.command:
-            self.command, self.cool_since = target, None
+            self.command, self.cool_since = min(target, self.command + 10 * elapsed), None
         else:
             if self.cool_since is None:
                 self.cool_since = now
@@ -241,8 +282,16 @@ class GpuSession:
 
     def apply(self, percent, before_write=None, check_cancelled=None):
         points = cooling_points(percent, self.baseline['points'])
+        self.apply_points(points, zero_rpm=False if self.baseline['zero_rpm'] is not None else None,
+                          before_write=before_write, check_cancelled=check_cancelled)
+        self.command = percent
+
+    def apply_points(self, points, *, zero_rpm, before_write=None, check_cancelled=None):
+        if (not valid_snapshot({'points': points, 'zero_rpm': zero_rpm})
+                or (zero_rpm is None) != (self.baseline['zero_rpm'] is None)):
+            raise ValueError('Invalid GPU fan settings; no command sent')
         self.check()
-        expected = {'points': points, 'zero_rpm': False if self.baseline['zero_rpm'] is not None else None}
+        expected = {'points': copy.deepcopy(points), 'zero_rpm': zero_rpm}
         if self.journal is not None:
             self.journal.before_write(self.baseline, self.expected, expected)
         if before_write is not None:
@@ -262,11 +311,10 @@ class GpuSession:
         ]
         self.touched = True  # A failed native call may already have changed hardware.
         self.adapter.set_points(points)
-        if self.baseline['zero_rpm'] is not None:
-            self.adapter.set_zero_rpm(False)
+        if zero_rpm is not None:
+            self.adapter.set_zero_rpm(zero_rpm)
         self.expected = expected
         self.check(external=False)
-        self.command = percent
 
     def restore(self, *, before_write=None, check_cancelled=None):
         if not self.touched:
@@ -311,6 +359,18 @@ class GpuSession:
                 errors.append(f'GPU recovery journal cleanup: {exc}')
         return errors
 
+    def commit(self):
+        """Explicit profile installation only: recover to the verified new curve."""
+        self.check()
+        if self.journal is None:
+            raise RuntimeError('A durable GPU journal is required to commit driver settings')
+        # Atomic rebasing is the commit point. A crash afterward must retain the
+        # new driver profile, even before receipt publication/journal cleanup.
+        self.journal.before_write(self.expected, self.expected, self.expected)
+        self.baseline = copy.deepcopy(self.expected)
+        self.known_states = [copy.deepcopy(self.expected)]
+        self.touched = False
+
 
 def status_error(reason):
     return {'state': 'error', 'reason': reason, 'restore_confirmed': False}
@@ -323,10 +383,10 @@ def mode_text(status):
         return f'Waiting GPU {math.ceil(remaining)}s' if remaining is not None else 'Waiting GPU...'
     if state == 'active':
         reason = status.get('reason', '')
-        reason = reason if reason in LABELS.values() else 'Failsafe'
+        reason = reason if reason in (*LABELS.values(), *(label + ' target' for label in LABELS.values())) else 'Failsafe'
         return f"AUTO {status['command_pct']}%+ · {reason}"
     if state == 'standby':
-        return ('AUTO ready · Driver curve' if status.get('thermal_ready', True) else
+        return ('AUTO · Driver curve' if status.get('thermal_ready', True) else
                 'AUTO waiting · Driver curve')
     return {'checking': 'Checking...', 'error': 'ERROR'}.get(state, 'Driver curve')
 
@@ -521,9 +581,11 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
         recovery_pending = False
         started = time.monotonic()
         ramp = GpuRamp()
+        target_control = GpuTemperatureTarget()
         policy = GpuAssistPolicy()
         last_stamp = baseline_readings['timestamp_ms']
         last_fresh = started
+        last_thermal_fresh = started
         stall_since = None
         takeover_time = None
         verified_rpm = None
@@ -552,11 +614,15 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
             fresh = stamp is not None and (last_stamp is None or stamp > last_stamp)
             if fresh:
                 last_stamp, last_fresh = stamp, now
+                if all(finite(data.get(key), 1, 150) is not None for key in CURVES):
+                    last_thermal_fresh = now
             elif now - last_fresh > SENSOR_STALE_DEGRADE_SECONDS:
                 data = dict(data, gpu_core_temp=None, gpu_hotspot_temp=None, gpu_memory_temp=None)
             requested, reason = demand(data)
             if now - last_fresh > SENSOR_STALE_FAIL_SECONDS:
                 raise RuntimeError('AMD GPU metrics stopped updating')
+            if now - last_thermal_fresh > SENSOR_STALE_FAIL_SECONDS:
+                raise RuntimeError('AMD GPU temperatures unavailable; driver control restored')
             policy_data = data if fresh else dict(data, **dict.fromkeys(CURVES))
             assist = commission or policy.update(policy_data, now)
             if not assist:
@@ -566,11 +632,13 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
                         raise RuntimeError('GPU cooling handback unconfirmed: ' + '; '.join(errors))
                     session = None
                     ramp = GpuRamp()
+                    target_control = GpuTemperatureTarget()
                     stall_since = takeover_time = None
                 thermal_ready = all(finite(policy_data.get(key), 1, 150) is not None for key in CURVES)
                 publish('standby', reason=('GPU cool; saved driver curve controls fans' if thermal_ready else
                                           'Waiting for GPU temperatures; saved driver curve controls fans'),
                         readings=data, thermal_ready=thermal_ready, control_attempted=control_attempted,
+                        readings_fresh=fresh,
                         recovered_previous_session=recovered, gpu=adapter.identity)
                 stop.wait(2)
                 continue
@@ -579,6 +647,8 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
                 # by the user and become the new settings to restore.
                 session = GpuSession(adapter, journal)
                 takeover_time = now
+            if fresh and not commission:
+                requested, reason = target_control.update(data, now)
             rpm = finite(data.get('gpu_fan'), 200, 10000)
             if rpm is None:
                 if stall_since is None:
@@ -601,7 +671,8 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
                 if before_rpm and before_rpm < 2500 and rpm < before_rpm * 1.10:
                     raise RuntimeError('GPU fans did not respond to full airflow')
                 verified_rpm = rpm
-            command = ramp.update(requested, now)
+            emergency = (commission and verified_rpm is None) or emergency_cooling(data) or reason == 'GPU fan tachometer unavailable/stopped'
+            command = ramp.update(requested, now, emergency=emergency)
             if not fresh and session.command is not None:
                 # No cooling credit from repeated metrics, including the short
                 # grace period before frozen readings become a full-airflow fault.
@@ -616,6 +687,7 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
             publish('checking' if commission and verified_rpm is None else 'active',
                     command_pct=command, demand_pct=requested, reason=reason,
                     readings=data, baseline=session.baseline, control_attempted=True,
+                    readings_fresh=fresh,
                     verified_full_rpm=verified_rpm, recovered_previous_session=recovered, gpu=adapter.identity)
             stop.wait(2)
     except OwnerHeartbeatExpired as exc:

@@ -23,7 +23,7 @@ class GpuGccCoexistenceTests(unittest.TestCase):
         harness = startup_tests.GpuStartupAuditTests()
         with mock.patch.object(guard, 'hardware_conflicts', return_value=['gcc.exe']):
             result, adapter, baseline, reports, journal = harness.run_worker(
-                lambda *_: startup_tests.sample(gpu_hotspot_temp=85, gpu_fan=2000), stop_at=9,
+                lambda *_: startup_tests.sample(gpu_hotspot_temp=85, gpu_fan=2000), stop_at=11,
                 access_guard=lambda: guard.require_hardware_access('gpu_control'))
         self.assertEqual(result, 0)
         self.assertTrue(any(report.get('command_pct') == 90 for report in reports))

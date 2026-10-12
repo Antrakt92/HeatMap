@@ -107,11 +107,12 @@ def main():
             if error:
                 raise RuntimeError(error)
             client = FanWorkerClient(overlay.APP_DIR, config.get("case_fan_full_rpm"),
-                                     shared=config.get('case_fans_shared_enabled', False), commission=True)
+                                     shared=config.get('case_fans_shared_enabled', False), commission=True,
+                                     b850=config.get('case_fans_b850_enabled', False))
             report["restore"] = verify_worker(client, report["samples"])
             if Path(overlay.CONFIG_PATH).exists():
                 shutil.copy2(overlay.CONFIG_PATH, directory / f"config-before-fans-{time.time_ns()}.json")
-            config.update(case_fans_enabled=True, alerts_enabled=True)
+            config.update(case_fans_enabled=True)
             reference = full_rpm_reference(report["samples"][-1].get("verified_full_rpm"))
             if reference is None:
                 raise RuntimeError("Missing verified full-speed RPM; activation was not saved")

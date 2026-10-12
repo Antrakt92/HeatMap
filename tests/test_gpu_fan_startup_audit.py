@@ -109,12 +109,12 @@ class GpuStartupAuditTests(unittest.TestCase):
 
     def test_hotspot_worker_boundaries_without_startup_full_speed_pulse(self):
         # Explicit expected floors test the complete worker, not just demand().
-        for hotspot, expected in ((40, None), (84, None), (84.9, None),
+        for hotspot, expected in ((40, None), (77.9, None), (78, 62), (80, 65), (84, 85), (84.9, 90),
                                   (85, 90), (89, 98), (89.5, 99), (90, 100), (95, 100)):
             with self.subTest(hotspot=hotspot):
                 result, adapter, baseline, reports, journal = self.run_worker(
                     lambda *_: sample(gpu_core_temp=40, gpu_hotspot_temp=hotspot,
-                                      gpu_memory_temp=56, gpu_fan=2000), stop_at=19)
+                                      gpu_memory_temp=56, gpu_fan=2000), stop_at=13)
                 self.assertEqual(result, 0)
                 commands = [r['command_pct'] for r in reports if r['state'] == 'active']
                 if expected is None:
@@ -122,9 +122,13 @@ class GpuStartupAuditTests(unittest.TestCase):
                     self.assertEqual(adapter.writes, [])
                 else:
                     self.assertTrue(commands)
-                    self.assertEqual(set(commands), {expected})
+                    self.assertEqual(commands[-1], expected)
+                    self.assertEqual(commands, sorted(commands))
+                    self.assertEqual(commands[0], 100 if hotspot >= 90 else 30)
+                    if hotspot < 90:
+                        self.assertTrue(all(right - left <= 20 for left, right in zip(commands, commands[1:])))
                     self.assertEqual(adapter.writes[0][1], 'curve')
-                    self.assertEqual(min(speed for _, speed in adapter.writes[0][2]), expected)
+                    self.assertEqual(min(speed for _, speed in adapter.writes[0][2]), commands[0])
                 self.assertEqual(adapter.snapshot(), baseline)
                 self.assertFalse(journal)
 
@@ -146,12 +150,14 @@ class GpuStartupAuditTests(unittest.TestCase):
         for key, temperature in gpu_fans.ASSIST_ON.items():
             with self.subTest(key=key):
                 result, adapter, baseline, reports, journal = self.run_worker(
-                    lambda *_: sample(**{key: temperature, 'gpu_fan': 2000}), stop_at=9)
-                expected, _ = gpu_fans.demand(sample(**{key: temperature}))
+                    lambda *_: sample(**{key: temperature, 'gpu_fan': 2000}), stop_at=11)
+                expected = {'gpu_core_temp': 50, 'gpu_hotspot_temp': 62, 'gpu_memory_temp': 56}[key]
                 commands = [report['command_pct'] for report in reports if report['state'] == 'active']
                 self.assertEqual(result, 0)
                 self.assertTrue(commands)
-                self.assertTrue(all(command == expected for command in commands))
+                self.assertEqual(commands[0], 30)
+                self.assertEqual(commands[-1], expected)
+                self.assertNotIn(100, commands)
                 self.assertEqual(adapter.snapshot(), baseline)
                 self.assertFalse(journal)
 
@@ -188,9 +194,10 @@ class GpuStartupAuditTests(unittest.TestCase):
     def test_missing_gpu_sensor_during_standby_never_causes_takeover(self):
         result, adapter, _, reports, _ = self.run_worker(lambda now, _: sample(
             gpu_hotspot_temp=50 if now < 5 else None))
-        self.assertEqual(result, 0)
+        self.assertEqual(result, 1)
         self.assertEqual(adapter.writes, [])
         self.assertTrue(any(report.get('thermal_ready') is False for report in reports))
+        self.assertIn('temperatures unavailable', reports[-1]['reason'])
 
     def test_stale_standby_temperature_cannot_trigger_assistance(self):
         result, adapter, _, reports, _ = self.run_worker(lambda now, _: sample(
@@ -202,7 +209,7 @@ class GpuStartupAuditTests(unittest.TestCase):
     def test_missing_sensor_under_owned_hot_gpu_retains_failsafe(self):
         result, adapter, baseline, reports, _ = self.run_worker(lambda now, _: sample(
             gpu_core_temp=70, gpu_hotspot_temp=50 if now < 7 else None, gpu_fan=2000))
-        self.assertEqual(result, 0)
+        self.assertEqual(result, 1)
         self.assertTrue(any(report.get('command_pct') == 100 for report in reports if report['time'] >= 7))
         self.assertEqual(adapter.snapshot(), baseline)
 
@@ -210,7 +217,10 @@ class GpuStartupAuditTests(unittest.TestCase):
         result, _, _, reports, _ = self.run_worker(lambda now, _: sample(
             gpu_core_temp=70, gpu_fan=0 if now < 7 else 2000), stop_at=15)
         self.assertEqual(result, 0)
-        self.assertTrue(all(report['command_pct'] == 85 for report in reports if report['state'] == 'active'))
+        commands = [report['command_pct'] for report in reports if report['state'] == 'active']
+        self.assertEqual(commands[:3], [30, 50, 70])
+        self.assertEqual(commands[-1], 85)
+        self.assertNotIn(100, commands)
 
     def test_explicit_commissioning_retains_full_airflow_validation(self):
         result, adapter, baseline, reports, _ = self.run_worker(
@@ -296,15 +306,15 @@ class GpuAssistPolicyTests(unittest.TestCase):
                 self.assertTrue(policy.update(sample(), 19.9))
                 self.assertFalse(policy.update(sample(), 20))
 
-    def test_ramp_starts_at_demand_and_preserves_fractional_decay(self):
-        ramp = gpu_fans.GpuRamp()
+    def test_ramp_preserves_fractional_decay_after_normal_acceleration(self):
+        ramp = gpu_fans.GpuRamp(initial=70)
         self.assertEqual(ramp.update(70, 0), 70)
         self.assertEqual(ramp.update(30, 1), 70)
         self.assertEqual(ramp.update(30, 10.9), 70)
         self.assertEqual(ramp.update(30, 11), 70)
         self.assertEqual(ramp.update(30, 11.4), 70)
         self.assertEqual(ramp.update(30, 11.6), 69)
-        self.assertEqual(ramp.update(90, 12), 90)
+        self.assertEqual(ramp.update(90, 12), 73)
 
     def test_nonfinite_ramp_input_remains_failsafe(self):
         for target, now in ((None, 1), (70, float('nan')), (True, 1), (70, False)):

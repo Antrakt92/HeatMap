@@ -74,7 +74,8 @@ as a normal green state just because Core is substantially cooler. If it persist
 under load, reduce the load and check the cooling; GPU clocks remain under driver
 control. Optional case and GPU fan control is described below.
 
-GPU load uses the busiest available Windows D3D engine on the selected adapter,
+When the GPU worker supplies fresh activity for an unambiguous matching board,
+GPU load uses AMD ADLX and is marked `drv`. Otherwise it uses the busiest available Windows D3D engine on the selected adapter,
 including 3D, compute, copy and video engines, following Task Manager's aggregation
 rule. Engine percentages are not added. If valid D3D readings are unavailable,
 HeatMap falls back to the driver's GPU Core activity counter; that counter can
@@ -175,19 +176,37 @@ temperatures through the installed AMD ADLX and selects the highest speed
 requested by the three curves. An integrated AMD adapter may coexist: HeatMap
 selects exactly one matching Gigabyte board by name and PCI/subsystem identity,
 independent of adapter order. Missing or duplicate matching boards block control.
-On a cool card, `AUTO ready · Driver curve` means
+On a cool card, `AUTO · Driver curve` means
 HeatMap is monitoring while the fans remain on the saved driver curve. Control
-engages only in response to the GPU's own temperatures: **Core at 70°C, Hotspot
-at 85°C, or Memory at 85°C or above**. CPU temperature, case fans, and their errors
+engages only in response to the GPU's own temperatures: **Core at 60°C, Hotspot
+at 78°C, or Memory at 78°C or above**. CPU temperature, case fans, and their errors
 do not determine GPU fan speed. Full speed starts at **Core 75°C, Hotspot 90°C,
-or Memory 90°C**. While HeatMap intervenes, the minimum is 30%; increases take
-effect at the next two-second poll, while decreases require 10 seconds of
-cooling and are limited to two percentage points per second.
-After 10 seconds of fresh readings with Core ≤60°C, Hotspot ≤75°C, and Memory
-≤75°C, HeatMap verifies restoration of the original curve and Zero RPM. These
+or Memory 90°C**. Feedback aims around **Core 60°C, Hotspot 80°C and Memory 80°C**,
+with a normalized tolerance of 3°C for Core and 2°C for Hotspot/memory. The greatest
+thermal request wins; missing readings never earn cooling credit. While HeatMap
+intervenes, the minimum is 30%; normal increases are limited to 10 percentage
+points per second. Full-temperature, stopped-fan and stale-data protection bypass
+that acceleration limit. Decreases require 10 seconds of cooling and are limited
+to two percentage points per second.
+After 10 seconds of fresh readings with Core ≤50°C, Hotspot ≤68°C, and Memory
+≤68°C, HeatMap verifies restoration of the saved curve and Zero RPM. These
 are application thresholds, not the card's rated limits. The original Zero RPM
 setting is preserved: if it is disabled in Adrenalin, returning control to the
 driver does not by itself stop the fans.
+
+An explicitly installed balanced driver profile provides continuous hardware
+temperature response even when HeatMap is closed: **30°C → 23%, 50°C → 35%,
+70°C → 60%, 80°C → 75%, 90°C → 100%**, preserving the current Zero RPM setting.
+This table uses the driver's fan-curve temperature input; it does not establish
+which displayed GPU sensor the driver uses. The separate software protections
+above always monitor Core, Hotspot and memory independently. To preview this
+exact-board profile after closing HeatMap, run
+`.venv\Scripts\python.exe tools\configure_gpu_curve.py`; append `--apply` only to
+save it. The tool requires fresh advancing readings, saves the previous curve
+under `%LOCALAPPDATA%/HeatMap/gpu-fan-profiles/`, uses the normal GPU ownership
+mutex/recovery journal, and verifies read-back. It changes fan settings only.
+These numbers are application policy, not a universal optimum or guaranteed
+temperatures. See [the current audit](docs/audit-and-gpu-targets-2026-10-12.md).
 
 `GPU → Cooling → AUTO N%+ · Hotspot/Core/Memory` shows the required minimum and
 the governing sensor. The driver may request more cooling through its saved
@@ -254,9 +273,10 @@ as an estimate in Cooling status. Equal percentages are not equal airflow.
 
 Temperature requests can increase the command before the main fans spin up:
 CPU at 80°C, GPU Core at 75°C, or Hotspot/memory at 90°C requests 100%.
-GPU assistance starts at Core 70°C or Hotspot/memory 85°C, matching the GPU
+GPU assistance starts at Core 60°C or Hotspot/memory 78°C, matching the GPU
 controller. These are application choices, not manufacturer temperature limits.
-The case minimum is 60%; rises apply at the next two-second poll and falls use
+The case minimum is 60%; normal rises are limited to 10 percentage points/second;
+independent full-temperature and missing/stale/stopped-feedback protection is immediate. Falls use
 the existing 15-second hold and two percentage points/second limit. Missing
 temperatures or CPU/GPU speed references requests full airflow; lost case
 tachometers stop the controller and trigger verified handback.
@@ -371,8 +391,10 @@ temperature timeout. Shutdown cancels the disposable storage readers.
 probes explicitly; the default is `true`. Windows volume fullness remains available.
 
 Before opening sensors and at every poll, HeatMap checks for known monitoring
-and fan-control tools, AMD AtiSetup, and live `pnputil /add-driver /install`
-operations. Monitoring tools share one policy, including CPU-Z, HWiNFO,
+and fan-control tools, AMD AtiSetup, and live PnP driver/device changes
+(installation, uninstall/forced removal, device enable/disable/restart/removal and
+rescan). Read-only PnP enumeration, export and package staging remain available.
+Monitoring tools share one policy, including CPU-Z, HWiNFO,
 FanControl, SIV, EasyTune, GCC and Ryzen Master, alone or together:
 HeatMap keeps read-only CPU, GPU, motherboard fan, and storage monitoring available
 while B550 case control remains paused. The separately commissioned independent
@@ -448,7 +470,7 @@ explicitly requested, the first 15 seconds verify full speed. The command must
 be confirmed and RPM must rise by at least 8% over its baseline (unless the
 initial command was already 95–100%). No response means the wiring/mode needs
 checking; the program does not switch PWM/DC blindly. During normal startup
-with saved verification for the exact current channels, the controller immediately
+with saved verification for the exact current channels, the controller gradually
 selects speed from fresh temperatures and shows AUTO after reading the command
 back. Old reference RPM values are not presented as a new full-speed check.
 SYS4/SYS5 immediately receive the required nonzero command; the brief protective
@@ -647,7 +669,8 @@ Verified environment: Python 3.13, pythonnet 3.1.0, psutil 7.2.2. Exact producti
    .venv\Scripts\python setup.py --hardware-smoke
    ```
    This command must run in an elevated terminal and succeeds only with a real,
-   positive CPU temperature reading.
+   positive CPU temperature reading. It checks hardware-access conflicts and
+   opens CPU sensors only; GPU, RAM/SPD, motherboard and storage discovery are disabled.
 
    To check an existing `lib/` without downloading:
    ```bash

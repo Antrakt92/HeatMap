@@ -2,6 +2,7 @@
 import argparse
 import ctypes
 import json
+import math
 import os
 import re
 import subprocess
@@ -25,7 +26,7 @@ from shared_fans import (SHARED_NAMES, SHARED_JOURNAL_NAME, SharedRecoveryJourna
                          open_shared_session, make_shared_computer, recover_shared_journal,
                          select_shared_sensors)
 from startup_readiness import StartupNotReady, StartupCancelled, wait_for_readiness
-from thermal_policy import CASE_FAN_LABELS
+from thermal_policy import CASE_FAN_LABELS, CASE_FAN_CURVES
 
 PROFILE = "b550-aorus-pro-ac-case-124"
 TARGETS = ("System Fan #1", "System Fan #2", "System Fan #4")
@@ -700,6 +701,12 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
                 if session.last_command is not None:
                     demand = max(demand, session.last_command)
             policy_demand = demand
+            emergency = (not commissioned
+                or any(finite(data.get(key), 1, 150) is None or data[key] >= points[-1][0]
+                       for key, points in CASE_FAN_CURVES.items())
+                or stale_age > SENSOR_STALE_DEGRADE_SECONDS
+                or reason == "Large GPU hotspot gap: full airflow"
+                or "confirmed 0 RPM" in reason)
             readings = session.readings()
             if shared_session is not None:
                 shared_session.check()
@@ -709,6 +716,7 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
                         raise RuntimeError('Previously unused SYS6 changed; restoring motherboard control')
                     continue
                 if fan["rpm"] is None or fan["rpm"] < 200:
+                    emergency = True
                     demand, reason = 100, f"{fan['name']}: tachometer unavailable/stopped"
                     start = stall_since.setdefault(fan["name"], now)
                     if now - start >= TACH_PERSISTENCE_SECONDS:
@@ -739,15 +747,16 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
                     else:
                         feedback_missing_since.pop(fan["name"], None)
                 if feedback_missing_since:
+                    emergency = True
                     demand, reason = 100, "Fan command feedback unavailable; full airflow"
                     if any(now - start >= TACH_PERSISTENCE_SECONDS
                            for start in feedback_missing_since.values()):
                         raise RuntimeError(reason)
             if ramp is None:
-                # Initialize from the first current sample, without inheriting
-                # FanRamp's fail-safe 100% startup hold on a calibrated profile.
-                ramp = FanRamp(value=demand)
-            command = ramp.update(demand, now)
+                initial_duty = math.ceil(max([60] + [fan["control_pct"] for fan in baseline
+                    if fan["name"] != SHARED_NAMES[2] and finite(fan["control_pct"], 0, 100) is not None]))
+                ramp = FanRamp(value=initial_duty)
+            command = ramp.update(demand, now, emergency=emergency)
             if not fresh and session.last_command is not None:
                 # No cooling credit from repeated metrics, including the short
                 # grace period before frozen readings become a full-airflow fault.

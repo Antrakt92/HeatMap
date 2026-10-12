@@ -15,23 +15,25 @@ class CaseReleaseAuditTests(unittest.TestCase):
         backend.events.clear()
         return backend, bridge, session
 
-    def test_failed_restore_mode_read_still_attempts_firmware_enable(self):
+    def test_failed_restore_mode_read_preserves_unknown_ownership(self):
         backend, bridge, session = self.shared_session()
         read_mode = bridge.read_mode
         bridge.read_mode = mock.Mock(side_effect=[RuntimeError('mode read failed'), 1])
         errors = session.restore()
-        self.assertIn(('ec', 1), backend.events)
-        self.assertEqual(bridge.mode, 1)
+        # A blind EC write could displace a controller that took over externally.
+        # Keep the journal and retry verified ownership instead.
+        self.assertEqual(backend.events, [])
+        self.assertEqual(bridge.mode, 0)
         self.assertTrue(errors)
         self.assertFalse(session.restored)
         bridge.read_mode = read_mode
 
-    def test_failed_restore_register_read_still_attempts_firmware_enable(self):
+    def test_failed_restore_register_read_preserves_unknown_settings(self):
         backend, bridge, session = self.shared_session()
         bridge.mode = 1
         backend.read = mock.Mock(side_effect=RuntimeError('register read failed'))
         self.assertTrue(session.restore())
-        self.assertIn(('ec', 1), backend.events)
+        self.assertEqual(backend.events, [])
         self.assertFalse(session.restored)
 
     def test_shared_manual_mode_drift_is_detected_without_further_commands(self):

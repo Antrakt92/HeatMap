@@ -190,29 +190,41 @@ class CaseAirflowPolicy:
 
 @dataclass
 class FanRamp:
-    """Bounded case-fan fall: immediate rise, 15 s hold, ~2 points/s fall.
+    """Normal rise 10 points/s; emergency bypass; 15 s hold, ~2 points/s fall.
 
     Cooling-rate twin of gpu_fans.GpuRamp (30% floor, 10 s hold, no deadband,
     float math). The floors, holds and deadbands are per-hardware policy and
     must stay different; keep both ramp test tables green when touching this.
     """
-    value: int = 100
+    value: int = 60
     cool_since: float | None = None
     last_time: float | None = None
     _fall_fraction: float = 0.0
+    _rise_fraction: float = 0.0
 
-    def update(self, demand, now):
+    def update(self, demand, now, *, emergency=False):
         valid_demand = finite(demand, 0, 100)
+        if valid_demand is None or finite(now, 0, 1e15) is None or emergency:
+            self.value, self.cool_since = 100, None
+            self._fall_fraction = self._rise_fraction = 0.0
+            self.last_time = finite(now, 0, 1e15)
+            return 100
         demand = 100 if valid_demand is None else max(60, math.ceil(valid_demand))
         if self.last_time is not None:
             now = max(now, self.last_time)
         elapsed = 0 if self.last_time is None else min(5, now - self.last_time)
         self.last_time = now
         if demand >= self.value:
-            self.value = demand
+            budget = self._rise_fraction + 10 * min(2, elapsed)
+            increase = int(budget)
+            self._rise_fraction = budget - increase
+            self.value = min(demand, self.value + increase)
+            if self.value == demand:
+                self._rise_fraction = 0.0
             self.cool_since = None
             self._fall_fraction = 0.0
         elif self.value - demand >= 3:
+            self._rise_fraction = 0.0
             if self.cool_since is None:
                 self.cool_since = now
                 self._fall_fraction = 0.0
@@ -226,6 +238,7 @@ class FanRamp:
                 self._fall_fraction = budget - decrease
                 self.value = max(demand, self.value - decrease)
         else:
+            self._rise_fraction = 0.0
             self.cool_since = None
             self._fall_fraction = 0.0
         return self.value

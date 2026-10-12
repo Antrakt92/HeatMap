@@ -13,7 +13,7 @@ import time
 import psutil
 
 import fan_common
-from gpu_fans import ASSIST_ON, demand as gpu_demand
+from gpu_fans import ASSIST_ON, demand as gpu_demand, emergency_cooling as gpu_emergency_cooling
 from hardware_access_guard import require_hardware_access
 from pawnio_shared import IsaBus
 from startup_readiness import StartupNotReady, StartupCancelled, wait_for_readiness
@@ -31,6 +31,12 @@ TARGET_REGISTERS = tuple(r for i in (1, 2, 3) for r in (MODES[i], DUTIES[i]))
 MIN_DUTY = 60
 
 
+def _same_owned_registers(current, expected):
+    # CPU/CPU OPT and unused automatic duties may change on every sensor poll.
+    return (current[0x13] & 6 == expected[0x13] & 6
+            and all(current[r] == expected[r] for r in TARGET_REGISTERS))
+
+
 def synchronized_demand(data, cpu_reference, gpu_reference):
     """Maximum fan fraction and thermal demand; fractions are not airflow."""
     temperatures = ("cpu_temp", *ASSIST_ON)
@@ -42,16 +48,18 @@ def synchronized_demand(data, cpu_reference, gpu_reference):
             ("GPU", ("gpu_fan",), gpu_reference)):
         values = []
         for key in rpm_keys:
+            rpm = finite(data.get(key), 0, 10000)
+            # Duty describes the requested speed, not whether the cooler turns.
+            if rpm is None:
+                return 100, f"Missing {component} fan feedback; full airflow", {}
+            if component == "CPU" and rpm == 0:
+                return 100, "CPU fan stopped; full airflow", {}
             pct = finite(data.get(key + "_pct"), 0, 100)
             if pct is not None:
                 values.append((pct, "controller"))
                 continue
-            rpm = finite(data.get(key), 0, 10000)
             if rpm is None or finite(reference, 200, 10000) is None:
                 return 100, f"Missing {component} fan reference/feedback; full airflow", {}
-            # A running CPU cooler is required; measured GPU Zero RPM is normal.
-            if component == "CPU" and rpm == 0:
-                return 100, "CPU fan stopped; full airflow", {}
             values.append((min(100, 100 * rpm / reference), "RPM estimate"))
         fraction, source = max(values, key=lambda item: item[0])
         fractions[component] = dict(percent=math.ceil(fraction), source=source)
@@ -156,7 +164,7 @@ class B850Session:
             if self.journal.exists():
                 self.recover()
             self.baseline = backend.snapshot()
-            if self.baseline != backend.snapshot() or self.baseline[0x13] & 6 != 6:
+            if not _same_owned_registers(self.baseline, backend.snapshot()) or self.baseline[0x13] & 6 != 6:
                 raise RuntimeError("B850 fan configuration is changing or outputs are disabled")
             if any(self.baseline[MODES[i]] & 0x80 == 0 for i in (1, 2, 3)):
                 raise RuntimeError("SYS1/2/3 are already manually owned; use motherboard automatic mode first")
@@ -205,7 +213,7 @@ class B850Session:
         restored = dict(current)
         restored.update({r: baseline[r] for r in TARGET_REGISTERS})
         self._restore_registers(baseline)
-        if self.backend.snapshot() != restored:
+        if not _same_owned_registers(self.backend.snapshot(), restored):
             raise RuntimeError("B850 recovery readback failed")
         self.journal.unlink()
 
@@ -218,7 +226,7 @@ class B850Session:
         if finite(percent, MIN_DUTY, 100) is None:
             raise ValueError("Invalid B850 case command")
         with self.bus():
-            if self.backend.snapshot() != self.expected:
+            if not _same_owned_registers(self.backend.snapshot(), self.expected):
                 raise RuntimeError("B850 external settings changed; assistance stopped")
             pending = dict(self.expected)
             for i in (1, 2, 3):
@@ -233,14 +241,14 @@ class B850Session:
             finally:
                 # Keep intent for restoration even when a native write raises.
                 self.pending = pending
-            if self.backend.snapshot() != pending:
+            if not _same_owned_registers(self.backend.snapshot(), pending):
                 raise RuntimeError("B850 fan command readback mismatch")
             self.expected = pending
             self.last_command = percent
 
     def check(self):
         with self.bus():
-            if self.backend.snapshot() != self.expected:
+            if not _same_owned_registers(self.backend.snapshot(), self.expected):
                 raise RuntimeError("B850 external settings changed; assistance stopped")
 
     def restore(self):
@@ -262,7 +270,7 @@ class B850Session:
                     for r in registers:
                         self.backend.write(r, self.baseline[r])
                         restored[r] = self.baseline[r]
-                if self.backend.snapshot() != restored:
+                if not _same_owned_registers(self.backend.snapshot(), restored):
                     return ["B850 motherboard control restoration readback mismatch"]
                 if errors:
                     return errors
@@ -358,7 +366,8 @@ def worker(path, owner_pid, owner_created, full_rpm=None, commission=False):
         session = B850Session(backend, Path(path).parent / "b850-recovery.json")
         baseline = [dict(name=name, rpm=float(tach.Value), control_pct=None)
                     for name, tach in zip(TARGETS, backend.tachs)]
-        ramp = FanRamp(value=MIN_DUTY)
+        initial_duty = math.ceil(max(session.baseline[DUTIES[i]] for i in (1, 2, 3)) * 100 / 255)
+        ramp = FanRamp(value=max(MIN_DUTY, initial_duty))
         started = last_fresh = time.monotonic()
         signature = None
         calibrated = False
@@ -397,7 +406,10 @@ def worker(path, owner_pid, owner_created, full_rpm=None, commission=False):
             if now - last_fresh >= SENSOR_STALE_DEGRADE_SECONDS:
                 demand, reason = 100, "Sensor feedback stale; full airflow"
             # Commissioning checks both endpoints directly; normal falls are bounded.
-            command = demand if commission else ramp.update(demand, now)
+            emergency = (not fractions or (finite(data.get("cpu_temp"), 1, 150) or 0) >= 80
+                         or gpu_emergency_cooling(data)
+                         or now - last_fresh >= SENSOR_STALE_DEGRADE_SECONDS)
+            command = demand if commission else ramp.update(demand, now, emergency=emergency)
             session.check()
             if command != session.last_command:
                 guard()
@@ -425,10 +437,11 @@ def worker(path, owner_pid, owner_created, full_rpm=None, commission=False):
             computer.Close()
         except Exception as exc:
             restore_errors.append(f"Close: {exc}")
-        write_terminal_status(path, "error" if error or restore_errors else "stopped",
+        publication_error = write_terminal_status(path, "error" if error or restore_errors else "stopped",
             profile=PROFILE, reason=error or "Returned SYS1/2/3 to motherboard control",
             baseline=baseline, controlled_channels=list(TARGETS) if session else [], firmware_channels=[],
             control_attempted=attempted, restore_errors=restore_errors,
             restore_confirmed=bool(session and not restore_errors),
             **({"stop_cause": stop_cause} if stop_cause else {}))
+        error = error or publication_error
     return 1 if error or restore_errors else 0

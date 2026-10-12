@@ -105,7 +105,9 @@ class SharedFanTests(unittest.TestCase):
         session.prepare()
         session.apply(60)
         real_read = backend.read
-        backend.read = lambda register: 0 if register == 0x63 else real_read(register)
+        command_events = len(backend.events)
+        backend.read = lambda register: (0 if register == 0x63 and len(backend.events) > command_events
+                                         else real_read(register))
         errors = session.restore()
         self.assertTrue(any('Shared PWM duties were not restored' in error for error in errors))
         self.assertTrue(any('0x63' in error for error in errors))
@@ -134,6 +136,19 @@ class SharedFanTests(unittest.TestCase):
         self.assertEqual(bridge.mode, 1)
         self.assertFalse(session.restored)
 
+    def test_temporary_ownership_read_failure_can_restore_on_retry(self):
+        backend, bridge, session = self.setup_session()
+        session.prepare()
+        session.apply(80)
+        original_read = bridge.read_mode
+        bridge.read_mode = mock.Mock(side_effect=RuntimeError('temporary EC read failure'))
+        before = list(backend.events)
+        self.assertTrue(session.restore())
+        self.assertEqual(backend.events, before)
+        bridge.read_mode = original_read
+        self.assertEqual(session.restore(), [])
+        self.assertEqual(bridge.mode, 1)
+
     def test_lost_owner_is_detected_before_more_speed_writes(self):
         backend, bridge, session = self.setup_session()
         session.prepare()
@@ -143,6 +158,21 @@ class SharedFanTests(unittest.TestCase):
         with self.assertRaises(RuntimeError): session.check()
         with self.assertRaises(RuntimeError): session.apply(60)
         self.assertEqual(backend.events, before)
+
+    def test_external_register_change_is_preserved_at_check_apply_and_shutdown(self):
+        for register in (0x13, 0x15, 0x63):
+            with self.subTest(register=register):
+                backend, bridge, session = self.setup_session()
+                session.prepare()
+                session.apply(80)
+                backend.values[register] ^= 1
+                before = (dict(backend.values), bridge.mode, list(backend.events))
+                with self.assertRaises(RuntimeError):
+                    session.check()
+                with self.assertRaises(RuntimeError):
+                    session.apply(60)
+                self.assertTrue(session.restore())
+                self.assertEqual((dict(backend.values), bridge.mode, backend.events), before)
 
     def test_invalid_commands_never_write(self):
         backend, bridge, session = self.setup_session()
@@ -241,6 +271,19 @@ class SharedRecoveryJournalTests(unittest.TestCase):
             self.assertEqual(bridge.mode, 1)
             self.assertFalse(journal.recover(backend, bridge, bus=nullcontext))
 
+    def test_external_register_change_blocks_recovery_without_hardware_writes(self):
+        for register in (0x13, 0x15, 0x63):
+            with self.subTest(register=register), tempfile.TemporaryDirectory() as directory:
+                backend, bridge, journal, session = self.setup_session(directory)
+                session.prepare()
+                session.apply(80)
+                backend.values[register] ^= 1
+                before = (dict(backend.values), bridge.mode, list(backend.events))
+                with self.assertRaisesRegex(RuntimeError, "preserved"):
+                    journal.recover(backend, bridge, bus=nullcontext)
+                self.assertEqual((dict(backend.values), bridge.mode, backend.events), before)
+                self.assertTrue(journal.path.exists())
+
     def test_journal_records_board_module_and_baseline_registers(self):
         with tempfile.TemporaryDirectory() as directory:
             backend, bridge, journal, session = self.setup_session(directory)
@@ -249,9 +292,69 @@ class SharedRecoveryJournalTests(unittest.TestCase):
             saved = json.loads(journal.path.read_text(encoding="utf-8"))
             self.assertEqual(saved["board"], SHARED_BOARD)
             self.assertEqual(saved["module"], SHARED_MODULE)
-            self.assertEqual(saved["version"], 1)
+            self.assertEqual(saved["version"], 2)
             baseline = {int(key, 16): value for key, value in saved["baseline"].items()}
             self.assertEqual(baseline, session.baseline)
+            pending = {int(key, 16): value for key, value in saved["pending"].items()}
+            self.assertEqual(pending, backend.values)
+            self.assertEqual(saved["expected"], saved["baseline"])
+
+    def test_each_command_records_intent_and_partial_native_writes_recover(self):
+        for failure in ('ec', 0x63, 0x16, 0x73, 'second_command'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                backend, bridge, journal, session = self.setup_session(directory)
+                original = dict(backend.values)
+                session.prepare()
+                if failure == 'second_command':
+                    session.apply(80)
+                    expected = dict(backend.values)
+                    backend.fail = 0x73
+                    command = 60
+                else:
+                    expected = original
+                    command = 80
+                    if failure == 'ec':
+                        bridge.fail = 0
+                    else:
+                        backend.fail = failure
+                with self.assertRaises(RuntimeError):
+                    session.apply(command)
+                saved = json.loads(journal.path.read_text(encoding='utf-8'))
+                self.assertEqual({int(key, 16): value for key, value in saved['expected'].items()}, expected)
+                self.assertTrue(journal.recover(backend, bridge, bus=nullcontext))
+                self.assertEqual(backend.values, original)
+                self.assertEqual(bridge.mode, 1)
+
+    def test_legacy_journal_never_overwrites_a_manual_controller(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backend, bridge, journal, session = self.setup_session(directory)
+            session.prepare()
+            session.apply(80)
+            saved = json.loads(journal.path.read_text(encoding='utf-8'))
+            saved['version'] = 1
+            saved.pop('expected')
+            saved.pop('pending')
+            journal.path.write_text(json.dumps(saved), encoding='utf-8')
+            before = (dict(backend.values), bridge.mode, list(backend.events))
+            with self.assertRaisesRegex(RuntimeError, 'lacks ownership proof'):
+                journal.recover(backend, bridge, bus=nullcontext)
+            self.assertEqual((dict(backend.values), bridge.mode, backend.events), before)
+            backend.values = dict(session.baseline)
+            bridge.mode = 1
+            self.assertFalse(journal.recover(backend, bridge, bus=nullcontext))
+            self.assertFalse(journal.path.exists())
+
+    def test_command_publication_failure_preserves_last_verified_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backend, bridge, journal, session = self.setup_session(directory)
+            session.prepare()
+            session.apply(80)
+            before = (dict(backend.values), bridge.mode, list(backend.events), journal.path.read_bytes())
+            with mock.patch('shared_fans.os.replace', side_effect=OSError('disk full')):
+                with self.assertRaises(OSError):
+                    session.apply(60)
+            self.assertEqual((dict(backend.values), bridge.mode, backend.events, journal.path.read_bytes()), before)
+            self.assertEqual(session.restore(), [])
 
     def test_corrupt_or_foreign_journal_is_never_restored(self):
         with tempfile.TemporaryDirectory() as directory:

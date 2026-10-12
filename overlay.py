@@ -22,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import tkinter as tk
 from tkinter import ttk, simpledialog
 import winreg
@@ -1682,6 +1683,29 @@ def _gpu_load_priority(name):
     return 20
 
 
+def _gpu_activity_for_display(data, status, now=None):
+    """Prefer fresh exact-board ADLX activity over generation-less D3D counters."""
+    if not isinstance(status, dict) or status.get('state') not in ('active', 'standby'):
+        return data
+    readings = status.get('readings')
+    identity = status.get('gpu')
+    if (data.get('gpu_name_match_count') != 1
+            or status.get('readings_fresh') is not True or not isinstance(readings, dict)
+            or not isinstance(identity, dict) or data.get('gpu_name') != identity.get('name')):
+        return data
+    from amd_gpu_fan import supported_gpu
+    if not all(key in identity and isinstance(identity[key], str)
+               for key in ('name', 'vendor', 'device', 'subsystem', 'subvendor')) or not supported_gpu(identity):
+        return data
+    now = time.time() if now is None else now
+    stamp = finite(status.get('time'), 0, 1e15)
+    load = finite(readings.get('gpu_load'), 0, 100)
+    if (stamp is None or finite(now, 0, 1e15) is None or not 0 <= now - stamp <= 6
+            or finite(readings.get('timestamp_ms'), 0, 1e15) is None or load is None):
+        return data
+    return dict(data, gpu_load=round(load), gpu_load_source='AMD ADLX', gpu_load_sensor='GPUUsage')
+
+
 # WHY: sensor names checked against AmdGpu.cs of the LibreHardwareMonitor
 # version in use (see README). LHM also exports GPU VR VDDC/MVDD/SoC, Liquid
 # and PLX readings; a generic "gpu" match would silently overwrite the actual
@@ -2132,6 +2156,8 @@ def read_sensors(computer, update_storage=True):
         data[SENSOR_REINIT_KEY] = True
 
     _apply_ranked_sensor_candidates(data, candidates)
+    data['gpu_name_match_count'] = sum(sample.get('gpu_name') == data.get('gpu_name')
+                                       for _rank, sample in candidates['gpus'])
     _apply_psutil_fallbacks(data)
 
     return data
@@ -2665,7 +2691,7 @@ def load_config_result():
 
 
 def save_config(cfg):
-    tmp_path = f"{CONFIG_PATH}.tmp"
+    tmp_path = f"{CONFIG_PATH}.{uuid.uuid4().hex}.tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, allow_nan=False)
@@ -3211,6 +3237,9 @@ class OverlayApp:
             getattr(self, "_case_fan_status", {"state": "off"}), ensure_ascii=False)
         health_context += "\nGPU fan controller:\n" + json.dumps(
             getattr(self, "_gpu_fan_status", {"state": "off"}), ensure_ascii=False)
+        displayed = _gpu_activity_for_display(data, getattr(self, '_gpu_fan_status', {}))
+        if displayed.get('gpu_load_source') == 'AMD ADLX':
+            health_context += f"\nLatest displayed GPU activity: {displayed['gpu_load']}% (AMD ADLX)"
 
         def worker():
             result = None
@@ -3328,7 +3357,9 @@ class OverlayApp:
                 f"GPU reason: {getattr(self, '_gpu_fan_status', {}).get('reason', 'Driver curve')}\n"
                 "GPU: highest Core / Hotspot / Memory speed demand wins.\n"
                 "100% at Core 75°C, Hotspot 90°C or Memory 90°C; minimum 30%.\n"
-                "GPU increases immediately; decreases wait 10 seconds, then at most 2 points/second.\n"
+                "GPU targets: Core 60°C; Hotspot and Memory 80°C, with tolerance.\n"
+                "Normal rise: 10 points/second; emergency cooling is immediate.\n"
+                "Decreases wait 10 seconds, then at most 2 points/second.\n"
                 "AUTO N%+ is the requested floor; the driver may run faster.\n"
                 "Switching GPU control OFF restores the saved fan curve and Zero RPM state.\n"
                 "Clocks, voltage and power limits are not adjusted."
@@ -4329,6 +4360,7 @@ class OverlayApp:
     def volume_loop(self):
         """A blocked filesystem or extent query cannot stall other sensor owners."""
         retry_after = {}
+        mapping_retry_after = {}
 
         def cancelled():
             return self._stop_event.is_set() or not self.running
@@ -4341,6 +4373,8 @@ class OverlayApp:
 
         def read(mount=None):
             try:
+                if mount in mapping_retry_after and time.monotonic() < mapping_retry_after[mount][0]:
+                    return probe_volume(mount, cancelled, include_identity=False)
                 return probe_volume(mount, cancelled)
             except (OSError, ValueError, RuntimeError) as exc:
                 return {'error': 'Volume probe failed: ' + str(exc)[:300]}
@@ -4355,6 +4389,7 @@ class OverlayApp:
             else:
                 mounts = inventory['mounts']
                 retry_after = {mount: entry for mount, entry in retry_after.items() if mount in mounts}
+                mapping_retry_after = {mount: entry for mount, entry in mapping_retry_after.items() if mount in mounts}
                 with self.lock:
                     previous = getattr(self, '_volume_snapshot', None)
                 if previous is not None:
@@ -4381,7 +4416,15 @@ class OverlayApp:
                         data['volume_errors'].append(mount[:2] + ' ' + result['error'])
                     else:
                         retry_after.pop(mount, None)
-                        data['volumes'].append(dict(result['volume'], _sample_time=time.monotonic()))
+                        identity_error = result.get('identity_error')
+                        if identity_error:
+                            mapping_retry_after[mount] = (time.monotonic() + 300, identity_error)
+                        elif mount in mapping_retry_after and time.monotonic() >= mapping_retry_after[mount][0]:
+                            mapping_retry_after.pop(mount, None)
+                        if mount in mapping_retry_after:
+                            data['volume_errors'].append(mount[:2] + ' ' + mapping_retry_after[mount][1])
+                        data['volumes'].append(dict(result['volume'],
+                                                  _sample_time=result.get('sample_time', time.monotonic())))
                     publish(data)
             publish(data)
             self._stop_event.wait(VOLUME_REFRESH_SECONDS)
@@ -4582,6 +4625,7 @@ class OverlayApp:
         volumes = _fresh_volume_data(volume_snapshot, time.monotonic()) or {}
         data = dict(data, volumes=volumes.get("volumes", []),
                     volume_errors=volumes.get("volume_errors", []))
+        data = _gpu_activity_for_display(data, getattr(self, '_gpu_fan_status', {}))
         self._update_thermal_advice(data)
 
         # CPU: temp + clock + load%
@@ -4631,7 +4675,7 @@ class OverlayApp:
         else:
             self.rows["gpu_clock"].config(text="", fg="#888888")
         self.rows["gpu_load"].config(
-            text=(f"{gpu_load}%" + (" drv" if data.get("gpu_load_source") == "Driver activity" else "")) if gpu_load is not None else "",
+            text=(f"{gpu_load}%" + (" drv" if data.get("gpu_load_source") in ('Driver activity', 'AMD ADLX') else "")) if gpu_load is not None else "",
             fg=load_color(gpu_load)
         )
 

@@ -11,11 +11,12 @@ matching airflow or physical power.
 
 Independent thermal requests retain priority: CPU 70°C requests at least 85%,
 reaching 100% at 80°C. GPU requests use the existing GPU curves once Core reaches
-70°C or Hotspot/memory reaches 85°C, reaching full speed at 75/90/90°C. GPU Zero
+60°C or Hotspot/memory reaches 78°C, reaching full speed at 75/90/90°C. GPU Zero
 RPM is normal and does not stop case assistance for the CPU. The commissioned
 minimum is 60%. Normal decreases retain the existing 15-second hold, three-point
-deadband and two percentage points/second rate; increases are immediate at the
-next sample. Ordinary startup does not repeat full-speed testing.
+deadband and two percentage points/second rate. Normal increases are limited to
+10 percentage points/second; full-temperature/missing/stale/stopped-feedback
+protection bypasses that limit. Ordinary startup does not repeat full-speed testing.
 
 ## Ownership and recovery
 

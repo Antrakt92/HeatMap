@@ -1,5 +1,9 @@
 # GPU cooling policy review
 
+Historical review. The user's subsequent quieter-curve/temperature-target request
+is implemented in [the 2026-10-12 audit](audit-and-gpu-targets-2026-10-12.md).
+The thresholds and verification below describe this review's earlier policy.
+
 ## Decision
 
 Retain the existing cooling-first RX 7900 XT profile. No manufacturer source
