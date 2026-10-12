@@ -1,5 +1,9 @@
 # Deep audit and GPU temperature regulation
 
+The subsequent independent reassessment and revised non-accumulating regulation
+are documented in [the second control review](control-review-and-audit-2026-10-12.md).
+The original implementation/evidence below are retained as this audit's record.
+
 ## Scope and policy
 
 - Review and reproduce fan ownership, recovery, startup and shutdown failures.

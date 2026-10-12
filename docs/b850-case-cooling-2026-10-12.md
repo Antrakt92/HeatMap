@@ -15,8 +15,13 @@ reaching 100% at 80°C. GPU requests use the existing GPU curves once Core reach
 RPM is normal and does not stop case assistance for the CPU. The commissioned
 minimum is 60%. Normal decreases retain the existing 15-second hold, three-point
 deadband and two percentage points/second rate. Normal increases are limited to
-10 percentage points/second; full-temperature/missing/stale/stopped-feedback
+10 percentage points/second; full-temperature/missing/stopped-feedback
 protection bypasses that limit. Ordinary startup does not repeat full-speed testing.
+It initializes from measured SYS RPM / commissioned reference, not retained
+manual register bytes while firmware owns the channels. Successful identical
+LHM values are not a freshness failure; missing/invalid data and post-read owner
+watchdog checks remain authoritative. LHM has no native per-sensor generation,
+so silently cached native values cannot be ruled out by this interface.
 
 ## Ownership and recovery
 

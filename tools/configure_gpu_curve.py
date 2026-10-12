@@ -94,8 +94,10 @@ def configure(adapter, journal_path, receipt_path, *, apply=False, guard=require
             save_receipt(receipt_path, report)
         return report
     except BaseException as exc:
-        report.update(state='applied_receipt_error' if committed else 'error', reason=str(exc),
+        committed = committed or session.committed
+        report.update(state='applied' if committed else 'error', reason=str(exc) or type(exc).__name__,
                       restore_errors=[] if committed else restore_with_retry(session.restore),
+                      fan_writes=1 if committed else report['fan_writes'],
                       finished=time.time())
         save_receipt(receipt_path, report)
         raise

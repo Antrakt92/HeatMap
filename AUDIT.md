@@ -1,5 +1,18 @@
 # HeatMap Audit Backlog
 
+Independent second control audit (2026-10-12):
+[review and verification](docs/control-review-and-audit-2026-10-12.md).
+Confirmed accumulated-error 100% latching and reversed-clock acceleration were
+removed. Targets now add bounded proportional correction; hardware fallback,
+independent emergency limits and gentle ordinary acceleration remain. B850 now
+uses a measured startup estimate, handles all available GPU tachs, pins runtime
+sources, restores before normal sensor readiness and returns channels to automatic
+mode before retained-duty writes. Identical complete LHM samples are no longer
+claimed stale. Interrupted profile commits reconcile durable evidence. Partial UI
+startup and storage-process setup/teardown unwind owned resources; malformed
+signature JSON fails verification. Physical thermal/acoustic transfer functions,
+silent native cache freshness and unexposed individual GPU fans remain limits.
+
 Deep fan/runtime/storage audit (2026-10-12): confirmed failures are closed in the
 [current audit](docs/audit-and-gpu-targets-2026-10-12.md), including scoped B850
 ownership, PWM masking stopped tachs, shared-journal ownership/partial recovery,
@@ -38,8 +51,8 @@ GCC coexistence remain hardware follow-ups. Equal duty/RPM fractions do not prov
 equal airflow. The explicit local response check and results are recorded in
 `docs/b850-case-cooling-2026-10-12.md`.
 
-GPU policy review: `docs/gpu-policy-review-2026-10-03.md`. The existing cooling-first
-thresholds are retained after manufacturer-source review; complete-worker tests
+GPU policy review: `docs/control-review-and-audit-2026-10-12.md`. Cooling-first
+full-speed limits are retained; soft correction no longer integrates error. Complete-worker tests
 now explicitly cover Hotspot 40 idle, the full-speed boundary and cooling handback.
 Matched-load noise/temperature optimization and physical response remain open.
 

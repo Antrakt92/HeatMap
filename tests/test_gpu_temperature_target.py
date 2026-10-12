@@ -25,27 +25,21 @@ class TemperatureTargetTests(unittest.TestCase):
         self.assertEqual(ramp.update(100, 0), 30)
         self.assertEqual(ramp.update(100, 1000), 50)
 
-    def test_feedback_increases_only_with_elapsed_time_and_excess_heat(self):
+    def test_soft_target_uplift_is_bounded_and_does_not_accumulate(self):
         control = GpuTemperatureTarget()
         data = sample(gpu_core_temp=64, gpu_hotspot_temp=84)
-        control.update(data, 0)
-        control.update(data, 0)
-        self.assertEqual(control.floor, 30)
-        for now in range(2, 42, 2):
-            control.update(data, now)
-        self.assertGreater(control.floor, 65)
-        self.assertLessEqual(control.floor, 100)
-        value, reason = control.update(data, 42)
-        self.assertGreaterEqual(value, 90)
+        requests = [control.update(data, now)[0] for now in range(0, 122, 2)]
+        self.assertEqual(set(requests), {89})
+        value, reason = control.update(data, 122)
+        self.assertLess(value, 100)
         self.assertIn('target', reason)
 
-    def test_target_band_holds_feedback_and_cooling_reduces_it_slowly(self):
+    def test_target_band_clears_correction_without_retaining_previous_heat(self):
         control = GpuTemperatureTarget()
-        control.floor = 75
-        control.update(sample(), 0)
-        self.assertEqual(control.update(sample(), 2)[0], 75)
+        control.update(sample(gpu_hotspot_temp=84), 0)
+        self.assertEqual(control.update(sample(), 2)[0], 65)
         self.assertEqual(control.update(sample(gpu_core_temp=50, gpu_hotspot_temp=70,
-                                             gpu_memory_temp=70), 4)[0], 73)
+                                             gpu_memory_temp=70), 4)[0], 49)
 
     def test_independent_hot_sensor_or_invalid_value_requests_full_without_delay(self):
         for key, limit in (('gpu_core_temp', 75), ('gpu_hotspot_temp', 90), ('gpu_memory_temp', 90)):

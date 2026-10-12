@@ -109,8 +109,8 @@ class GpuStartupAuditTests(unittest.TestCase):
 
     def test_hotspot_worker_boundaries_without_startup_full_speed_pulse(self):
         # Explicit expected floors test the complete worker, not just demand().
-        for hotspot, expected in ((40, None), (77.9, None), (78, 62), (80, 65), (84, 85), (84.9, 90),
-                                  (85, 90), (89, 98), (89.5, 99), (90, 100), (95, 100)):
+        for hotspot, expected in ((40, None), (77.9, None), (78, 62), (80, 65), (84, 89), (84.9, 95),
+                                  (85, 95), (89, 98), (89.5, 99), (90, 100), (95, 100)):
             with self.subTest(hotspot=hotspot):
                 result, adapter, baseline, reports, journal = self.run_worker(
                     lambda *_: sample(gpu_core_temp=40, gpu_hotspot_temp=hotspot,
@@ -219,7 +219,7 @@ class GpuStartupAuditTests(unittest.TestCase):
         self.assertEqual(result, 0)
         commands = [report['command_pct'] for report in reports if report['state'] == 'active']
         self.assertEqual(commands[:3], [30, 50, 70])
-        self.assertEqual(commands[-1], 85)
+        self.assertEqual(commands[-1], 95)
         self.assertNotIn(100, commands)
 
     def test_explicit_commissioning_retains_full_airflow_validation(self):

@@ -13,12 +13,12 @@ import time
 import psutil
 
 import fan_common
-from gpu_fans import ASSIST_ON, demand as gpu_demand, emergency_cooling as gpu_emergency_cooling
+from gpu_fans import (ASSIST_ON, demand as gpu_demand,
+                      emergency_cooling as gpu_emergency_cooling, recovery_journal_exists)
 from hardware_access_guard import require_hardware_access
 from pawnio_shared import IsaBus
 from startup_readiness import StartupNotReady, StartupCancelled, wait_for_readiness
-from thermal_policy import (FanRamp, finite, interpolate, SENSOR_STALE_DEGRADE_SECONDS,
-                            SENSOR_STALE_FAIL_SECONDS)
+from thermal_policy import FanRamp, finite, interpolate, TACH_PERSISTENCE_SECONDS
 
 PROFILE = "b850-aorus-elite-wifi7-ice-case-123"
 BOARD = "Gigabyte B850 AORUS ELITE WIFI7 ICE"
@@ -37,24 +37,93 @@ def _same_owned_registers(current, expected):
             and all(current[r] == expected[r] for r in TARGET_REGISTERS))
 
 
+def _gpu_tachs(data):
+    entries = data.get("gpu_fans")
+    if entries is None or entries == []:
+        return [("primary", data.get("gpu_fan"))]
+    if not isinstance(entries, list) or any(not isinstance(row, dict) for row in entries):
+        return None
+    readings = [(str(row.get("id") or row.get("name") or index), row.get("rpm"))
+                for index, row in enumerate(entries)]
+    if len({name for name, _rpm in readings}) != len(readings):
+        return None
+    return readings
+
+
+def _source_identity(data):
+    if not isinstance(data, dict):
+        raise RuntimeError("Invalid B850 CPU/GPU snapshot")
+    if (data.get("cpu_fan_id") != f"{CHIP}/fan/0"
+            or data.get("cpu_optional_fan_id") != f"{CHIP}/fan/4"
+            or data.get("gpu_name") != "AMD Radeon RX 7900 XT"
+            or ("gpu_name_match_count" in data and
+                (type(data["gpu_name_match_count"]) is not int or data["gpu_name_match_count"] != 1))):
+        raise RuntimeError("CPU/GPU reference identity changed; assistance stopped")
+    return data.get("gpu_id"), data["gpu_name"]
+
+
+def _initial_command(readings, reference):
+    # Automatic mode retains the last manual duty byte. It is not the current
+    # firmware output; use the commissioned tach fraction as a bounded estimate.
+    if (not isinstance(reference, dict) or set(reference) != set(TARGETS)
+            or any(finite(value, 200, 10000) is None for value in reference.values())):
+        raise RuntimeError("B850 fans need explicit commissioning before automatic control")
+    fractions = [100 * row["rpm"] / reference[row["name"]] for row in readings]
+    return min(100, max(MIN_DUTY, math.ceil(max(fractions))))
+
+
+class GpuTachFeedback:
+    def __init__(self):
+        self.running = set()
+        self.stopped_since = {}
+
+    def update(self, data, now):
+        readings = _gpu_tachs(data)
+        if readings is None:
+            return "GPU tachometer feedback invalid; full airflow"
+        present = {name: finite(rpm, 0, 10000) for name, rpm in readings}
+        self.running.update(name for name, rpm in present.items() if rpm is not None and rpm > 0)
+        hot = any((finite(data.get(key), 1, 150) or 0) >= threshold
+                  for key, threshold in ASSIST_ON.items())
+        if not hot:
+            self.stopped_since.clear()
+            return None
+        for name in self.running:
+            rpm = present.get(name)
+            if rpm is None:
+                return "Previously running GPU tachometer feedback missing; full airflow"
+            if rpm == 0:
+                start = self.stopped_since.setdefault(name, now)
+                if now - start >= TACH_PERSISTENCE_SECONDS:
+                    return "Previously running GPU fan stopped; full airflow"
+            else:
+                self.stopped_since.pop(name, None)
+        return None
+
+
 def synchronized_demand(data, cpu_reference, gpu_reference):
     """Maximum fan fraction and thermal demand; fractions are not airflow."""
     temperatures = ("cpu_temp", *ASSIST_ON)
     if any(finite(data.get(key), 1, 150) is None for key in temperatures):
         return 100, "Missing temperature; full airflow", {}
     fractions = {}
-    for component, rpm_keys, reference in (
-            ("CPU", ("cpu_fan", "cpu_optional_fan"), cpu_reference),
-            ("GPU", ("gpu_fan",), gpu_reference)):
+    gpu_tachs = _gpu_tachs(data)
+    if gpu_tachs is None:
+        return 100, "Invalid GPU fan feedback; full airflow", {}
+    for component, channels, reference in (
+            ("CPU", [(data.get(key), data.get(key + "_pct"))
+                     for key in ("cpu_fan", "cpu_optional_fan")], cpu_reference),
+            ("GPU", [(rpm, data.get("gpu_fan_pct") if index == 0 else None)
+                     for index, (_name, rpm) in enumerate(gpu_tachs)], gpu_reference)):
         values = []
-        for key in rpm_keys:
-            rpm = finite(data.get(key), 0, 10000)
+        for rpm_value, duty_value in channels:
+            rpm = finite(rpm_value, 0, 10000)
             # Duty describes the requested speed, not whether the cooler turns.
             if rpm is None:
                 return 100, f"Missing {component} fan feedback; full airflow", {}
             if component == "CPU" and rpm == 0:
                 return 100, "CPU fan stopped; full airflow", {}
-            pct = finite(data.get(key + "_pct"), 0, 100)
+            pct = finite(duty_value, 0, 100)
             if pct is not None:
                 values.append((pct, "controller"))
                 continue
@@ -85,7 +154,7 @@ def controller(computer):
     return getattr(chips[0], "__implementation__", chips[0])
 
 
-def select_tachs(computer, *, startup=False):
+def select_tachs(computer, *, startup=False, require_running=True):
     chip = controller(computer)
     selected = []
     for index, name in zip((1, 2, 3), TARGETS):
@@ -93,6 +162,11 @@ def select_tachs(computer, *, startup=False):
                    and str(s.Identifier) == f"{CHIP}/fan/{index}"]
         if len(matches) != 1 or str(matches[0].Name) != f"Fan #{index + 1}":
             raise RuntimeError(f"{name}: tachometer identity missing or ambiguous")
+        if not require_running:
+            # Interrupted register ownership must be returned even when its
+            # tachometer cannot prove rotation. Identity checks still apply.
+            selected.append(matches[0])
+            continue
         if matches[0].Value is None:
             raise StartupNotReady(f"Waiting for {name} tachometer")
         value = matches[0].Value
@@ -108,11 +182,11 @@ def select_tachs(computer, *, startup=False):
 
 class RegisterBackend:
     """Narrow pinned native adapter, with the same ISA mutex as LHM."""
-    def __init__(self, computer):
+    def __init__(self, computer, *, require_running=True):
         from System import Array, Object, Byte, Boolean
         from System.Reflection import BindingFlags
         self.Array, self.Object, self.Byte, self.Boolean = Array, Object, Byte, Boolean
-        self.chip, self.tachs = select_tachs(computer)
+        self.chip, self.tachs = select_tachs(computer, require_running=require_running)
         report = str(self.chip.GetReport())
         if (len(re.findall(r"^Chip ID: 0x8696\s*$", report, re.M)) != 1
                 or "Base Address: 0x0A40" not in report):
@@ -161,7 +235,7 @@ class B850Session:
         self.touched = False
         self.last_command = None
         with bus():
-            if self.journal.exists():
+            if recovery_journal_exists(self.journal):
                 self.recover()
             self.baseline = backend.snapshot()
             if not _same_owned_registers(self.baseline, backend.snapshot()) or self.baseline[0x13] & 6 != 6:
@@ -212,15 +286,30 @@ class B850Session:
             raise RuntimeError("B850 external settings conflict; recovery preserved")
         restored = dict(current)
         restored.update({r: baseline[r] for r in TARGET_REGISTERS})
-        self._restore_registers(baseline)
+        errors = self._restore_registers(baseline)
+        if errors:
+            raise RuntimeError("B850 recovery unconfirmed: " + "; ".join(errors))
         if not _same_owned_registers(self.backend.snapshot(), restored):
             raise RuntimeError("B850 recovery readback failed")
         self.journal.unlink()
 
-    def _restore_registers(self, baseline):
-        for i in (1, 2, 3):
-            self.backend.write(DUTIES[i], baseline[DUTIES[i]])
-            self.backend.write(MODES[i], baseline[MODES[i]])
+    def _restore_registers(self, baseline, indices=(1, 2, 3)):
+        errors = []
+        for i in indices:
+            try:
+                self.backend.write(MODES[i], baseline[MODES[i]])
+            except Exception as exc:
+                errors.append(f"{TARGETS[i - 1]} automatic mode: {exc}")
+            try:
+                if self.backend.snapshot()[MODES[i]] != baseline[MODES[i]]:
+                    errors.append(f"{TARGETS[i - 1]} automatic mode restoration unconfirmed")
+                    continue
+                # Confirm handback first: the retained manual baseline may be
+                # much slower than the still-active HeatMap cooling command.
+                self.backend.write(DUTIES[i], baseline[DUTIES[i]])
+            except Exception as exc:
+                errors.append(f"{TARGETS[i - 1]} retained duty: {exc}")
+        return errors
 
     def apply(self, percent):
         if finite(percent, MIN_DUTY, 100) is None:
@@ -262,16 +351,17 @@ class B850Session:
                     return ["External B850 output modes changed; settings and recovery journal preserved"]
                 restored = dict(current)
                 errors = []
+                eligible = []
                 for i, name in zip((1, 2, 3), TARGETS):
                     registers = (DUTIES[i], MODES[i])
                     if any(current[r] not in (self.baseline[r], self.expected[r], pending[r]) for r in registers):
                         errors.append(f"{name}: external settings preserved; restoration unconfirmed")
                         continue
-                    for r in registers:
-                        self.backend.write(r, self.baseline[r])
-                        restored[r] = self.baseline[r]
+                    eligible.append(i)
+                    restored.update({r: self.baseline[r] for r in registers})
+                errors.extend(self._restore_registers(self.baseline, eligible))
                 if not _same_owned_registers(self.backend.snapshot(), restored):
-                    return ["B850 motherboard control restoration readback mismatch"]
+                    errors.append("B850 motherboard control restoration readback mismatch")
                 if errors:
                     return errors
                 self.journal.unlink(missing_ok=True)
@@ -302,7 +392,7 @@ def validate_status(status):
 
 def worker(path, owner_pid, owner_created, full_rpm=None, commission=False):
     import overlay
-    from case_fans import write_status, write_terminal_status, _sensor_signature
+    from case_fans import write_status, write_terminal_status
     from shared_fans import make_shared_computer
     if not overlay._is_admin() or overlay._runtime_dll_errors():
         raise RuntimeError("Verified runtime and administrator access are required")
@@ -322,6 +412,7 @@ def worker(path, owner_pid, owner_created, full_rpm=None, commission=False):
     stop_cause = None
     attempted = False
     verified = None
+    journal_path = Path(path).parent / "b850-recovery.json"
     config, config_error = overlay.load_config_result()
     if config_error:
         raise RuntimeError(config_error)
@@ -337,10 +428,26 @@ def worker(path, owner_pid, owner_created, full_rpm=None, commission=False):
     try:
         guard()
         computer.Open()
+        if recovery_journal_exists(journal_path):
+            # Restore old ownership before readiness requires healthy tachs or
+            # CPU/GPU temperatures; a crashed command may have lost either.
+            guard()
+            attempted = True  # The prior worker's unfinished ownership is known.
+            publish("checking", phase="recovering", reason="Restoring interrupted SYS1/2/3 ownership",
+                    baseline=[], controlled_channels=list(TARGETS), firmware_channels=[],
+                    control_attempted=True, restore_confirmed=False, recovery_pending=True)
+            recovery_backend = RegisterBackend(computer, require_running=False)
+            guard()
+            session = B850Session(recovery_backend, journal_path)
+            guard()
         ready_samples = 0
+        source_identity = None
+        gpu_feedback = GpuTachFeedback()
         def ready():
-            nonlocal ready_samples
+            nonlocal ready_samples, source_identity
             data = overlay.read_sensors(computer, update_storage=False)
+            if not isinstance(data, dict):
+                raise RuntimeError("Invalid B850 startup snapshot; no fan commands sent")
             try:
                 chip, tachs = select_tachs(computer, startup=True)
             except StartupNotReady:
@@ -351,37 +458,39 @@ def worker(path, owner_pid, owner_created, full_rpm=None, commission=False):
                 raise StartupNotReady("Waiting for CPU/GPU fan and temperature feedback")
             if any(finite(data[key], 1, 150) is None for key in ("cpu_temp", *ASSIST_ON)):
                 raise RuntimeError("Invalid B850 startup temperature; no fan commands sent")
-            if (data.get("cpu_fan_id") != f"{CHIP}/fan/0"
-                    or data.get("cpu_optional_fan_id") != f"{CHIP}/fan/4"
-                    or data.get("gpu_name") != "AMD Radeon RX 7900 XT"):
-                raise RuntimeError("CPU/GPU reference identity changed; no fan commands sent")
+            identity = _source_identity(data)
+            if source_identity is not None and source_identity != identity:
+                raise RuntimeError("CPU/GPU reference identity changed during startup; no fan commands sent")
+            source_identity = identity
+            gpu_feedback.update(data, time.monotonic())
             ready_samples += 1
             if ready_samples < 2:
                 raise StartupNotReady("Verifying a second running SYS1/2/3 sample")
             return chip, tachs
         wait_for_readiness(ready, stop, guard,
             lambda reason, *_args: publish("checking", phase="waiting", reason=str(reason),
-                baseline=[], controlled_channels=[], firmware_channels=[], control_attempted=False))
+                baseline=[], controlled_channels=list(TARGETS) if attempted else [], firmware_channels=[],
+                control_attempted=attempted, restore_confirmed=bool(session),
+                recovery_pending=recovery_journal_exists(journal_path)))
         backend = RegisterBackend(computer)
-        session = B850Session(backend, Path(path).parent / "b850-recovery.json")
+        session = B850Session(backend, journal_path)
         baseline = [dict(name=name, rpm=float(tach.Value), control_pct=None)
                     for name, tach in zip(TARGETS, backend.tachs)]
-        initial_duty = math.ceil(max(session.baseline[DUTIES[i]] for i in (1, 2, 3)) * 100 / 255)
-        ramp = FanRamp(value=max(MIN_DUTY, initial_duty))
-        started = last_fresh = time.monotonic()
-        signature = None
+        ramp = FanRamp(value=MIN_DUTY if commission else _initial_command(baseline, full_rpm))
+        started = time.monotonic()
         calibrated = False
+        minimum_since = None
         while not stop.is_set():
             guard()
             data = overlay.read_sensors(computer, update_storage=False)
             now = time.monotonic()
             guard()
-            current_signature = _sensor_signature(data)
-            fresh = current_signature != signature
-            if fresh:
-                signature, last_fresh = current_signature, now
-            if now - last_fresh >= SENSOR_STALE_FAIL_SECONDS:
-                raise RuntimeError("B850 sensor feedback stopped updating")
+            if _source_identity(data) != source_identity:
+                raise RuntimeError("CPU/GPU reference identity changed; assistance stopped")
+            # LHM exposes no per-sensor generation. Identical valid readings do
+            # not prove a frozen source; unrelated tach changes cannot prove it
+            # fresh either. Native read errors and the post-read owner guard
+            # remain authoritative, with missing feedback handled below.
             demand, reason, fractions = synchronized_demand(
                 data, config.get("cpu_fan_reference_rpm"), config.get("gpu_fan_max_rpm"))
             readings = [dict(name=name, rpm=finite(float(tach.Value), 0, 10000) if tach.Value is not None else None)
@@ -400,15 +509,15 @@ def worker(path, owner_pid, owner_created, full_rpm=None, commission=False):
             elif (not isinstance(full_rpm, dict) or set(full_rpm) != set(TARGETS)
                   or any(finite(value, 200, 10000) is None for value in full_rpm.values())):
                 raise RuntimeError("B850 fans need explicit commissioning before automatic control")
-            if not fresh:
-                demand = max(demand, session.last_command or MIN_DUTY)
-                ramp.cool_since = None
-            if now - last_fresh >= SENSOR_STALE_DEGRADE_SECONDS:
-                demand, reason = 100, "Sensor feedback stale; full airflow"
+            feedback_failure = gpu_feedback.update(data, now)
+            if feedback_failure is not None:
+                demand, reason = 100, feedback_failure
             # Commissioning checks both endpoints directly; normal falls are bounded.
             emergency = (not fractions or (finite(data.get("cpu_temp"), 1, 150) or 0) >= 80
                          or gpu_emergency_cooling(data)
-                         or now - last_fresh >= SENSOR_STALE_DEGRADE_SECONDS)
+                         or feedback_failure is not None)
+            if commission and calibrated and emergency:
+                raise RuntimeError("Minimum-duty commissioning stopped: thermal/fan protection requires full airflow")
             command = demand if commission else ramp.update(demand, now, emergency=emergency)
             session.check()
             if command != session.last_command:
@@ -417,9 +526,18 @@ def worker(path, owner_pid, owner_created, full_rpm=None, commission=False):
                 session.apply(command)
             with IsaBus():
                 feedback = backend.readings()
+            guard()
             if any(abs(row["control_pct"] - command) > 1 for row in feedback):
                 raise RuntimeError("B850 command feedback mismatch")
-            publish("active" if not commission or calibrated and now - started >= 22 else "checking",
+            minimum_verified = False
+            if commission and command == MIN_DUTY:
+                minimum_since = now if minimum_since is None else minimum_since
+                if now - minimum_since >= 6:
+                    if any(finite(row["rpm"], 200, 10000) is None
+                           or row["rpm"] > verified[row["name"]] * .95 for row in feedback):
+                        raise RuntimeError("SYS1/2/3 did not confirm the minimum-duty RPM decrease")
+                    minimum_verified = True
+            publish("active" if not commission or minimum_verified else "checking",
                     reason=reason, command_pct=command, demand_pct=demand, fans=feedback,
                     fractions=fractions, baseline=baseline, controlled_channels=list(TARGETS),
                     firmware_channels=[], control_attempted=attempted, verified_full_rpm=verified,
@@ -437,11 +555,17 @@ def worker(path, owner_pid, owner_created, full_rpm=None, commission=False):
             computer.Close()
         except Exception as exc:
             restore_errors.append(f"Close: {exc}")
+        try:
+            recovery_pending = recovery_journal_exists(journal_path)
+        except OSError as exc:
+            recovery_pending = None
+            restore_errors.append(f"Recovery journal inspection: {exc}")
         publication_error = write_terminal_status(path, "error" if error or restore_errors else "stopped",
             profile=PROFILE, reason=error or "Returned SYS1/2/3 to motherboard control",
-            baseline=baseline, controlled_channels=list(TARGETS) if session else [], firmware_channels=[],
+            baseline=baseline, controlled_channels=list(TARGETS) if session or attempted else [], firmware_channels=[],
             control_attempted=attempted, restore_errors=restore_errors,
             restore_confirmed=bool(session and not restore_errors),
+            recovery_pending=recovery_pending,
             **({"stop_cause": stop_cause} if stop_cause else {}))
         error = error or publication_error
     return 1 if error or restore_errors else 0

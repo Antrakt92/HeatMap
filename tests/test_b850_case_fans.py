@@ -325,7 +325,8 @@ class B850WorkerTests(unittest.TestCase):
         result, publish, terminal, backend = self.run_worker()
         self.assertEqual(result, 0)
         commands = [call.kwargs["command_pct"] for call in publish.call_args_list if "command_pct" in call.kwargs]
-        self.assertEqual(commands[0], 60)
+        # Readiness wait advances SYS feedback to 850 / commissioned 1250 RPM.
+        self.assertEqual(commands[0], 68)
         self.assertIn(100, commands)
         self.assertTrue(terminal["restore_confirmed"])
         self.assertEqual(terminal["restore_errors"], [])
@@ -335,7 +336,7 @@ class B850WorkerTests(unittest.TestCase):
         result, publish, terminal, _backend = self.run_worker(fault="normal_gpu_full")
         self.assertEqual(result, 0)
         commands = [call.kwargs["command_pct"] for call in publish.call_args_list if "command_pct" in call.kwargs]
-        self.assertEqual(commands[:3], [60, 80, 100])
+        self.assertEqual(commands[:3], [68, 88, 100])
         self.assertTrue(terminal["restore_confirmed"])
 
     def test_stopped_cpu_with_valid_duty_bypasses_normal_acceleration(self):

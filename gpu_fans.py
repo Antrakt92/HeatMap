@@ -43,20 +43,21 @@ def emergency_cooling(data):
 
 
 class GpuTemperatureTarget:
-    """Bounded feedback floor; independent curves always retain thermal protection."""
+    """Soft target correction without accumulated error or emergency-state latching."""
     def __init__(self):
-        self.floor = 30.0
         self.last_time = None
 
     def update(self, data, now):
         base, reason = demand(data)
-        if emergency_cooling(data) or finite(now, 0, 1e15) is None:
-            self.floor, self.last_time = 100.0, None
+        if emergency_cooling(data):
+            self.last_time = finite(now, 0, 1e15)
             return 100, reason
-        if self.last_time is not None and now < self.last_time:
-            self.floor, self.last_time = 100.0, None
+        if finite(now, 0, 1e15) is None:
+            self.last_time = None
             return 100, 'Invalid control clock'
-        elapsed = 0 if self.last_time is None else min(2, now - self.last_time)
+        if self.last_time is not None and now < self.last_time:
+            self.last_time = now
+            return 100, 'Invalid control clock'
         self.last_time = now
         # Normalize headroom: Core's 15 C margin and Hotspot/Memory's 10 C
         # margins must exert comparable feedback, rather than compare raw C.
@@ -64,12 +65,12 @@ class GpuTemperatureTarget:
                   for key, target in TARGETS.items()}
         key = max(errors, key=errors.__getitem__)
         error = errors[key]
-        if error > 2:
-            self.floor = min(100, self.floor + min(6, error / 2) * elapsed)
-        elif error < -2:
-            self.floor = max(30, self.floor - elapsed)
-        if self.floor > base:
-            return math.ceil(self.floor), LABELS[key] + ' target'
+        # Targets are soft: a steady small miss must not integrate to 100%.
+        # Independent protective curves can still exceed this correction cap.
+        uplift = min(10, max(0, error - 2) * 2)
+        requested = max(base, min(95, math.ceil(base + uplift)))
+        if requested > base:
+            return requested, LABELS[key] + ' target'
         return base, reason
 
 
@@ -138,7 +139,8 @@ class GpuRamp:
         if self.command is None:
             self.command = 30
         if self.last_time is not None and now < self.last_time:
-            self.command, self.cool_since = 100, None
+            self.command, self.cool_since, self.last_time = 100, None, now
+            return 100
         elapsed = 0 if self.last_time is None else min(2, now - self.last_time)
         self.last_time = now
         if emergency:
@@ -268,6 +270,8 @@ class GpuSession:
         self.command = None
         self.ownership_lost = False
         self.conflict = None
+        self.committed = False
+        self.commit_uncertain = False
         self.known_states = [copy.deepcopy(self.baseline)]
 
     def check(self, external=True):
@@ -317,6 +321,8 @@ class GpuSession:
         self.check(external=False)
 
     def restore(self, *, before_write=None, check_cancelled=None):
+        if self.commit_uncertain:
+            return ['GPU profile commit unconfirmed; settings and recovery journal preserved']
         if not self.touched:
             return []
         if self.ownership_lost:
@@ -366,10 +372,40 @@ class GpuSession:
             raise RuntimeError('A durable GPU journal is required to commit driver settings')
         # Atomic rebasing is the commit point. A crash afterward must retain the
         # new driver profile, even before receipt publication/journal cleanup.
-        self.journal.before_write(self.expected, self.expected, self.expected)
-        self.baseline = copy.deepcopy(self.expected)
-        self.known_states = [copy.deepcopy(self.expected)]
-        self.touched = False
+        target = copy.deepcopy(self.expected)
+        original = copy.deepcopy(self.baseline)
+        def accept_commit():
+            self.baseline = copy.deepcopy(target)
+            self.known_states = [copy.deepcopy(target)]
+            self.touched = False
+            self.committed = True
+            self.commit_uncertain = False
+        self.commit_uncertain = True
+        try:
+            self.journal.before_write(target, target, target)
+            accept_commit()
+        except BaseException:
+            # Replacement may have committed before interruption/cleanup raised.
+            # Reconcile durable intent instead of rolling back an obsolete curve.
+            try:
+                saved = fan_common.load_json_payload(self.journal.path, open_status_file)
+            except (OSError, ValueError):
+                self.commit_uncertain = True
+            else:
+                valid_identity = (isinstance(saved, dict) and saved.get('profile') == PROFILE
+                                  and type(saved.get('version')) is int and saved['version'] == 1
+                                  and saved.get('gpu') == self.adapter.identity)
+                if (valid_identity and saved.get('baseline') == target
+                        and saved.get('known_states') == [target]):
+                    accept_commit()
+                else:
+                    states = saved.get('known_states') if isinstance(saved, dict) else None
+                    rollback_proven = (valid_identity and saved.get('baseline') == original
+                                       and isinstance(states, list) and 1 <= len(states) <= 9
+                                       and target in states
+                                       and all(valid_snapshot(state) and state in self.known_states for state in states))
+                    self.commit_uncertain = not rollback_proven
+            raise
 
 
 def status_error(reason):

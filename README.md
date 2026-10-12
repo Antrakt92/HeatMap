@@ -182,7 +182,10 @@ engages only in response to the GPU's own temperatures: **Core at 60°C, Hotspot
 at 78°C, or Memory at 78°C or above**. CPU temperature, case fans, and their errors
 do not determine GPU fan speed. Full speed starts at **Core 75°C, Hotspot 90°C,
 or Memory 90°C**. Feedback aims around **Core 60°C, Hotspot 80°C and Memory 80°C**,
-with a normalized tolerance of 3°C for Core and 2°C for Hotspot/memory. The greatest
+with a normalized tolerance of 3°C for Core and 2°C for Hotspot/memory. These are
+soft targets: correction adds at most 10 percentage points and does not accumulate
+over time. Its ordinary ceiling is 95%; independent protective curves may request
+more. A past emergency cannot latch this correction at 100%. The greatest
 thermal request wins; missing readings never earn cooling credit. While HeatMap
 intervenes, the minimum is 30%; normal increases are limited to 10 percentage
 points per second. Full-temperature, stopped-fan and stale-data protection bypass
@@ -276,10 +279,19 @@ CPU at 80°C, GPU Core at 75°C, or Hotspot/memory at 90°C requests 100%.
 GPU assistance starts at Core 60°C or Hotspot/memory 78°C, matching the GPU
 controller. These are application choices, not manufacturer temperature limits.
 The case minimum is 60%; normal rises are limited to 10 percentage points/second;
-independent full-temperature and missing/stale/stopped-feedback protection is immediate. Falls use
+independent full-temperature and missing/stopped-feedback protection is immediate. Falls use
 the existing 15-second hold and two percentage points/second limit. Missing
 temperatures or CPU/GPU speed references requests full airflow; lost case
 tachometers stop the controller and trigger verified handback.
+Startup acceleration begins from the measured SYS RPM / commissioned reference
+estimate, because an automatic-mode register may retain an obsolete manual duty.
+Every CPU/GPU poll retains its source identity. All exposed GPU tachometers are
+considered; a previously running channel disappearing or persistently stopping
+under heat requests full case airflow. Zero RPM while cool remains normal.
+Identical complete LHM readings are not proof of sensor freezing: these APIs do
+not expose per-sensor generations. Missing/invalid reads and owner heartbeat
+timeouts still trigger protection/handback; silent native caching cannot be
+independently excluded by comparing values.
 
 Run once from an administrator terminal, with HeatMap configured with valid
 CPU/GPU RPM references:
@@ -291,6 +303,12 @@ CPU/GPU RPM references:
 The explicit check closes HeatMap normally, tests 100% and 60%, and verifies
 exact restoration before saving ON. Restart with `run_as_admin.bat` afterward.
 Ordinary startup uses the saved calibration without another full-speed test.
+An existing recovery journal is processed using exact hardware/register ownership
+before startup waits for running tachometers and CPU/GPU temperatures. Restoration
+confirms automatic mode before writing its retained manual duty and attempts every
+owned header even when another fails. The explicit minimum-speed check aborts if
+thermal protection requires more airflow; after six seconds at 60%, all three
+tachs must still run and fall at least 5% below their verified full-speed readings.
 Before takeover, the B850 controller waits up to 60 seconds for two consecutive
 running SYS1/2/3 samples. An early zero or sub-200 RPM startup sample is retried
 without commands. Persistent low readings, invalid values and wrong identities
