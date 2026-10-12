@@ -121,14 +121,15 @@ def require_hardware_access(scope="control"):
     A monitoring process is not evidence of a driver replacement. Apply one
     read policy to the entire tool inventory rather than per-program exceptions.
     Live installers still block native reads, even alongside monitoring tools.
-    GPU control permits GCC's background process and verifies ADLX ownership.
+    GPU control permits background GCC and verifies ADLX ownership. The separate
+    B850 profile permits it only with exact independent-register ownership checks.
     """
-    if scope not in ("control", "monitor", "gpu_control"):
+    if scope not in ("control", "monitor", "gpu_control", "independent_case_control"):
         raise ValueError("Unknown hardware access scope")
     conflicts = hardware_conflicts()
-    if scope == "gpu_control":
-        # GCC's updater/tray alone is not proof of GPU curve ownership. ADLX
-        # readback still rejects external changes; EC control remains exclusive.
+    if scope in ("gpu_control", "independent_case_control"):
+        # GCC's updater/tray alone does not establish fan ownership. These scopes
+        # verify ADLX curves or exact B850 registers; shared EC stays exclusive.
         conflicts = [name for name in conflicts if name != "gcc.exe"]
     if scope == "monitor" and conflicts:
         installers = sorted(set(conflicts) & DRIVER_INSTALLER_PROCESS_NAMES)
@@ -143,5 +144,5 @@ def require_hardware_access(scope="control"):
             "Hardware monitoring or driver tools are running: " + ", ".join(conflicts) + ". "
             "Close monitoring tools or finish driver installation, then restart HeatMap."
         )
-    if scope in ("monitor", "gpu_control"):
+    if scope in ("monitor", "gpu_control", "independent_case_control"):
         return "full"

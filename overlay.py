@@ -1595,6 +1595,9 @@ def _board_fan_name(board_name, sensor_name, identifier):
     # Match board + chip + channel; never infer a CPU fan from its RPM/order.
     if str(board_name).strip().casefold() == "gigabyte b850 aorus elite wifi7 ice":
         names = {"/lpc/it8696e/0/fan/0": ("Fan #1", "CPU Fan"),
+                 "/lpc/it8696e/0/fan/1": ("Fan #2", "System Fan #1"),
+                 "/lpc/it8696e/0/fan/2": ("Fan #3", "System Fan #2"),
+                 "/lpc/it8696e/0/fan/3": ("Fan #4", "System Fan #3"),
                  "/lpc/it8696e/0/fan/4": ("Fan #5", "CPU Optional Fan")}
         expected = names.get(identifier)
         if expected and sensor_name == expected[0]:
@@ -2517,22 +2520,24 @@ def _default_config():
             "gpu_fan_max_rpm": 2200, "cpu_fan_max_rpm": 1800}
 
 
-def _supported_case_fan_board():
-    """The saved case-fan profile is wired only for the old B550 board."""
+def _supported_case_fan_board(b850=False):
+    """Each case profile is tied to its explicitly commissioned board."""
     try:
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\BIOS") as key:
             manufacturer = winreg.QueryValueEx(key, "BaseBoardManufacturer")[0]
             product = winreg.QueryValueEx(key, "BaseBoardProduct")[0]
     except (OSError, ValueError):
         return None
-    return "gigabyte" in str(manufacturer).casefold() and str(product).strip().casefold() == "b550 aorus pro ac"
+    expected = "b850 aorus elite wifi7 ice" if b850 else "b550 aorus pro ac"
+    return "gigabyte" in str(manufacturer).casefold() and str(product).strip().casefold() == expected
 
 
 def _retire_unsupported_case_fan_profile(config):
     if not (config.get("case_fans_enabled") or config.get("case_fans_shared_enabled")
             or "case_fan_full_rpm" in config):
         return False
-    supported = _supported_case_fan_board()
+    supported = (_supported_case_fan_board(True) if config.get("case_fans_b850_enabled")
+                 else _supported_case_fan_board())
     if supported:
         return False
     config["case_fans_enabled"] = False
@@ -2583,7 +2588,7 @@ def _normalize_config(cfg, defaults):
             invalid_keys.append(key)
         else:
             normalized[key] = int(value)
-    for key in ("peek_enabled", "alerts_enabled", "details_enabled", "storage_temperatures_enabled", "case_fans_enabled", "case_fans_shared_enabled", "gpu_fans_enabled"):
+    for key in ("peek_enabled", "alerts_enabled", "details_enabled", "storage_temperatures_enabled", "case_fans_enabled", "case_fans_shared_enabled", "case_fans_b850_enabled", "gpu_fans_enabled"):
         if key not in provided_keys:
             continue
         if not isinstance(normalized.get(key), bool):
@@ -2767,6 +2772,8 @@ class OverlayApp:
         except HardwareAccessConflict:
             self._monitor_coexistence = False
         self._gpu_monitor_coexistence = not _gpu_control_available()
+        self._case_monitor_coexistence = (self._gpu_monitor_coexistence
+            if self.config.get("case_fans_b850_enabled") else self._monitor_coexistence)
         self._driver_status = (
             SENSOR_STATUS_DRIVER_MISSING
             if not is_pawnio_driver_installed()
@@ -2796,7 +2803,8 @@ class OverlayApp:
         self.advisor = ThermalAdvisor()
         self.thermal_findings = []
         self.fan_worker = FanWorkerClient(APP_DIR, self.config.get("case_fan_full_rpm"),
-                                         shared=self.config.get("case_fans_shared_enabled", False))
+                                         shared=self.config.get("case_fans_shared_enabled", False),
+                                         b850=self.config.get("case_fans_b850_enabled", False))
         self._case_fan_status = {"state": "off"}
         self.gpu_fan_worker = GpuWorkerClient(APP_DIR)
         self._gpu_fan_status = {"state": "off"}
@@ -2992,7 +3000,7 @@ class OverlayApp:
 
         # Publish the fan process before the sensor owner can request its stop.
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
-        if self.config.get("case_fans_enabled", False) and not self._monitor_coexistence:
+        if self.config.get("case_fans_enabled", False) and not self._fan_control_paused("fan_worker"):
             self.fan_worker.start()
         if self.config.get("gpu_fans_enabled", False) and not self._gpu_monitor_coexistence:
             self.gpu_fan_worker.start()
@@ -3278,21 +3286,39 @@ class OverlayApp:
                 "SYS4/5/6 are firmware-owned. The four-fan profile requires successful commissioning.\n"
                 if all(ownership[number] == "FW" for number in (4, 5, 6)) else ""
             )
+            b850 = self.config.get("case_fans_b850_enabled", False)
+            fractions = status.get("fractions", {})
+            if b850:
+                shared_note = "CPU / CPU OPT / SYS4 stay with the motherboard.\n"
+                policy_text = (
+                    "The highest CPU/GPU fan fraction or thermal request wins.\n"
+                    + "\n".join(f"{name} fan reference: {value.get('percent', '--')}% ({value.get('source', '--')})"
+                                 for name, value in fractions.items()) + "\n"
+                    "CPU: 100% case airflow at 80°C. GPU: Core 75°C, Hotspot/memory 90°C.\n"
+                    "Minimum: 60%. Increases apply on the next sample.\n"
+                    "Decreases wait 15 seconds, then up to 2 points/second, with a 3-point deadband.\n"
+                    "Missing temperature or fan reference requests 100%.\n"
+                    "Full-speed testing runs only during explicit commissioning.\n\n"
+                )
+            else:
+                policy_text = (
+                    "The highest CPU / GPU Core / Hotspot / memory demand wins.\n"
+                    "Minimum: 60%. Increases apply on the next sample.\n"
+                    "Decreases wait 15 seconds, then up to 2 percentage points/second, with a 3-point deadband.\n"
+                    "Missing temperatures or a large hot Hotspot gap require 100%.\n"
+                    "Rising temperatures project 5 seconds ahead, adding at most 10 percentage points.\n"
+                    "A previously running SYS4/5/6 at 0 RPM for 2 seconds under heat requests full case airflow.\n"
+                    "Startup verifies full airflow for 15 seconds.\n\n"
+                )
             label.configure(text=(
                 f"Mode: {_case_fan_mode(status)}\n"
                 f"Target: {status.get('demand_pct', '--')}%   Command: {status.get('command_pct', '--')}%\n"
                 f"Base curve: {status.get('thermal_demand_pct', '--')}%   With assistance: {status.get('policy_demand_pct', '--')}%\n"
                 f"Reason: {status.get('reason', 'Automatic control is off')}\n"
                 f"HeatMap: {owner_names('')}\n"
-                f"Firmware: {owner_names('FW')}\n"
+                f"Firmware: {'CPU / CPU OPT / SYS4' if b850 else owner_names('FW')}\n"
                 f"Ownership unconfirmed: {owner_names('?')}\n\n"
-                "The highest CPU / GPU Core / Hotspot / memory demand wins.\n"
-                "Minimum: 60%. Increases apply on the next sample.\n"
-                "Decreases wait 15 seconds, then up to 2 percentage points/second, with a 3-point deadband.\n"
-                "Missing temperatures or a large hot Hotspot gap require 100%.\n"
-                "Rising temperatures project 5 seconds ahead, adding at most 10 percentage points.\n"
-                "A previously running SYS4/5/6 at 0 RPM for 2 seconds under heat requests full case airflow.\n"
-                "Startup verifies full airflow for 15 seconds.\n\n"
+                + policy_text +
                 "Bare %: controller duty readback. ~%: RPM / reference RPM, not duty.\n"
                 "SYS numbers identify motherboard headers, not the connected device.\n"
                 + shared_note +
@@ -3974,10 +4000,12 @@ class OverlayApp:
             # a menu action can start a new child just after that owner stopped it.
             with self.lock:
                 reason = getattr(self, "_hardware_pause_reason", None)
-                if not reason and getattr(self, "_monitor_coexistence", False):
+                if not reason and self._fan_control_paused("fan_worker"):
                     reason = "Case fans: Another monitoring tool leaves control with firmware"
-                if not reason and _supported_case_fan_board() is not True:
-                    reason = "Case fans: this profile requires B550 AORUS PRO AC"
+                supported = (_supported_case_fan_board(True) if self.config.get("case_fans_b850_enabled")
+                             else _supported_case_fan_board())
+                if not reason and supported is not True:
+                    reason = "Case fans: this profile requires its commissioned motherboard"
                 severity = 2
                 if not reason:
                     process = self.fan_worker.process
@@ -4016,7 +4044,7 @@ class OverlayApp:
         if missing:
             messages.append("Unavailable: " + ", ".join(missing))
             severity = max(severity, 1)
-        if (getattr(self, "_monitor_coexistence", False)
+        if (self._fan_control_paused("fan_worker")
                 and self.config.get("case_fans_enabled", False)):
             messages.append("Other monitor running: automatic case fan control paused")
             severity = max(severity, 1)
@@ -4168,6 +4196,13 @@ class OverlayApp:
         try:
             while self.running and not self._stop_event.is_set():
                 access_mode = require_hardware_access("monitor")
+                if getattr(self, "config", {}).get("case_fans_b850_enabled") and not getattr(self, "_case_monitor_coexistence", False):
+                    try:
+                        require_hardware_access("independent_case_control")
+                    except HardwareAccessConflict:
+                        self._case_monitor_coexistence = True
+                        self._gpu_monitor_coexistence = not _gpu_control_available()
+                        self._stop_fan_workers_for_monitor()
                 if access_mode == "shared" and not getattr(self, "_monitor_coexistence", False):
                     # Hand back affected owners; GCC alone permits independent ADLX control.
                     self._monitor_coexistence = True
@@ -4783,11 +4818,15 @@ class OverlayApp:
         if attribute == "gpu_fan_worker":
             return getattr(self, "_gpu_monitor_coexistence",
                            getattr(self, "_monitor_coexistence", False))
+        if getattr(self, "config", {}).get("case_fans_b850_enabled"):
+            return getattr(self, "_case_monitor_coexistence", True)
         return getattr(self, "_monitor_coexistence", False)
 
-    def _stop_fan_workers(self, *, keep_gpu=False):
+    def _stop_fan_workers(self, *, keep_gpu=False, keep_case=False):
         for label, attribute in (("GPU", "gpu_fan_worker"), ("Case", "fan_worker")):
             if keep_gpu and attribute == "gpu_fan_worker":
+                continue
+            if keep_case and attribute == "fan_worker":
                 continue
             worker = getattr(self, attribute, None)
             if worker is None:
@@ -4802,9 +4841,13 @@ class OverlayApp:
     def _stop_fan_workers_for_monitor(self):
         """Wait for affected owners' handback before shared LHM monitoring."""
         keep_gpu = getattr(self, "_gpu_monitor_coexistence", True) is False
-        self._stop_fan_workers(keep_gpu=keep_gpu)
+        keep_case = (getattr(self, "config", {}).get("case_fans_b850_enabled") is True
+                     and not self._fan_control_paused("fan_worker"))
+        self._stop_fan_workers(keep_gpu=keep_gpu, keep_case=keep_case)
         for attribute in ("gpu_fan_worker", "fan_worker"):
             if keep_gpu and attribute == "gpu_fan_worker":
+                continue
+            if keep_case and attribute == "fan_worker":
                 continue
             worker = getattr(self, attribute, None)
             process = getattr(worker, "process", None)

@@ -244,6 +244,43 @@ before writing after a lengthy check; this also applies to old-session recovery.
 
 ### Automatic case cooling
 
+#### B850 AORUS ELITE WIFI7 ICE: SYS1/SYS2/SYS3
+
+This separate opt-in profile supports three running case fans on these exact
+headers. It assists whichever component requests more cooling: CPU/CPU OPT or
+GPU. Controller duty takes priority; where duty is unavailable, RPM divided by
+the saved CPU rated-speed / verified GPU full-speed reference is used and marked
+as an estimate in Cooling status. Equal percentages are not equal airflow.
+
+Temperature requests can increase the command before the main fans spin up:
+CPU at 80°C, GPU Core at 75°C, or Hotspot/memory at 90°C requests 100%.
+GPU assistance starts at Core 70°C or Hotspot/memory 85°C, matching the GPU
+controller. These are application choices, not manufacturer temperature limits.
+The case minimum is 60%; rises apply at the next two-second poll and falls use
+the existing 15-second hold and two percentage points/second limit. Missing
+temperatures or CPU/GPU speed references requests full airflow; lost case
+tachometers stop the controller and trigger verified handback.
+
+Run once from an administrator terminal, with HeatMap configured with valid
+CPU/GPU RPM references:
+
+```powershell
+.venv\Scripts\python.exe tools\commission_b850_fans.py --enable
+```
+
+The explicit check closes HeatMap normally, tests 100% and 60%, and verifies
+exact restoration before saving ON. Restart with `run_as_admin.bat` afterward.
+Ordinary startup uses the saved calibration without another full-speed test.
+Results and the configuration backup are in `%LOCALAPPDATA%/HeatMap/`.
+Cooling status shows `AUTO …% · SYS 1/2/3`; OFF and normal exit return the three
+headers to their original motherboard modes. CPU, CPU OPT and SYS4 are not written.
+PWM/DC selection is retained. A recovery journal covers interrupted register writes;
+unknown external settings are preserved and stop assistance. Background GCC may
+remain running; active motherboard fan changes must be made with HeatMap case
+control OFF. Driver installers and other competing tools remain blocked.
+
+#### B550 AORUS PRO AC profiles
+
 This profile is intended only for the **Gigabyte B550 AORUS PRO AC** with working
 **System Fan #1 and #2** tachometers on the independent IT8688E. By default,
 **SYS4/SYS5/SYS6 remain under motherboard control**: normal SYS4 control in bundled
@@ -334,8 +371,9 @@ and fan-control tools, AMD AtiSetup, and live `pnputil /add-driver /install`
 operations. Monitoring tools share one policy, including CPU-Z, HWiNFO,
 FanControl, SIV, EasyTune, GCC and Ryzen Master, alone or together:
 HeatMap keeps read-only CPU, GPU, motherboard fan, and storage monitoring available
-while automatic case fan control remains paused. GPU assistance may continue
-beside GCC alone; other listed tools still pause GPU control. RAM usage comes from Windows; the additional DDR5
+while B550 case control remains paused. The separately commissioned independent
+B850 profile and GPU assistance may continue beside GCC alone, with their own
+ownership checks; other listed tools pause both. RAM usage comes from Windows; the additional DDR5
 SPD/SMBus inventory is disabled beside these tools. The control pause remains until
 HeatMap restarts, including if the other tools close during the session. Starting
 or closing additional monitoring tools does not stop sensor updates. When another
@@ -349,11 +387,11 @@ compiling software does not restrict sensors. A deliberate pause with confirmed
 fan restoration shows the access conflict without misleading controller-failure
 or OFF → ON instructions.
 
-Saved case-fan control for B550 AORUS PRO AC is disabled automatically on a
-different motherboard. Its old RPM calibration is removed only when the board
-identity is known. A future board needs its own verified profile before control.
-On B850 AORUS ELITE WIFI7 ICE, generic IT8696E tach channels 0 and 4 are displayed
-as CPU Fan and CPU Optional Fan. This display mapping does not enable fan control.
+Saved case-fan control is disabled on a board that does not match its selected
+profile. B550 calibration cannot activate the B850 profile. On the exact B850
+board, IT8696E tach channels 0/4 display CPU/CPU OPT and 1/2/3 display SYS1/2/3.
+Display mapping alone does not enable control; the separate commissioning check
+above is required.
 
 This reduces competing access but does not guarantee detection of every driver
 or elimination of system freezes. Copy diagnostics uses a snapshot from the main
@@ -645,7 +683,7 @@ The widget stays temporarily raised while the menu or CPU reference dialog is op
 | Always on top | Display → Always on top |
 | Autostart | Display → Autostart |
 | Sound on/off | Alerts & limits → Alerts |
-| Automatic case fans (B550 profile only) | `enable_case_fans.bat`; then Cooling → Automatic case fans |
+| Automatic case fans | Commission the matching B550/B850 profile above; then Cooling → Automatic case fans |
 | Automatic GPU fans | Cooling → Automatic GPU fans |
 | CPU fan percentage | Cooling → CPU fan % reference |
 | Raise above windows when hovering at the edge | Display → Raise on edge |

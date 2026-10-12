@@ -29,7 +29,7 @@ class B850FanReadingsTests(unittest.TestCase):
             self.assertEqual(data["cpu_optional_fan_id"], "/lpc/it8696e/0/fan/4")
             self.assertIsNone(data["cpu_fan_pct"])
             self.assertIsNone(data["cpu_optional_fan_pct"])
-            self.assertEqual(next(f["name"] for f in data["fans"] if f["id"].endswith('/1')), "Fan #2")
+            self.assertEqual(next(f["name"] for f in data["fans"] if f["id"].endswith('/1')), "System Fan #1")
 
     def test_other_board_or_chip_does_not_inherit_cpu_header_mapping(self):
         for kwargs in ({"board_name": "Gigabyte B550 AORUS PRO AC"}, {"chip": "it8688e"}):

@@ -1,5 +1,15 @@
 # HeatMap Audit Backlog
 
+B850 SYS1/2/3 assistance now uses the greater CPU/GPU fan fraction and independent
+thermal protection, with exact register ownership, interrupted-write recovery and
+verified motherboard handback. CPU/CPU OPT/SYS4 and PWM/DC selection stay outside
+its write allowlist. Background GCC alone is allowed with per-poll register checks;
+other monitoring tools and installers still pause control. Matched-load cooling,
+physical airflow direction, sleep/resume, actual reboot/login and long-duration
+GCC coexistence remain hardware follow-ups. Equal duty/RPM fractions do not prove
+equal airflow. The explicit local response check and results are recorded in
+`docs/b850-case-cooling-2026-10-12.md`.
+
 GPU policy review: `docs/gpu-policy-review-2026-10-03.md`. The existing cooling-first
 thresholds are retained after manufacturer-source review; complete-worker tests
 now explicitly cover Hotspot 40 idle, the full-speed boundary and cooling handback.
@@ -14,7 +24,7 @@ check the compact panel, click-to-copy details, and disappearance after recovery
 
 Background GCC and independent GPU ownership policy:
 `docs/gpu-gcc-coexistence-2026-10-03.md`. GCC alone no longer suppresses GPU
-assistance; case/EC control remains exclusive, with known installer blocking and
+assistance; B550 case/EC control remains exclusive, with known installer blocking and
 GPU curve/Zero RPM conflict checks retained. Extended simultaneous operation
 remains a hardware follow-up.
 ADLX GPU selection now permits an integrated AMD adapter beside exactly one

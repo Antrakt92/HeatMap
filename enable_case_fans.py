@@ -16,6 +16,18 @@ from case_fans import FanWorkerClient, full_rpm_reference
 from fan_common import verify_loop
 
 
+def same_overlay_file(argument, target):
+    """Recognize the same checkout through Windows junctions without matching names."""
+    if not isinstance(argument, str):
+        return False
+    if os.path.normcase(os.path.abspath(argument)) == target:
+        return True
+    try:
+        return os.path.samefile(argument, target)
+    except (OSError, ValueError):
+        return False
+
+
 def close_previous_overlay():
     target = os.path.normcase(os.path.abspath(Path(__file__).with_name("overlay.py")))
     processes = []
@@ -23,7 +35,7 @@ def close_previous_overlay():
         if process.pid == os.getpid() or not (process.info["name"] or "").lower().startswith("python"):
             continue
         command = process.info["cmdline"] or []
-        if any(os.path.normcase(os.path.abspath(arg)) == target for arg in command[1:]):
+        if any(same_overlay_file(arg, target) for arg in command[1:]):
             processes.append(process)
     if not processes:
         return

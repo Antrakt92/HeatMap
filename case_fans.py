@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 import psutil
@@ -153,7 +154,7 @@ CASE_STATUS_POLICY = StatusPolicy(
 
 class FanWorkerClient:
     """UI-side heartbeat and status; all hardware ownership stays in the child."""
-    def __init__(self, app_dir, full_rpm=None, shared=False, commission=False):
+    def __init__(self, app_dir, full_rpm=None, shared=False, commission=False, b850=False):
         self.app_dir = app_dir
         self.process = None
         self.status_path = None
@@ -161,6 +162,13 @@ class FanWorkerClient:
         self.full_rpm = full_rpm_reference(full_rpm)
         self.shared = shared is True
         self.commission = commission is True
+        self.b850 = b850 is True
+        self.status_policy = CASE_STATUS_POLICY
+        if self.b850:
+            from b850_fans import PROFILE as b850_profile, validate_status
+            if self.shared:
+                raise ValueError("B850 and B550 shared profiles cannot be combined")
+            self.status_policy = replace(CASE_STATUS_POLICY, profile=b850_profile, extra_early=validate_status)
         self.worker_pid = None
         self.last_status = None
 
@@ -180,7 +188,8 @@ class FanWorkerClient:
                  "--status", self.status_path, "--owner-pid", str(os.getpid()),
                  "--owner-created", str(psutil.Process().create_time()),
                  "--full-rpm", json.dumps(self.full_rpm)] + (["--shared"] if self.shared else [])
-                + (["--commission"] if self.commission else []),
+                + (["--commission"] if self.commission else [])
+                + (["--b850"] if self.b850 else []),
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 text=True, bufsize=1, creationflags=subprocess.CREATE_NO_WINDOW,
                 cwd=self.app_dir,
@@ -215,7 +224,7 @@ class FanWorkerClient:
             if not validate:
                 return status
             reason, worker_pid = check_status(
-                CASE_STATUS_POLICY, status, exited=exited,
+                self.status_policy, status, exited=exited,
                 worker_pid=self.worker_pid, process_pid=self.process.pid,
                 started=self.started, now=now)
             if reason is not None:
@@ -372,7 +381,8 @@ def wait_for_controls(computer, read_sensors, stop, owner, heartbeat, status_pat
 
 
 def full_rpm_reference(value):
-    if not isinstance(value, dict) or set(value) not in (set(INDEPENDENT_TARGETS), set(TARGETS), set(ALL_TARGETS[:-1])):
+    if not isinstance(value, dict) or set(value) not in (set(INDEPENDENT_TARGETS), set(TARGETS), set(ALL_TARGETS[:-1]),
+                                                       {"System Fan #1", "System Fan #2", "System Fan #3"}):
         return None
     if any(finite(rpm, 200, 10000) is None for rpm in value.values()):
         return None
@@ -817,9 +827,15 @@ def main():
     parser.add_argument("--full-rpm", type=json.loads, default=None)
     parser.add_argument("--shared", action="store_true", help="Use the commissioned four-fan shared-controller profile")
     parser.add_argument("--commission", action="store_true", help="Explicitly repeat full-airflow response calibration")
+    parser.add_argument("--b850", action="store_true", help="Use the separately commissioned B850 SYS1/2/3 profile")
     args = parser.parse_args()
     try:
         with WorkerMutex():
+            if args.b850:
+                if args.shared:
+                    raise ValueError("B850 and B550 shared profiles cannot be combined")
+                from b850_fans import worker as b850_worker
+                return b850_worker(args.status, args.owner_pid, args.owner_created, args.full_rpm, args.commission)
             return worker(args.status, args.owner_pid, args.owner_created, args.full_rpm,
                           args.shared, args.commission)
     except TerminalStatusWriteError:
@@ -828,8 +844,14 @@ def main():
         # A bare reason would fail client validation ("Invalid profile") and
         # mask the real cause. Stamp this process so the report validates as
         # an error carrying its own reason; restoration stays unknown.
-        write_status(args.status, "error", profile=PROFILE, time=time.time(),
-                     pid=os.getpid(), reason=str(exc))
+        if args.b850:
+            from b850_fans import PROFILE as error_profile
+        else:
+            error_profile = PROFILE
+        write_status(args.status, "error", profile=error_profile, time=time.time(),
+                     pid=os.getpid(), reason=str(exc),
+                     **({"controlled_channels": ["System Fan #1", "System Fan #2", "System Fan #3"],
+                         "firmware_channels": []} if args.b850 else {}))
         return 1
 
 if __name__ == "__main__":
