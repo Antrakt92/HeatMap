@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.4.0 — 2026-10-12
+
+- Add an explicitly commissioned SYS_FAN1/2/3 profile for the Gigabyte B850
+  AORUS ELITE WIFI7 ICE. Case fans assist the greater CPU/GPU fan demand, retain
+  a verified minimum, and return their owned channels to motherboard control.
+  CPU, CPU OPT and other case headers keep their firmware settings.
+- Smooth ordinary fan increases at 10 percentage points per second and reduce
+  speed gradually after a cooling hold. During active control, critical
+  temperatures and missing required temperature readings bypass the normal ramp.
+- Balance the supported Gigabyte RX 7900 XT's software assistance with separate
+  Core, Hotspot and memory protection and a bounded temperature correction.
+  Sustained moderate temperatures no longer accumulate into a permanent 100%
+  request. Restore the saved driver curve and Zero RPM setting after cooling.
+  An explicit preview/apply tool can save a balanced driver curve; upgrading
+  alone does not replace a user's saved profile.
+- Strengthen fan ownership, interrupted-session recovery and partial-write
+  restoration. Wait for startup tachometers after reboot, detect changed or
+  lost sensor identities, and avoid treating identical valid LHM values as
+  proof of frozen sensors. Preserve recovery evidence when handback is uncertain.
+- Select the exact discrete GPU beside integrated AMD graphics, use fresh
+  unambiguous ADLX load when available, and clarify driver-curve standby status.
+  Show actionable health warnings and retry failed autostart inspections.
+- Isolate SMART and Windows volume queries in bounded disposable processes.
+  Keep capacity readings available through mapping failures, preserve each
+  reading's age, drain final replies, and clean up failed or blocked probes.
+- Harden runtime preparation and device-access guards, concurrent configuration
+  saves, and cleanup after partially completed startup. Keep the locked DLL,
+  driver and Python dependency versions unchanged.
+- 1064 local automated tests pass (up from 868 in 1.3.0), with runtime integrity,
+  preflight, compilation and local Windows integration checks. Hardware noise,
+  extended gaming, reboot/login, Explorer and multi-monitor checks remain
+  informational follow-ups; these settings are not a measured universal optimum.
+
 ## 1.3.0 — 2026-09-26
 
 - Share fan-worker infrastructure through a new dependency-free `fan_common`

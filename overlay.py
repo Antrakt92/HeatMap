@@ -42,7 +42,7 @@ from storage_identity import volume_disk_number, physical_disk_numbers
 from storage_probe import probe_disk, snapshot_data as storage_snapshot_data
 from volume_probe import probe_volume
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
 
 # --- Paths ---
