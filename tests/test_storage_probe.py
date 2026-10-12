@@ -142,6 +142,42 @@ class StorageProbeTests(unittest.TestCase):
         self.assertIn('error', sample)
         self.assertNotIn('temp', sample)
 
+    def test_exited_reader_keeps_queued_final_sample_after_identification(self):
+        context = mock.Mock()
+        receive, send, process = mock.Mock(), mock.Mock(), mock.Mock()
+        context.Pipe.return_value = (receive, send)
+        context.Process.return_value = process
+        receive.poll.return_value = True
+        receive.recv_bytes.side_effect = [
+            json.dumps({'disk_number': 2, 'name': 'SSD', 'temp': None,
+                        'phase': 'identified'}).encode(),
+            json.dumps({'disk_number': 2, 'name': 'SSD', 'temp': 44}).encode(),
+        ]
+        process.is_alive.return_value = False
+        with mock.patch.object(storage_probe.multiprocessing, 'get_context', return_value=context):
+            sample = storage_probe.probe_disk(2)
+        self.assertEqual(sample, {'disk_number': 2, 'name': 'SSD', 'temp': 44})
+        self.assertEqual(receive.recv_bytes.call_count, 2)
+        process.terminate.assert_not_called()
+
+    def test_exited_reader_keeps_queued_error_reason_after_identification(self):
+        context = mock.Mock()
+        receive, send, process = mock.Mock(), mock.Mock(), mock.Mock()
+        context.Pipe.return_value = (receive, send)
+        context.Process.return_value = process
+        receive.poll.return_value = True
+        receive.recv_bytes.side_effect = [
+            json.dumps({'disk_number': 2, 'name': 'SSD', 'temp': None,
+                        'phase': 'identified'}).encode(),
+            json.dumps({'disk_number': 2, 'error': 'SMART unavailable'}).encode(),
+        ]
+        process.is_alive.return_value = False
+        with mock.patch.object(storage_probe.multiprocessing, 'get_context', return_value=context):
+            sample = storage_probe.probe_disk(2)
+        self.assertEqual(sample['error'], 'SMART unavailable')
+        self.assertEqual(sample['name'], 'SSD')
+        self.assertNotIn('temp', sample)
+
     def test_non_finite_or_malformed_temperatures_cannot_reach_display(self):
         for value in (float('nan'), float('inf'), True, '45', -1, 151):
             with self.subTest(value=value), self.assertRaises(ValueError):

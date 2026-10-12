@@ -1,6 +1,7 @@
 """Bounded Windows filesystem queries, independent of native sensor ownership."""
 import json
 import re
+import time
 
 import psutil
 
@@ -9,7 +10,7 @@ from storage_probe import PROBE_TIMEOUT_SECONDS, run_bounded_probe
 from thermal_policy import finite
 
 
-def _query(mount):
+def _query(mount, capacity=lambda result: None, *, include_identity=True):
     if mount is None:
         mounts = sorted({partition.mountpoint[:2].upper() + '\\'
                          for partition in psutil.disk_partitions(all=False)
@@ -18,16 +19,24 @@ def _query(mount):
         return {'mounts': mounts}
     usage = psutil.disk_usage(mount)
     volume = {'name': mount[:2], 'total_bytes': usage.total, 'free_bytes': usage.free}
-    number = volume_disk_number(mount[:2])
+    # Capacity is independent of physical-disk identity. Retain this reading
+    # even when the following extent query blocks or is unsupported.
+    capacity({'phase': 'capacity', 'volume': dict(volume)})
+    number = volume_disk_number(mount[:2]) if include_identity else None
     if number is not None:
         volume['disk_number'] = number
     return {'volume': volume}
 
 
 def _worker(mount, pipe):
+    mount, include_identity = mount if isinstance(mount, tuple) else (mount, True)
+
+    def capacity(result):
+        pipe.send_bytes(json.dumps(result, allow_nan=False).encode('utf-8'))
+
     try:
         try:
-            result = _query(mount)
+            result = _query(mount, capacity, include_identity=include_identity)
         except (OSError, psutil.Error, ValueError) as exc:
             result = {'error': str(exc)[:500]}
         try:
@@ -69,11 +78,42 @@ def _validate(result, mount):
     return {'volume': sample}
 
 
-def probe_volume(mount=None, cancelled=lambda: False, *, timeout=PROBE_TIMEOUT_SECONDS):
-    """Enumerate fixed drive letters or read one volume in a disposable process."""
+def probe_volume(mount=None, cancelled=lambda: False, *, timeout=PROBE_TIMEOUT_SECONDS,
+                 include_identity=True):
+    """Bound volume queries while retaining capacity if only mapping fails.
+
+    Capacity includes its own sample_time; identity_error never removes it.
+    A capacity-only retry omits mapping and leaves warning/backoff to its owner.
+    """
     if mount is not None and (not isinstance(mount, str) or not re.fullmatch(r'[A-Z]:\\', mount)):
         raise ValueError('Invalid fixed-volume path')
+    if type(include_identity) is not bool:
+        raise ValueError('Invalid volume identity option')
+    progress = {}
+
+    def consume(result):
+        sample = _validate(result, mount)
+        if result.get('phase') == 'capacity':
+            if mount is None or 'error' in sample or 'disk_number' in sample['volume']:
+                raise ValueError('Invalid volume capacity progress')
+            if progress:
+                raise ValueError('Duplicate volume capacity progress')
+            progress.update(sample, sample_time=time.monotonic())
+            return None
+        if 'error' in sample:
+            return failure(sample['error'])
+        if progress:
+            if any(sample['volume'][key] != progress['volume'][key]
+                   for key in ('name', 'total_bytes', 'free_bytes')):
+                raise ValueError('Volume capacity changed within the reply')
+            sample['sample_time'] = progress['sample_time']
+        return sample
+
+    def failure(error):
+        if progress:
+            return {**progress, 'identity_error': 'Physical disk mapping unavailable: ' + error}
+        return {'error': 'Volume ' + error}
+
     return run_bounded_probe(
-        _worker, mount, lambda result: _validate(result, mount),
-        lambda error: {'error': 'Volume ' + error}, cancelled, timeout,
+        _worker, mount if include_identity else (mount, False), consume, failure, cancelled, timeout,
     )

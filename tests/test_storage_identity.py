@@ -70,6 +70,7 @@ class StorageIdentityTests(TestCase):
             record = ctypes.cast(output, ctypes.POINTER(storage._VolumeExtents)).contents
             record.count = 1
             record.extent.disk_number = 7
+            record.extent.length = 1024
             ctypes.cast(returned, ctypes.POINTER(wintypes.DWORD)).contents.value = size
             return True
 
@@ -78,6 +79,27 @@ class StorageIdentityTests(TestCase):
             self.assertEqual(storage.volume_disk_number('C:'), 7)
         kernel.CreateFileW.assert_called_once_with('\\\\.\\C:', 0, 7, None, 3, 0, None)
         kernel.CloseHandle.assert_called_once_with(123)
+
+    def test_invalid_disk_identity_or_extent_cannot_confirm_a_volume_mapping(self):
+        for number, start, length in ((0xffffffff, 0, 1024), (7, -1, 1024),
+                                      (7, 0, -1), (7, 0, 0)):
+            with self.subTest(number=number, start=start, length=length):
+                kernel = mock.Mock()
+                kernel.CreateFileW.return_value = 123
+
+                def ioctl(*args):
+                    record = ctypes.cast(args[4], ctypes.POINTER(storage._VolumeExtents)).contents
+                    record.count = 1
+                    record.extent.disk_number = number
+                    record.extent.start = start
+                    record.extent.length = length
+                    ctypes.cast(args[6], ctypes.POINTER(wintypes.DWORD)).contents.value = args[5]
+                    return True
+
+                kernel.DeviceIoControl.side_effect = ioctl
+                with mock.patch.object(storage, '_kernel', kernel):
+                    self.assertIsNone(storage.volume_disk_number('C:'))
+                kernel.CloseHandle.assert_called_once_with(123)
 
     def test_unknown_multi_extent_or_truncated_results_never_guess(self):
         for ok, count, length in [(False, 1, 32), (True, 2, 32), (True, 0, 32), (True, 1, 4)]:

@@ -142,6 +142,9 @@ def volume_disk_number(letter):
                                     ctypes.sizeof(result), ctypes.byref(returned), None)
         if not ok or returned.value < ctypes.sizeof(result) or result.count != 1:
             return None
-        return int(result.extent.disk_number)
+        extent = result.extent
+        if (extent.disk_number > 0x7fffffff or extent.start < 0 or extent.length <= 0):
+            return None
+        return int(extent.disk_number)
     finally:
         _kernel.CloseHandle(handle)

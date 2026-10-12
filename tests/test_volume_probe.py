@@ -1,5 +1,6 @@
 """A stalled filesystem request must not own CPU/GPU sensor updates."""
 import unittest
+import json
 from unittest import mock
 
 import overlay
@@ -9,6 +10,129 @@ from test_sensor_lifecycle import sensor_app
 
 
 class VolumeIsolationTests(unittest.TestCase):
+    def test_capacity_is_sent_before_disk_identity_query(self):
+        from types import SimpleNamespace as NS
+        pipe = mock.Mock()
+
+        def mapping(letter):
+            self.assertEqual(letter, 'C:')
+            self.assertEqual(pipe.send_bytes.call_count, 1)
+            progress = json.loads(pipe.send_bytes.call_args.args[0])
+            self.assertEqual(progress['phase'], 'capacity')
+            self.assertEqual(progress['volume']['free_bytes'], 4)
+            return 2
+
+        with (mock.patch.object(volume_probe.psutil, 'disk_usage', return_value=NS(total=400, free=4)),
+              mock.patch.object(volume_probe, 'volume_disk_number', side_effect=mapping)):
+            volume_probe._worker('C:\\', pipe)
+        self.assertEqual(pipe.send_bytes.call_count, 2)
+        final = json.loads(pipe.send_bytes.call_args.args[0])
+        self.assertEqual(final['volume']['disk_number'], 2)
+        pipe.close.assert_called_once()
+
+    def test_capacity_only_retry_never_calls_extent_lookup(self):
+        from types import SimpleNamespace as NS
+        pipe = mock.Mock()
+        with (mock.patch.object(volume_probe.psutil, 'disk_usage', return_value=NS(total=400, free=4)),
+              mock.patch.object(volume_probe, 'volume_disk_number') as mapping):
+            volume_probe._worker(('C:\\', False), pipe)
+        mapping.assert_not_called()
+        final = json.loads(pipe.send_bytes.call_args.args[0])
+        self.assertEqual(final['volume'], {'name': 'C:', 'total_bytes': 400, 'free_bytes': 4})
+        self.assertNotIn('identity_error', final)
+
+    def test_public_capacity_only_option_reaches_worker(self):
+        with mock.patch.object(volume_probe, 'run_bounded_probe', return_value={'volume': {}}) as run:
+            volume_probe.probe_volume('C:\\', include_identity=False)
+        self.assertEqual(run.call_args.args[1], ('C:\\', False))
+
+    def test_identity_failure_preserves_capacity_without_guessing_a_disk(self):
+        context = mock.Mock()
+        receive, send, process = mock.Mock(), mock.Mock(), mock.Mock()
+        context.Pipe.return_value = (receive, send)
+        context.Process.return_value = process
+        receive.poll.return_value = True
+        receive.recv_bytes.side_effect = [json.dumps({
+            'phase': 'capacity', 'volume': {'name': 'C:', 'total_bytes': 400, 'free_bytes': 4},
+        }).encode(), OSError('disk identity query timed out')]
+        process.is_alive.return_value = False
+        with (mock.patch.object(storage_probe.multiprocessing, 'get_context', return_value=context),
+              mock.patch.object(storage_probe.time, 'monotonic', return_value=100)):
+            result = volume_probe.probe_volume('C:\\')
+        self.assertEqual(result['volume']['used_pct'], 99)
+        self.assertNotIn('disk_number', result['volume'])
+        self.assertNotIn('error', result)
+        self.assertIn('disk identity query timed out', result['identity_error'])
+        self.assertEqual(result['sample_time'], 100)
+
+    def test_queued_final_identity_enriches_capacity_after_worker_exit(self):
+        context = mock.Mock()
+        receive, send, process = mock.Mock(), mock.Mock(), mock.Mock()
+        context.Pipe.return_value = (receive, send)
+        context.Process.return_value = process
+        receive.poll.return_value = True
+        receive.recv_bytes.side_effect = [json.dumps({
+            'phase': 'capacity', 'volume': {'name': 'C:', 'total_bytes': 400, 'free_bytes': 4},
+        }).encode(), json.dumps({'volume': {
+            'name': 'C:', 'total_bytes': 400, 'free_bytes': 4, 'disk_number': 2},
+        }).encode()]
+        process.is_alive.return_value = False
+        with mock.patch.object(storage_probe.multiprocessing, 'get_context', return_value=context):
+            result = volume_probe.probe_volume('C:\\')
+        self.assertEqual(result['volume']['disk_number'], 2)
+        self.assertEqual(result['volume']['used_pct'], 99)
+        self.assertNotIn('identity_error', result)
+
+    def test_identity_timeout_retains_capacity_age_and_disposes_blocked_reader(self):
+        context = mock.Mock()
+        receive, send, process = mock.Mock(), mock.Mock(), mock.Mock()
+        context.Pipe.return_value = (receive, send)
+        context.Process.return_value = process
+        receive.poll.return_value = True
+        receive.recv_bytes.return_value = json.dumps({
+            'phase': 'capacity', 'volume': {'name': 'C:', 'total_bytes': 400, 'free_bytes': 4},
+        }).encode()
+        process.is_alive.side_effect = [True, False]
+        with (mock.patch.object(storage_probe.multiprocessing, 'get_context', return_value=context),
+              mock.patch.object(storage_probe.time, 'monotonic', side_effect=[100, 100, 100, 100, 109])):
+            result = volume_probe.probe_volume('C:\\', timeout=8)
+        self.assertEqual(result['volume']['used_pct'], 99)
+        self.assertEqual(result['sample_time'], 100)
+        self.assertIn('timed out', result['identity_error'])
+        process.terminate.assert_called_once()
+        process.close.assert_called_once()
+        receive.close.assert_called_once()
+
+    def test_cancellation_after_capacity_never_publishes_a_late_reading(self):
+        context = mock.Mock()
+        receive, send, process = mock.Mock(), mock.Mock(), mock.Mock()
+        context.Pipe.return_value = (receive, send)
+        context.Process.return_value = process
+        receive.poll.return_value = True
+        receive.recv_bytes.return_value = json.dumps({
+            'phase': 'capacity', 'volume': {'name': 'C:', 'total_bytes': 400, 'free_bytes': 4},
+        }).encode()
+        process.is_alive.side_effect = [True, False]
+        with mock.patch.object(storage_probe.multiprocessing, 'get_context', return_value=context):
+            result = volume_probe.probe_volume('C:\\', mock.Mock(side_effect=[False, False, True]))
+        self.assertIsNone(result)
+        process.terminate.assert_called_once()
+
+    def test_invalid_capacity_progress_cannot_become_fallback_data(self):
+        context = mock.Mock()
+        receive, send, process = mock.Mock(), mock.Mock(), mock.Mock()
+        context.Pipe.return_value = (receive, send)
+        context.Process.return_value = process
+        receive.poll.return_value = True
+        receive.recv_bytes.return_value = json.dumps({
+            'phase': 'capacity', 'volume': {'name': 'D:', 'total_bytes': 400, 'free_bytes': 4},
+        }).encode()
+        process.is_alive.return_value = False
+        with mock.patch.object(storage_probe.multiprocessing, 'get_context', return_value=context):
+            result = volume_probe.probe_volume('C:\\')
+        self.assertIn('error', result)
+        self.assertNotIn('volume', result)
+
     def test_one_timeout_does_not_hide_healthy_later_volume_and_backs_off(self):
         app = sensor_app(2)
         first_publications = []

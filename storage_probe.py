@@ -183,7 +183,10 @@ def run_bounded_probe(worker, argument, consume, failure, cancelled, timeout):
                 sample = consume(result)
                 if sample is not None:
                     return sample
-            if not process.is_alive():
+                # A finished worker can have both identification and final
+                # messages queued. Its exit does not invalidate unread replies.
+                continue
+            if not process.is_alive() and not receive.poll(0):
                 break
         return failure("probe timed out or exited without a reading")
     except (OSError, EOFError, ValueError, RuntimeError) as exc:
