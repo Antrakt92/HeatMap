@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import setup
+import hardware_access_guard
 
 
 class RuntimeSourceTests(unittest.TestCase):
@@ -119,6 +120,35 @@ class RuntimeSourceTests(unittest.TestCase):
         self.assertIn("PawnIO", "\n".join(messages))
         computer.Close.assert_called_once_with()
 
+    def test_hardware_smoke_opens_cpu_only_to_avoid_unbounded_storage_discovery(self):
+        cpu_type, temperature_type = object(), object()
+        cpu = SimpleNamespace(HardwareType=cpu_type,
+                              Sensors=[SimpleNamespace(SensorType=temperature_type, Value=45)],
+                              SubHardware=[], Update=mock.Mock())
+        computer = SimpleNamespace(Hardware=[cpu], Open=mock.Mock(), Close=mock.Mock())
+        hardware = SimpleNamespace(Computer=lambda: computer,
+                                   HardwareType=SimpleNamespace(Cpu=cpu_type),
+                                   SensorType=SimpleNamespace(Temperature=temperature_type))
+        with mock.patch.object(hardware_access_guard, "require_hardware_access", return_value="full"):
+            ok, messages = setup.run_hardware_smoke(import_module=lambda name: {
+                "clr": SimpleNamespace(AddReference=mock.Mock()),
+                "LibreHardwareMonitor.Hardware": hardware}[name])
+        self.assertTrue(ok, messages)
+        self.assertTrue(computer.IsCpuEnabled)
+        for field in ("IsGpuEnabled", "IsStorageEnabled", "IsMemoryEnabled", "IsMotherboardEnabled"):
+            self.assertFalse(getattr(computer, field), field)
+        computer.Close.assert_called_once_with()
+
+    def test_hardware_smoke_checks_driver_access_before_native_import_or_open(self):
+        import_module = mock.Mock()
+        with mock.patch.object(hardware_access_guard, "require_hardware_access",
+                               side_effect=hardware_access_guard.HardwareAccessConflict("driver changed")) as guard:
+            ok, messages = setup.run_hardware_smoke(import_module=import_module)
+        self.assertFalse(ok)
+        self.assertIn("driver changed", " ".join(messages))
+        guard.assert_called_once_with("monitor")
+        import_module.assert_not_called()
+
     def test_verify_pawnio_rejects_hash_before_authenticode(self):
         metadata = {
             "size": 4,
@@ -160,6 +190,55 @@ class RuntimeSourceTests(unittest.TestCase):
                 self.assertEqual(f.read(), data)
             self.assertFalse(os.path.exists(f"{path}.download"))
 
+    def test_download_pawnio_rejects_oversized_response_with_bounded_read(self):
+        metadata = {"version": "2.0.1", "url": "https://example.invalid/PawnIO.exe",
+                    "size": 4, "sha256": hashlib.sha256(b"good").hexdigest(),
+                    "authenticode": {}}
+        response = _FakeResponse(b"good plus oversized payload")
+        response.read = mock.Mock(wraps=response.read)
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            mock.patch.object(setup, "_load_runtime_sources", return_value={"pawnio": metadata}),
+            mock.patch.object(setup, "_verify_pawnio_file") as verify,
+        ):
+            with self.assertRaisesRegex(setup.SetupError, "exceeds.*locked size"):
+                setup.download_pawnio(urlopen=lambda *_a, **_k: response,
+                                      env={"LOCALAPPDATA": tmpdir})
+            self.assertFalse(os.path.exists(setup._pawnio_download_path(metadata, {"LOCALAPPDATA": tmpdir})))
+            verify.assert_not_called()
+        response.read.assert_called_once_with(metadata["size"] + 1)
+
+    def test_overlapping_pawnio_downloads_keep_separate_verified_staging_files(self):
+        data = b"verified installer"
+        metadata = {"version": "2.0.1", "url": "https://example.invalid/PawnIO.exe",
+                    "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+                    "authenticode": {}}
+        staged_paths = []
+        completed = []
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            mock.patch.object(setup, "_load_runtime_sources", return_value={"pawnio": metadata}),
+        ):
+            env = {"LOCALAPPDATA": tmpdir}
+            urlopen = lambda *_a, **_k: _FakeResponse(data)
+
+            def verify(path, _metadata):
+                staged_paths.append(path)
+                with open(path, "rb") as staged:
+                    self.assertEqual(staged.read(), data)
+                if len(staged_paths) == 1:
+                    completed.append(setup.download_pawnio(urlopen=urlopen, env=env))
+                return []
+
+            with mock.patch.object(setup, "_verify_pawnio_file", side_effect=verify):
+                completed.append(setup.download_pawnio(urlopen=urlopen, env=env))
+            self.assertEqual(len(completed), 2)
+            self.assertEqual(len(set(staged_paths)), 2)
+            self.assertEqual(completed[0], completed[1])
+            with open(completed[0], "rb") as downloaded:
+                self.assertEqual(downloaded.read(), data)
+            self.assertEqual(os.listdir(os.path.dirname(completed[0])), [os.path.basename(completed[0])])
+
 
 class _FakeResponse:
     def __init__(self, data):
@@ -171,8 +250,8 @@ class _FakeResponse:
     def __exit__(self, exc_type, exc, tb):
         return False
 
-    def read(self):
-        return self._data
+    def read(self, size=-1):
+        return self._data if size < 0 else self._data[:size]
 
 
 if __name__ == "__main__":

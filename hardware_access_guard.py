@@ -13,6 +13,9 @@ CONFLICTING_PROCESS_NAMES = frozenset({
 })
 _UNREADABLE = object()
 DRIVER_INSTALLER_PROCESS_NAMES = frozenset({'atisetup.exe', 'pnputil.exe'})
+_PNPUTIL_DEVICE_OPERATIONS = frozenset({
+    "/disable-device", "/enable-device", "/restart-device", "/remove-device", "/scan-devices",
+})
 RYZEN_MASTER_PROCESS_NAMES = frozenset({
     "amdryzenmaster.exe", "ryzenmaster.exe", "amd-ryzen-master.exe",
     "amd ryzen master.exe",
@@ -97,9 +100,12 @@ def hardware_conflicts():
                 except (psutil.AccessDenied, OSError):
                     conflicts.add(name)
                     continue
-                # Package staging and device enumeration do not replace a live
-                # driver. The observed /add-driver /install operation does.
-                if {"/add-driver", "/install"} <= args:
+                # Package staging/enumeration is read-only for live devices.
+                # Installation, forced removal and PnP state changes can detach
+                # or replace devices during an in-flight native sensor call.
+                if ({"/add-driver", "/install"} <= args
+                        or ("/delete-driver" in args and args & {"/uninstall", "/force"})
+                        or args & _PNPUTIL_DEVICE_OPERATIONS):
                     conflicts.add(name)
                 continue
             if name in CONFLICTING_PROCESS_NAMES:

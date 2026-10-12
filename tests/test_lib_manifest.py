@@ -465,6 +465,55 @@ class LibManifestTests(unittest.TestCase):
             with open(current_path, "rb") as f:
                 self.assertEqual(f.read(), b"current")
 
+    def test_restore_runtime_alias_cannot_bypass_running_overlay_check(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = _write_runtime_fixture(tmpdir)
+            alias = os.path.join(tmpdir, "junction", "lib")
+            realpath = os.path.realpath
+
+            def canonical_path(path):
+                return realpath(fixture["lib_dir"] if path == alias else path)
+
+            urlopen = mock.Mock(side_effect=OSError("download must not start"))
+            with (
+                mock.patch.object(setup, "LIB_DIR", alias),
+                mock.patch.object(setup.os.path, "realpath", side_effect=canonical_path),
+                mock.patch.object(setup, "_is_overlay_running", return_value=True),
+                mock.patch.object(setup, "_recover_runtime_transaction") as recover,
+            ):
+                with self.assertRaisesRegex(setup.SetupError, "close the overlay"):
+                    setup.restore_runtime(**fixture, urlopen=urlopen)
+            urlopen.assert_not_called()
+            recover.assert_not_called()
+
+    def test_restore_runtime_alias_rechecks_overlay_before_publish(self):
+        package_data = _zip_bytes({TEST_PACKAGE_DLL_PATH: TEST_DLL_DATA})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = _write_runtime_fixture(tmpdir, package_data=package_data)
+            alias = os.path.join(tmpdir, "junction", "lib")
+            realpath = os.path.realpath
+
+            def canonical_path(path):
+                return realpath(fixture["lib_dir"] if path == alias else path)
+
+            os.mkdir(fixture["lib_dir"])
+            current_path = os.path.join(fixture["lib_dir"], "current.dll")
+            with open(current_path, "wb") as f:
+                f.write(b"current")
+            with (
+                mock.patch.object(setup, "LIB_DIR", alias),
+                mock.patch.object(setup.os.path, "realpath", side_effect=canonical_path),
+                mock.patch.object(setup, "_is_overlay_running", side_effect=[False, True]),
+                mock.patch.object(setup, "_recover_runtime_transaction"),
+                mock.patch.object(setup, "_publish_runtime") as publish,
+            ):
+                with self.assertRaisesRegex(setup.SetupError, "started while the runtime was downloading"):
+                    setup.restore_runtime(**fixture, urlopen=lambda *_a, **_k: _FakeResponse(package_data))
+            publish.assert_not_called()
+            with open(current_path, "rb") as f:
+                self.assertEqual(f.read(), b"current")
+            self.assertEqual([name for name in os.listdir(tmpdir) if name.startswith(".lib-restore-")], [])
+
     def test_restore_runtime_rejects_oversized_download(self):
         package_data = _zip_bytes({TEST_PACKAGE_DLL_PATH: TEST_DLL_DATA})
 

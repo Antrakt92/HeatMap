@@ -569,16 +569,23 @@ def download_pawnio(urlopen=urllib.request.urlopen, env=None):
         os.makedirs(os.path.dirname(destination), exist_ok=True)
     except OSError as e:
         raise SetupError(f"could not create PawnIO download directory: {e}") from e
-    staging = f"{destination}.download"
+    staging = None
     try:
         request = urllib.request.Request(metadata["url"], headers={"User-Agent": "HeatMap setup"})
         try:
             with urlopen(request, timeout=60, context=ssl.create_default_context()) as response:
-                data = response.read()
+                data = response.read(metadata["size"] + 1)
         except Exception as e:
             raise SetupError(f"error downloading PawnIO {metadata['version']}: {e}") from e
+        if len(data) > metadata["size"]:
+            raise SetupError("PawnIO download exceeds the locked size")
         try:
-            with open(staging, "wb") as f:
+            # Each preparation owns its bytes through verification and publication.
+            fd, staging = tempfile.mkstemp(
+                prefix=os.path.basename(destination) + ".", suffix=".download",
+                dir=os.path.dirname(destination),
+            )
+            with os.fdopen(fd, "wb") as f:
                 f.write(data)
                 f.flush()
                 os.fsync(f.fileno())
@@ -594,7 +601,7 @@ def download_pawnio(urlopen=urllib.request.urlopen, env=None):
         return destination
     finally:
         try:
-            if os.path.exists(staging):
+            if staging is not None and os.path.exists(staging):
                 os.remove(staging)
         except OSError:
             pass
@@ -657,10 +664,12 @@ def run_preflight():
 
 
 def run_hardware_smoke(import_module=importlib.import_module, lib_dir=LIB_DIR):
-    """Open LHM and require a real positive CPU temperature reading."""
+    """Open only CPU sensors and require a real positive temperature reading."""
     messages = []
     computer = None
     try:
+        from hardware_access_guard import require_hardware_access
+        require_hardware_access("monitor")
         clr_module = import_module("clr")
         clr_module.AddReference(os.path.abspath(os.path.join(lib_dir, "LibreHardwareMonitorLib.dll")))
         hardware_module = import_module("LibreHardwareMonitor.Hardware")
@@ -669,7 +678,7 @@ def run_hardware_smoke(import_module=importlib.import_module, lib_dir=LIB_DIR):
             "IsCpuEnabled", "IsGpuEnabled", "IsStorageEnabled",
             "IsMemoryEnabled", "IsMotherboardEnabled",
         ):
-            setattr(computer, field, True)
+            setattr(computer, field, field == "IsCpuEnabled")
         computer.Open()
         cpu_blocks = 0
         cpu_temperatures = []
@@ -1144,7 +1153,7 @@ def restore_runtime(
     bridge_checker = _check_staged_lhm_bridge if bridge_checker is None else bridge_checker
     with _runtime_restore_lock(os.path.dirname(os.path.abspath(lib_dir))):
         if (
-            os.path.normcase(os.path.abspath(lib_dir)) == os.path.normcase(os.path.abspath(LIB_DIR))
+            os.path.normcase(os.path.realpath(lib_dir)) == os.path.normcase(os.path.realpath(LIB_DIR))
             and _is_overlay_running()
         ):
             raise SetupError(
@@ -1206,7 +1215,7 @@ def restore_runtime(
             if bridge_messages:
                 raise SetupError("; ".join(bridge_messages))
             if (
-                os.path.normcase(os.path.abspath(lib_dir)) == os.path.normcase(os.path.abspath(LIB_DIR))
+                os.path.normcase(os.path.realpath(lib_dir)) == os.path.normcase(os.path.realpath(LIB_DIR))
                 and _is_overlay_running()
             ):
                 raise SetupError(

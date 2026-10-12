@@ -172,6 +172,38 @@ class HardwareAccessGuardTests(unittest.TestCase):
             with mock.patch.object(guard.psutil, 'process_iter', return_value=[candidate]):
                 self.assertEqual(guard.hardware_conflicts(), expected)
 
+    def test_pnputil_device_reconfiguration_blocks_all_native_scopes(self):
+        commands = [
+            ["pnputil.exe", "/delete-driver", "oem0.inf", "/uninstall"],
+            ["pnputil.exe", "/delete-driver", "oem0.inf", "/force"],
+            *[["pnputil.exe", option, "PCI\\VEN_1002"] for option in
+              ("/disable-device", "/enable-device", "/restart-device", "/remove-device")],
+            ["pnputil.exe", "/SCAN-DEVICES"],
+        ]
+        candidate = mock.Mock(info={"name": "pnputil.exe"})
+        for command in commands:
+            candidate.cmdline.return_value = command
+            with self.subTest(command=command), mock.patch.object(
+                guard.psutil, "process_iter", return_value=[candidate]
+            ):
+                self.assertEqual(guard.hardware_conflicts(), ["pnputil.exe"])
+                for scope in ("control", "monitor", "gpu_control", "independent_case_control"):
+                    with self.assertRaisesRegex(guard.HardwareAccessConflict, "pnputil.exe"):
+                        guard.require_hardware_access(scope)
+
+    def test_pnputil_read_only_queries_and_unused_package_operations_do_not_block(self):
+        candidate = mock.Mock(info={"name": "pnputil.exe"})
+        for command in (["pnputil.exe", "/enum-drivers"],
+                        ["pnputil.exe", "/enum-devices", "/drivers"],
+                        ["pnputil.exe", "/export-driver", "*", "C:\\backup"],
+                        ["pnputil.exe", "/delete-driver", "oem0.inf"],
+                        ["pnputil.exe", "/add-driver", "C:\\scan-devices.inf"]):
+            candidate.cmdline.return_value = command
+            with self.subTest(command=command), mock.patch.object(
+                guard.psutil, "process_iter", return_value=[candidate]
+            ):
+                self.assertEqual(guard.require_hardware_access("monitor"), "full")
+
     def test_each_call_detects_newly_started_tools_and_their_exit(self):
         with mock.patch.object(guard.psutil, "process_iter", side_effect=(
             [process("explorer.exe")], [process("CPUZ_X64.exe")], [process("explorer.exe")],
