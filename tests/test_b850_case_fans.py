@@ -222,19 +222,26 @@ class B850WorkerTests(unittest.TestCase):
                 clock.now += seconds
                 for tach in backend.tachs:
                     tach.Value = 1250 if backend.values[b850.DUTIES[1]] == 255 else 850
-                if clock.now >= (130 if commission else 108):
+                stop_at = 170 if fault == "permanent_zero" else 130 if commission else 108
+                if clock.now >= stop_at:
                     clock.stopped = True
         def read(_computer, **_kwargs):
             clock.samples += 1
+            if fault == "startup_zero" and clock.samples == 1:
+                backend.tachs[0].Value = 0
+            elif fault == "startup_zero":
+                backend.tachs[0].Value = 700
+            elif fault == "permanent_zero":
+                backend.tachs[0].Value = 0
             data = sample(cpu_fan_id=f"{b850.CHIP}/fan/0", cpu_optional_fan_id=f"{b850.CHIP}/fan/4",
                           gpu_name="AMD Radeon RX 7900 XT", fans=[dict(name="System Fan #1", rpm=700 + clock.samples)])
             if fault == "identity":
                 data["cpu_fan_id"] = "foreign"
             elif fault == "temperature":
                 data["gpu_memory_temp"] = float("nan")
-            elif fault == "read_failure" and clock.samples >= 3:
+            elif fault == "read_failure" and clock.now >= 103:
                 raise OSError("sensor read failed")
-            elif not commission and clock.samples >= 3:
+            elif not commission and clock.now >= 104:
                 data["gpu_hotspot_temp"] = 90
             return data
         real_session = b850.B850Session
@@ -264,7 +271,7 @@ class B850WorkerTests(unittest.TestCase):
     def test_normal_start_tracks_cpu_then_hot_gpu_and_restores(self):
         result, publish, terminal, backend = self.run_worker()
         self.assertEqual(result, 0)
-        commands = [call.kwargs.get("command_pct") for call in publish.call_args_list]
+        commands = [call.kwargs["command_pct"] for call in publish.call_args_list if "command_pct" in call.kwargs]
         self.assertEqual(commands[0], 72)
         self.assertIn(100, commands)
         self.assertTrue(terminal["restore_confirmed"])
@@ -285,10 +292,25 @@ class B850WorkerTests(unittest.TestCase):
         self.assertTrue(terminal["control_attempted"])
         self.assertTrue(terminal["restore_confirmed"])
 
+    def test_transient_startup_zero_waits_then_arms_without_bypassing_tach(self):
+        result, publish, terminal, backend = self.run_worker(fault="startup_zero")
+        self.assertEqual(result, 0)
+        waiting = [call for call in publish.call_args_list if call.kwargs.get("phase") == "waiting"]
+        self.assertTrue(waiting)
+        self.assertFalse(waiting[0].kwargs["control_attempted"])
+        self.assertTrue(backend.writes)
+        self.assertTrue(terminal["restore_confirmed"])
+
+    def test_persistent_startup_zero_times_out_without_commands(self):
+        result, _publish, terminal, backend = self.run_worker(fault="permanent_zero")
+        self.assertEqual(result, 1)
+        self.assertFalse(terminal["control_attempted"])
+        self.assertEqual(backend.writes, [])
+
     def test_explicit_commission_checks_full_and_minimum_endpoints(self):
         result, publish, terminal, _backend = self.run_worker(commission=True)
         self.assertEqual(result, 0)
-        commands = [call.kwargs.get("command_pct") for call in publish.call_args_list]
+        commands = [call.kwargs["command_pct"] for call in publish.call_args_list if "command_pct" in call.kwargs]
         self.assertEqual(commands[0], 100)
         self.assertIn(60, commands)
         active = [call for call in publish.call_args_list if call.args[1] == "active"]

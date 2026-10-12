@@ -90,6 +90,28 @@ For cooling comparisons use the same workload, ambient conditions and fan
 settings with the case open and closed. The short response test is not that
 comparison.
 
+## Reboot startup follow-up
+
+After the user's 2026-10-12 reboot and GPU repaste, the initial controller sample
+reported SYS1 at zero and stopped before takeover. The user confirmed all three
+fans physically rotating, and a later 20-sample elevated read-only probe measured
+positive readings on all three exact headers. This establishes a transient
+startup-reading failure, without proving its firmware/native-driver cause.
+
+The startup-only selector now retries zero/sub-200 readings within the existing
+60-second deadline, then requires two consecutive complete running samples.
+The strict post-readiness selector and runtime stop checks remain unchanged.
+Persistent startup zero, invalid readings, changed channel identity, conflicts
+and timeout still send no new fan commands. The old early-zero failure is
+reproduced by a whole-worker regression; its recovery and timeout paths now pass.
+All 958 local tests, compilation, runtime integrity and preflight checks passed.
+
+After normal elevated restart during the user-operated Witcher workload, SYS1/2/3
+reported approximately 1227/1252/1195 RPM with a 100% read-back command and reason
+`GPU fans`. This was synchronization with the GPU's actual driver-controlled
+fan percentage, independent of HeatMap GPU thermal intervention. A physical
+reboot with the updated readiness behavior has not yet been performed.
+
 Sources: the exact installed GCC `Fan/Profile-0.xml` header ordering and the
 [pinned LHM backend](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/blob/v0.9.5/LibreHardwareMonitorLib/Hardware/Motherboard/Lpc/IT87XX.cs).
 Case airflow guidance: [Noctua fundamentals](https://www.noctua.at/en/support/faqs/airflow-guide-fundamentals).

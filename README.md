@@ -271,6 +271,10 @@ CPU/GPU RPM references:
 The explicit check closes HeatMap normally, tests 100% and 60%, and verifies
 exact restoration before saving ON. Restart with `run_as_admin.bat` afterward.
 Ordinary startup uses the saved calibration without another full-speed test.
+Before takeover, the B850 controller waits up to 60 seconds for two consecutive
+running SYS1/2/3 samples. An early zero or sub-200 RPM startup sample is retried
+without commands. Persistent low readings, invalid values and wrong identities
+still prevent control; already-owned channels retain their normal stop checks.
 Results and the configuration backup are in `%LOCALAPPDATA%/HeatMap/`.
 Cooling status shows `AUTO …% · SYS 1/2/3`; OFF and normal exit return the three
 headers to their original motherboard modes. CPU, CPU OPT and SYS4 are not written.

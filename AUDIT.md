@@ -1,5 +1,21 @@
 # HeatMap Audit Backlog
 
+B850 reboot follow-up (2026-10-12): an early SYS1 zero stopped activation before
+commands although all three physical fans were reported spinning. Twenty later
+read-only samples showed positive SYS1/2/3 RPM. Startup now waits within its
+existing 60-second deadline for two consecutive running samples; persistent zero,
+invalid values and wrong identities still fail closed. Regressions reproduce the
+old premature failure and retained no-write timeout. Normal elevated restart
+restored AUTO SYS1/2/3 at full speed while assisting the user-operated GPU load.
+The next physical reboot with this fix remains an informational follow-up.
+
+GPU utilization follow-up: this boot's copied Windows D3D percentage disagreed
+with driver activity/power at idle and with ADLX during gaming. A separate Windows
+GPU Engine query also returned values above 100%. These counters are not evidence
+of thermal load. Temperature evaluation uses the exact GPU's fresh ADLX readings,
+board power and clocks; the counter-provider/source discrepancy needs a separate
+matched-sample investigation before changing the display policy.
+
 B850 SYS1/2/3 assistance now uses the greater CPU/GPU fan fraction and independent
 thermal protection, with exact register ownership, interrupted-write recovery and
 verified motherboard handback. CPU/CPU OPT/SYS4 and PWM/DC selection stay outside

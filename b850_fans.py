@@ -77,7 +77,7 @@ def controller(computer):
     return getattr(chips[0], "__implementation__", chips[0])
 
 
-def select_tachs(computer):
+def select_tachs(computer, *, startup=False):
     chip = controller(computer)
     selected = []
     for index, name in zip((1, 2, 3), TARGETS):
@@ -87,7 +87,12 @@ def select_tachs(computer):
             raise RuntimeError(f"{name}: tachometer identity missing or ambiguous")
         if matches[0].Value is None:
             raise StartupNotReady(f"Waiting for {name} tachometer")
-        if finite(float(matches[0].Value), 200, 10000) is None:
+        value = matches[0].Value
+        if isinstance(value, (bool, str)) or finite(float(value), 0, 10000) is None:
+            raise RuntimeError(f"{name}: invalid tachometer reading")
+        if float(value) < 200:
+            if startup:
+                raise StartupNotReady(f"Waiting for {name} running tachometer")
             raise RuntimeError(f"{name}: running tachometer required")
         selected.append(matches[0])
     return chip, selected
@@ -324,10 +329,17 @@ def worker(path, owner_pid, owner_created, full_rpm=None, commission=False):
     try:
         guard()
         computer.Open()
+        ready_samples = 0
         def ready():
+            nonlocal ready_samples
             data = overlay.read_sensors(computer, update_storage=False)
-            chip, tachs = select_tachs(computer)
+            try:
+                chip, tachs = select_tachs(computer, startup=True)
+            except StartupNotReady:
+                ready_samples = 0
+                raise
             if any(data.get(key) is None for key in ("cpu_temp", *ASSIST_ON, "cpu_fan", "cpu_optional_fan", "gpu_fan")):
+                ready_samples = 0
                 raise StartupNotReady("Waiting for CPU/GPU fan and temperature feedback")
             if any(finite(data[key], 1, 150) is None for key in ("cpu_temp", *ASSIST_ON)):
                 raise RuntimeError("Invalid B850 startup temperature; no fan commands sent")
@@ -335,6 +347,9 @@ def worker(path, owner_pid, owner_created, full_rpm=None, commission=False):
                     or data.get("cpu_optional_fan_id") != f"{CHIP}/fan/4"
                     or data.get("gpu_name") != "AMD Radeon RX 7900 XT"):
                 raise RuntimeError("CPU/GPU reference identity changed; no fan commands sent")
+            ready_samples += 1
+            if ready_samples < 2:
+                raise StartupNotReady("Verifying a second running SYS1/2/3 sample")
             return chip, tachs
         wait_for_readiness(ready, stop, guard,
             lambda reason, *_args: publish("checking", phase="waiting", reason=str(reason),
