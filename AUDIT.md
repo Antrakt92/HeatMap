@@ -1,5 +1,14 @@
 # HeatMap Audit Backlog
 
+Live watchdog/storage follow-up (2026-10-12):
+[recovery repair and evidence](docs/watchdog-and-probe-recovery-2026-10-12.md).
+Untouched GPU standby now qualifies for one watchdog retry with explicit
+no-write/no-pending proof; it is not mislabeled as restored. Delayed queued probe
+replies retain their completion age and deadline checks. UI refresh failures
+reschedule polling, manual Scheduler operations run off-thread, and in-app notices
+keep Tk timers live. The original ordinary-use pause was not independently traced;
+duration/stage diagnostics now make another interruption more informative.
+
 Independent second control audit (2026-10-12):
 [review and verification](docs/control-review-and-audit-2026-10-12.md).
 Confirmed accumulated-error 100% latching and reversed-clock acceleration were

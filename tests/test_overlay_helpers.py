@@ -734,8 +734,11 @@ class OverlayHelperTests(unittest.TestCase):
         delete.assert_not_called()
         register.assert_not_called()
 
-    def test_toggle_autostart_failed_enable_shows_error_and_marks_menu(self):
+    def test_toggle_autostart_failed_enable_marks_menu_without_blocking_dialog(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.running = True
+        app._stop_event = threading.Event()
+        app.root = mock.Mock()
         app.menu_labels = []
         app._set_menu_label = lambda key, label: app.menu_labels.append((key, label))
         with (
@@ -744,13 +747,18 @@ class OverlayHelperTests(unittest.TestCase):
             mock.patch.object(overlay, "_show_error_message") as show_error,
         ):
             app.toggle_autostart()
+            app._autostart_thread.join(3)
+            app._poll_autostart_check()
 
-        self.assertEqual(app.menu_labels, [("autostart", "Autostart: ERROR")])
-        show_error.assert_called_once()
-        self.assertIn("create failed", show_error.call_args.args[1])
+        self.assertEqual(app.menu_labels[-1], ("autostart", "Autostart: ERROR"))
+        show_error.assert_not_called()
+        self.assertIn("create failed", app._autostart_warning)
 
     def test_toggle_autostart_success_updates_menu_from_validated_state(self):
         app = overlay.OverlayApp.__new__(overlay.OverlayApp)
+        app.running = True
+        app._stop_event = threading.Event()
+        app.root = mock.Mock()
         app.menu_labels = []
         app._set_menu_label = lambda key, label: app.menu_labels.append((key, label))
         with (
@@ -758,8 +766,10 @@ class OverlayHelperTests(unittest.TestCase):
             mock.patch.object(overlay, "enable_autostart", return_value=(True, "Autostart enabled")),
         ):
             app.toggle_autostart()
+            app._autostart_thread.join(3)
+            app._poll_autostart_check()
 
-        self.assertEqual(app.menu_labels, [("autostart", "Autostart: ON (UAC)")])
+        self.assertEqual(app.menu_labels[-1], ("autostart", "Autostart: ON (UAC)"))
 
     def test_read_sensors_without_computer_returns_psutil_fallback(self):
         with (
@@ -1793,7 +1803,10 @@ class OverlayHelperTests(unittest.TestCase):
         app._window_transition_generation = 0
         app._set_window_layer = lambda raised: False
 
-        with mock.patch.object(overlay, "_show_error_message") as show_error:
+        with (
+            mock.patch.object(app, "_show_error_notice", create=True) as show_error,
+            mock.patch.object(overlay, "_show_error_message", side_effect=AssertionError("UI opened a native modal")),
+        ):
             app.toggle_topmost()
 
         self.assertFalse(app.topmost)
@@ -1935,7 +1948,8 @@ class OverlayHelperTests(unittest.TestCase):
         app._set_menu_label = lambda key, label: app.menu_labels.append((key, label))
         with (
             mock.patch.object(overlay.os, "startfile", create=True) as startfile,
-            mock.patch.object(overlay, "_show_info_message") as show_info,
+            mock.patch.object(app, "_show_info_notice", create=True) as show_info,
+            mock.patch.object(overlay, "_show_info_message", side_effect=AssertionError("UI opened a native modal")),
             mock.patch.object(overlay, "_pawnio_installer_metadata", return_value=None),
         ):
             app._finish_pawnio_repair(True, r"C:\verified\PawnIO.exe")
@@ -1951,7 +1965,8 @@ class OverlayHelperTests(unittest.TestCase):
         app._set_menu_label = lambda key, label: None
         metadata = {"size": 10, "sha256": "expected"}
         with (
-            mock.patch.object(overlay, "_show_error_message") as show_error,
+            mock.patch.object(app, "_show_error_notice", create=True) as show_error,
+            mock.patch.object(overlay, "_show_error_message", side_effect=AssertionError("UI opened a native modal")),
             mock.patch.object(overlay, "_pawnio_installer_metadata", return_value=metadata),
             mock.patch.object(overlay.os.path, "getsize", return_value=10),
             mock.patch("setup._sha256_file", return_value="tampered"),
@@ -1969,7 +1984,8 @@ class OverlayHelperTests(unittest.TestCase):
         metadata = {"size": 10, "sha256": "expected"}
         with (
             mock.patch.object(overlay.os, "startfile", create=True),
-            mock.patch.object(overlay, "_show_info_message") as show_info,
+            mock.patch.object(app, "_show_info_notice", create=True) as show_info,
+            mock.patch.object(overlay, "_show_info_message", side_effect=AssertionError("UI opened a native modal")),
             mock.patch.object(overlay, "_pawnio_installer_metadata", return_value=metadata),
             mock.patch.object(overlay.os.path, "getsize", return_value=10),
             mock.patch("setup._sha256_file", return_value="expected"),
@@ -2145,7 +2161,8 @@ class OverlayHelperTests(unittest.TestCase):
 
         with (
             mock.patch.object(overlay.os, "startfile", side_effect=OSError("blocked")),
-            mock.patch.object(overlay, "_show_error_message") as show_error,
+            mock.patch.object(app, "_show_error_notice", create=True) as show_error,
+            mock.patch.object(overlay, "_show_error_message", side_effect=AssertionError("UI opened a native modal")),
             self.assertLogs("HeatMap", level="WARNING"),
         ):
             app.open_log_file()
@@ -2490,9 +2507,10 @@ class GpuLoadEngineSelectionTests(unittest.TestCase):
 
 class SensorGuideThresholdTests(unittest.TestCase):
     def guide_text(self):
-        with mock.patch.object(overlay, "_show_info_message") as show:
-            overlay.OverlayApp.show_sensor_guide(object())
-        return show.call_args[0][1]
+        app = SimpleNamespace(_show_info_notice=mock.Mock())
+        with mock.patch.object(overlay, "_show_info_message", side_effect=AssertionError("UI opened a native modal")):
+            overlay.OverlayApp.show_sensor_guide(app)
+        return app._show_info_notice.call_args[0][1]
 
     def test_guide_matches_application_thresholds(self):
         text = self.guide_text()

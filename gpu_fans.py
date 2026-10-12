@@ -429,6 +429,9 @@ def mode_text(status):
 
 def _gpu_extra_late(status):
     """Command and standby checks, in historical order. Returns reason or None."""
+    if any(status.get(key) is not None and type(status[key]) is not bool
+           for key in ('control_attempted', 'recovery_pending')):
+        return 'Invalid GPU restoration report'
     if status.get("state") == "active" and finite(status.get("command_pct"), 30, 100) is None:
         return "Invalid GPU fan command report"
     if status.get("state") == "standby" and type(status.get("thermal_ready")) is not bool:

@@ -36,13 +36,14 @@ from thermal_policy import (ThermalAdvisor, gpu_delta, delta_severity, finite,
                             GPU_GAP_MIN_HOTSPOT, GPU_GAP_PERSISTENCE_SECONDS,
                             TACH_PERSISTENCE_SECONDS)
 from case_fans import FanWorkerClient, full_rpm_reference
+from fan_common import fan_control_released
 from gpu_fans import GpuWorkerClient, mode_text as gpu_fan_mode_text
 from hardware_access_guard import HardwareAccessConflict, require_hardware_access
 from storage_identity import volume_disk_number, physical_disk_numbers
 from storage_probe import probe_disk, snapshot_data as storage_snapshot_data
 from volume_probe import probe_volume
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 
 
 # --- Paths ---
@@ -3247,7 +3248,7 @@ class OverlayApp:
             os.startfile(target)
         except Exception as e:
             log.warning("Failed to open log file location: %s", e, exc_info=True)
-            _show_error_message("HeatMap Log", f"Failed to open log file:\n{e}\n\nLog path:\n{LOG_PATH}")
+            self._show_error_notice("HeatMap Log", f"Failed to open log file:\n{e}\n\nLog path:\n{LOG_PATH}")
 
     def copy_log_path(self):
         try:
@@ -3255,7 +3256,7 @@ class OverlayApp:
             self.root.clipboard_append(os.path.abspath(LOG_PATH))
         except Exception as e:
             log.warning("Failed to copy log path: %s", e, exc_info=True)
-            _show_error_message("HeatMap Log", f"Failed to copy log path:\n{e}\n\nLog path:\n{LOG_PATH}")
+            self._show_error_notice("HeatMap Log", f"Failed to copy log path:\n{e}\n\nLog path:\n{LOG_PATH}")
 
     def _cache_sensor_diagnostics(self, computer, data):
         """Capture inventory on the sensor owner's thread, at most every 30 seconds."""
@@ -3268,6 +3269,37 @@ class OverlayApp:
         detail = build_sensor_diagnostics(computer, data)
         with self.lock:
             self._sensor_diagnostics_snapshot = (now, detail)
+
+    def _show_notice(self, title, message, *, error=False):
+        """Show a readable notice without stopping Tk's owner-heartbeat timers."""
+        if not self.running:
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.configure(bg='#1a1a2e')
+        dialog.transient(self.root)
+        viewport = tk.Frame(dialog, bg='#1a1a2e')
+        viewport.pack(fill='both', expand=True, padx=12, pady=12)
+        text = tk.Text(viewport, wrap='word', width=62, height=16,
+                       bg='#1a1a2e', fg='#fca5a5' if error else '#e2e8f0',
+                       font=('Segoe UI', 10), relief='flat', padx=8, pady=8)
+        scrollbar = tk.Scrollbar(viewport, orient='vertical', command=text.yview)
+        scrollbar.pack(side='right', fill='y')
+        text.pack(side='left', fill='both', expand=True)
+        text.configure(yscrollcommand=scrollbar.set)
+        text.insert('1.0', message)
+        text.configure(state='disabled')
+        tk.Button(dialog, text='Close', command=dialog.destroy).pack(pady=(0, 12))
+        dialog.protocol('WM_DELETE_WINDOW', dialog.destroy)
+        # No native modal loop, wait_window or grab: the main polling chain
+        # remains active while the user reads even a long notice.
+        return dialog
+
+    def _show_error_notice(self, title, message):
+        return self._show_notice(title, message, error=True)
+
+    def _show_info_notice(self, title, message):
+        return self._show_notice(title, message)
 
     def copy_diagnostics(self):
         if not self.running or getattr(self, "_diagnostics_running", False):
@@ -3481,7 +3513,7 @@ class OverlayApp:
                    f" alarm after {GPU_GAP_PERSISTENCE_SECONDS} seconds.")
         limits += (f"\nFan stall: previously running, then 0 RPM"
                    f" for {TACH_PERSISTENCE_SECONDS} seconds under heat.")
-        _show_info_message("HeatMap sensor guide", meanings + limits +
+        self._show_info_notice("HeatMap sensor guide", meanings + limits +
                            "\n\nClick the warning panel to copy full diagnostics. Control sound with Alerts in the right-click menu.")
 
     def _poll_diagnostics(self):
@@ -3502,7 +3534,7 @@ class OverlayApp:
             except Exception as e:
                 log.warning("Failed to copy diagnostics: %s", e, exc_info=True)
                 detail = str(e)
-        _show_error_message("HeatMap Diagnostics", f"Failed to copy diagnostics:\n{detail}")
+        self._show_error_notice("HeatMap Diagnostics", f"Failed to copy diagnostics:\n{detail}")
 
     def prepare_pawnio_repair(self):
         if not self.running or getattr(self, "_pawnio_repair_running", False):
@@ -3536,7 +3568,7 @@ class OverlayApp:
             return
         self._set_menu_label("pawnio", "Prepare verified PawnIO repair...")
         if not ok:
-            _show_error_message("PawnIO repair", f"Could not prepare PawnIO installer:\n{detail}")
+            self._show_error_notice("PawnIO repair", f"Could not prepare PawnIO installer:\n{detail}")
             return
         installer_path = os.path.abspath(detail)
         metadata = _pawnio_installer_metadata()
@@ -3544,7 +3576,7 @@ class OverlayApp:
         if metadata is not None:
             changed = _reverify_pawnio_installer(installer_path, metadata)
             if changed is not None:
-                _show_error_message("PawnIO repair",
+                self._show_error_notice("PawnIO repair",
                                     f"Installer changed after verification:\n{changed}\n"
                                     "Re-run Prepare verified PawnIO repair.")
                 return
@@ -3554,7 +3586,7 @@ class OverlayApp:
             os.startfile(os.path.dirname(installer_path))
         except Exception:
             log.warning("Failed to open PawnIO download folder", exc_info=True)
-        _show_info_message(
+        self._show_info_notice(
             "PawnIO repair ready",
             "Verified PawnIO installer is ready.\n\n"
             f"{installer_path}\n"
@@ -3961,7 +3993,7 @@ class OverlayApp:
     def toggle_topmost(self):
         target_topmost = not self.topmost
         if not self._set_window_layer(target_topmost):
-            _show_error_message("HeatMap window", "Could not change the window layer. Please try again.")
+            self._show_error_notice("HeatMap window", "Could not change the window layer. Please try again.")
             return
         self._cancel_scheduled_embed()
         self.topmost = target_topmost
@@ -4016,11 +4048,16 @@ class OverlayApp:
             return
         self._autostart_pending = False
         self._autostart_warning = "" if result.ok else f"Autostart: {result.message}"
+        manual = getattr(self, '_autostart_action', None) == 'toggle'
+        self._autostart_action = None
         if not result.ok:
-            log.error("%s", _format_autostart_reconcile_error(result.changed, result.message))
+            if manual:
+                log.warning('Autostart toggle failed: %s', result.message)
+            else:
+                log.error("%s", _format_autostart_reconcile_error(result.changed, result.message))
         self._set_menu_label("autostart", "Autostart: ERROR" if not result.ok or result.enabled is None else
                             "Autostart: ON (UAC)" if result.enabled else "Autostart: OFF")
-        if not result.ok and not result.changed:
+        if not result.ok and (manual or not result.changed):
             self.root.after(60000, self._retry_autostart_check)
 
     def _retry_autostart_check(self):
@@ -4029,25 +4066,39 @@ class OverlayApp:
             self.start_autostart_check(read_only=True)
 
     def toggle_autostart(self):
-        if getattr(self, "_autostart_pending", False):
+        if not self.running or getattr(self, "_autostart_pending", False):
             return
-        if is_autostart_enabled():
-            ok, message = disable_autostart()
-        else:
-            ok, message = enable_autostart()
-        if not ok:
-            log.warning("Autostart toggle failed: %s", message)
-            self._autostart_warning = f"Autostart: {message}"
-            self._set_menu_label("autostart", "Autostart: ERROR")
-            _show_error_message(
-                "Autostart",
-                f"{message}\n\nSee log for details:\n{LOG_PATH}",
-            )
-            return
-        self._autostart_warning = ""
-        self._set_menu_label("autostart",
-            "Autostart: ON (UAC)" if is_autostart_enabled() else "Autostart: OFF"
-        )
+        self._autostart_pending = True
+        self._autostart_action = 'toggle'
+        self._set_menu_label('autostart', 'Autostart: Updating...')
+        self._autostart_results = queue.Queue(maxsize=1)
+        stop_event, results = self._stop_event, self._autostart_results
+
+        def worker():
+            # Scheduler calls can each wait 20 seconds. Keep Tk and its fan
+            # heartbeat live; finish a started task transaction even on exit.
+            attempted = False
+            try:
+                if stop_event.is_set():
+                    return
+                target = not is_autostart_enabled()
+                attempted = True
+                ok, message = enable_autostart() if target else disable_autostart()
+                enabled = is_autostart_enabled() if ok else None
+                if ok and enabled != target:
+                    ok, message = False, 'Autostart change not confirmed by Task Scheduler'
+                result = AutostartReconcileResult(attempted, ok, message, enabled)
+            except Exception as exc:
+                log.exception('Autostart background toggle failed')
+                result = AutostartReconcileResult(attempted, False, str(exc), None)
+            results.put(result)
+
+        self._autostart_thread = threading.Thread(target=worker, name='HeatMap-autostart', daemon=False)
+        try:
+            self._autostart_thread.start()
+        except RuntimeError as exc:
+            self._autostart_results.put(AutostartReconcileResult(False, False, str(exc), None))
+        self._poll_autostart_check()
 
     def toggle_alerts(self):
         self.alerts_enabled = not self.alerts_enabled
@@ -4545,7 +4596,7 @@ class OverlayApp:
                     previous = self._storage_snapshot.get(number)
                     if "error" in sample and previous:
                         sample.setdefault("name", previous[1].get("name", f"Disk {number}"))
-                    self._storage_snapshot[number] = (time.monotonic(), sample)
+                    self._storage_snapshot[number] = (sample.get('sample_time', time.monotonic()), sample)
             with self.lock:
                 self._storage_snapshot = {number: entry for number, entry in self._storage_snapshot.items()
                                           if number in numbers}
@@ -4568,10 +4619,7 @@ class OverlayApp:
                 and not self._fan_control_paused(attribute)
                 and status.get("state") == "error"
                 and status.get("stop_cause") == "heartbeat_expired"
-                and status.get("restore_confirmed") is True
-                and status.get("restore_errors") == []
-                and not status.get("recovery_pending")
-                and not status.get("settings_conflict")
+                and fan_control_released(status)
                 and recovery["attempts"] == 0
                 and worker.process is not None and worker.process.poll() is not None
             )
@@ -4600,11 +4648,7 @@ class OverlayApp:
             safe_pause = (
                 (getattr(self, "_hardware_pause_reason", None)
                  or self._fan_control_paused(attribute))
-                and status.get("restore_errors") == []
-                and not status.get("recovery_pending")
-                and not status.get("settings_conflict")
-                and (status.get("restore_confirmed") is True
-                     or status.get("control_attempted") is False)
+                and fan_control_released(status)
             )
             if safe_pause:
                 return status
@@ -4615,22 +4659,67 @@ class OverlayApp:
         return status
 
     def update_ui(self):
+        """Keep the polling chain alive after a recoverable rendering failure."""
         if not self.running:
             return
+        started = time.monotonic()
+        previous = getattr(self, '_ui_last_update_time', None)
+        if previous is not None and started - previous > 5:
+            log.warning('UI polling resumed after %.1f seconds', started - previous)
+        self._ui_last_update_time = started
+        try:
+            self._update_ui_once()
+        except Exception:
+            # A single status/render failure must not permanently remove the
+            # only callback sending owner heartbeats. Watchdog timing is unchanged.
+            failures = getattr(self, '_ui_refresh_failures', 0) + 1
+            self._ui_refresh_failures = failures
+            if failures <= 3 or failures % 30 == 0:
+                log.exception('UI refresh failed (%d consecutive); scheduling retry', failures)
+            if self.running:
+                try:
+                    self.root.after(500 if failures <= 3 else 2000, self.update_ui)
+                except (tk.TclError, RuntimeError):
+                    log.exception('UI refresh retry could not be scheduled')
+        else:
+            if getattr(self, '_ui_refresh_failures', 0):
+                log.info('UI refresh recovered after %d failures', self._ui_refresh_failures)
+            self._ui_refresh_failures = 0
+        finally:
+            elapsed = time.monotonic() - started
+            if elapsed > 5:
+                log.warning('UI refresh took %.1f seconds', elapsed)
+
+    def _update_ui_once(self):
+        if not self.running:
+            return
+
+        # Poll both independent owners before touching Tk. A broken GPU label
+        # or report must not starve the case owner while the event loop is alive.
+        failure = None
+        for attribute, setting, status_key in (
+                ('gpu_fan_worker', 'gpu_fans_enabled', '_gpu_fan_status'),
+                ('fan_worker', 'case_fans_enabled', '_case_fan_status')):
+            if hasattr(self, attribute):
+                try:
+                    setattr(self, status_key, self._poll_fan_controller(attribute, setting))
+                except Exception as exc:
+                    if failure is None:
+                        failure = exc
+        if failure is not None:
+            raise failure
 
         if self._fan_control_paused("gpu_fan_worker") and self.config.get("gpu_fans_enabled", False):
             self._set_menu_label("gpu_fans", "Automatic GPU fans: PAUSED (other monitor)")
 
         if hasattr(self, "gpu_fan_worker"):
-            status = self._poll_fan_controller("gpu_fan_worker", "gpu_fans_enabled")
-            self._gpu_fan_status = status
+            status = self._gpu_fan_status
             state = status.get("state", "off")
             text = gpu_fan_mode_text(status)
             self.rows["gpu_fan_control"].config(text=text, fg="#f87171" if state == "error" else
                                                "#facc15" if state == "checking" else "#4ade80")
 
         if hasattr(self, "fan_worker"):
-            self._case_fan_status = self._poll_fan_controller("fan_worker", "case_fans_enabled")
             status = self._case_fan_status
             state = status.get("state", "off")
             reference = full_rpm_reference(status.get("verified_full_rpm"))

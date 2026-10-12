@@ -150,7 +150,7 @@ class ShutdownAuditTests(unittest.TestCase):
         with (
             mock.patch.object(overlay.threading.Thread, "start", side_effect=RuntimeError("cannot start worker")) as start,
             mock.patch.object(overlay, "prepare_verified_pawnio_installer") as download,
-            mock.patch.object(overlay, "_show_error_message") as show_error,
+            mock.patch.object(app, "_show_error_notice") as show_error,
             mock.patch.object(overlay.os, "startfile") as open_folder,
         ):
             for attempt in range(2):

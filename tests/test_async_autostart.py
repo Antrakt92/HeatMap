@@ -141,6 +141,8 @@ class AsyncAutostartTests(unittest.TestCase):
         app._autostart_warning = "Autostart: previous failure"
         with mock.patch.object(overlay, "is_autostart_enabled", side_effect=[False, True]), mock.patch.object(overlay, "enable_autostart", return_value=(True, "enabled")):
             app.toggle_autostart()
+            app._autostart_thread.join(3)
+            app._poll_autostart_check()
         self.assertEqual(app._autostart_warning, "")
 
 

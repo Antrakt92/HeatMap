@@ -1,12 +1,11 @@
 """Bounded Windows filesystem queries, independent of native sensor ownership."""
-import json
 import re
-import time
 
 import psutil
 
 from storage_identity import volume_disk_number
-from storage_probe import PROBE_TIMEOUT_SECONDS, run_bounded_probe
+from storage_probe import (PROBE_TIMEOUT_SECONDS, run_bounded_probe,
+                           _reply_sample_time, _send_probe_message)
 from thermal_policy import finite
 
 
@@ -32,7 +31,7 @@ def _worker(mount, pipe):
     mount, include_identity = mount if isinstance(mount, tuple) else (mount, True)
 
     def capacity(result):
-        pipe.send_bytes(json.dumps(result, allow_nan=False).encode('utf-8'))
+        _send_probe_message(pipe, result)
 
     try:
         try:
@@ -40,7 +39,7 @@ def _worker(mount, pipe):
         except (OSError, psutil.Error, ValueError) as exc:
             result = {'error': str(exc)[:500]}
         try:
-            pipe.send_bytes(json.dumps(result, allow_nan=False).encode('utf-8'))
+            _send_probe_message(pipe, result)
         except OSError:
             pass  # Owner cancelled or timed out; this process owns no controls.
     finally:
@@ -98,7 +97,7 @@ def probe_volume(mount=None, cancelled=lambda: False, *, timeout=PROBE_TIMEOUT_S
                 raise ValueError('Invalid volume capacity progress')
             if progress:
                 raise ValueError('Duplicate volume capacity progress')
-            progress.update(sample, sample_time=time.monotonic())
+            progress.update(sample, sample_time=_reply_sample_time(result))
             return None
         if 'error' in sample:
             return failure(sample['error'])
@@ -107,6 +106,8 @@ def probe_volume(mount=None, cancelled=lambda: False, *, timeout=PROBE_TIMEOUT_S
                    for key in ('name', 'total_bytes', 'free_bytes')):
                 raise ValueError('Volume capacity changed within the reply')
             sample['sample_time'] = progress['sample_time']
+        elif "sample_time" in result:
+            sample["sample_time"] = _reply_sample_time(result)
         return sample
 
     def failure(error):

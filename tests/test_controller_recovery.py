@@ -102,7 +102,7 @@ class ControllerRecoveryTests(unittest.TestCase):
 
     def test_monitor_coexistence_does_not_restart_or_mislabel_fan_workers(self):
         app, worker, _ = self.app(state='stopped', stop_cause='requested_stop',
-                                  control_attempted=False, restore_confirmed=False)
+                                  control_attempted=False, restore_confirmed=False, recovery_pending=False)
         app._monitor_coexistence = True
         status = self.poll(app, 0, 'gpu_fan_worker', 'gpu_fans_enabled')
         self.assertEqual(status['state'], 'stopped')

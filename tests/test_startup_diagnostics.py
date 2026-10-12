@@ -156,7 +156,7 @@ class StartupDiagnosticsTests(unittest.TestCase):
         app._diagnostics_running = True
         app._diagnostics_results = queue.Queue()
         app._diagnostics_results.put((False, "synthetic failure"))
-        with mock.patch.object(overlay, "_show_error_message") as show:
+        with mock.patch.object(app, "_show_error_notice") as show:
             app._poll_diagnostics()
         self.assertFalse(app._diagnostics_running)
         app._set_menu_label.assert_called_with("diagnostics", "Copy diagnostics")
@@ -346,7 +346,7 @@ class StartupDiagnosticsTests(unittest.TestCase):
         with (
             mock.patch.object(overlay.threading.Thread, "start", side_effect=RuntimeError("cannot start worker")),
             mock.patch.object(overlay, "init_hardware_monitor") as initialize,
-            mock.patch.object(overlay, "_show_error_message") as show,
+            mock.patch.object(app, "_show_error_notice") as show,
         ):
             app.copy_diagnostics()
             app._poll_diagnostics()

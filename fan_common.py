@@ -91,6 +91,27 @@ def restore_with_retry(restore):
     return errors
 
 
+def fan_control_released(status):
+    """Recognize terminal proof of restoration or positively untouched control."""
+    if (not isinstance(status, dict) or status.get('state') not in ('error', 'stopped')
+            or status.get('restore_errors') != []
+            or status.get('settings_conflict') is not None
+            or 'status_publication_error' in status):
+        return False
+    pending = status.get('recovery_pending')
+    attempted = status.get('control_attempted')
+    if (pending is not None and type(pending) is not bool
+            or attempted is not None and type(attempted) is not bool
+            or pending is True):
+        return False
+    if status.get('restore_confirmed') is True:
+        return True
+    # No restoration occurred in standby. Require explicit negative evidence;
+    # an absent/unknown journal or command history cannot authorize a new owner.
+    return (status.get('restore_confirmed') is False
+            and attempted is False and pending is False)
+
+
 def stage_json_payload(path, payload):
     """Atomically stage a JSON payload at a sibling tmp path; returns it.
 
@@ -143,7 +164,7 @@ class StatusPolicy:
     reason_error: str
     stop_cause_error: str
     restoration_error: str
-    restoration_keys: tuple       # case also type-checks control_attempted; GPU does not
+    restoration_keys: tuple       # Strict bool fields; nullable GPU evidence uses extra_late.
     state_error: Optional[str]      # standalone state check; None to skip
     launch_error: str               # out-of-window stamp
     stale_error: str

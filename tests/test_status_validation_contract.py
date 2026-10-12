@@ -52,7 +52,7 @@ MATRIX = [
     ('bad restoration', {'restore_confirmed': 'yes'},
      'Invalid case fan restoration report', 'Invalid GPU restoration report'),
     ('bad attempted type', {'control_attempted': 'false'},
-     'Invalid case fan restoration report', None),
+     'Invalid case fan restoration report', 'Invalid GPU restoration report'),
     ('low command', {'command_pct': 50},
      'Invalid case fan controller command report', None),
     ('tiny command', {'command_pct': 20},

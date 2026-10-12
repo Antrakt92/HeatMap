@@ -14,6 +14,20 @@ from storage_identity import disk_properties
 PROBE_TIMEOUT_SECONDS = 8
 STORAGE_STALE_SECONDS = 45
 log = logging.getLogger(__name__)
+_PROBE_STAGES = frozenset({"start", "runtime", "properties", "smart", "read", "close"})
+
+
+def _send_probe_message(pipe, result):
+    pipe.send_bytes(json.dumps(dict(result, sample_time=time.monotonic()),
+                               allow_nan=False).encode("utf-8"))
+
+
+def _reply_sample_time(result):
+    now = time.monotonic()
+    stamp = result.get("sample_time", now)
+    if finite(stamp, 0, now) is None:
+        raise ValueError("Invalid probe sample time")
+    return stamp
 
 
 def display_name(model):
@@ -23,7 +37,7 @@ def display_name(model):
     ).strip() or model
 
 
-def _native_sample(number, identified=lambda sample: None):
+def _native_sample(number, identified=lambda sample: None, progress=lambda stage: None):
     """Use the verified 1.1.1 bundle without its global device enumeration.
 
     SYNC: the internal constructor is from the pinned DiskInfoToolkit source
@@ -33,6 +47,7 @@ def _native_sample(number, identified=lambda sample: None):
     These processes never own fan controllers or modify user files.
     """
     require_hardware_access("monitor")
+    progress("runtime")
     from setup import verify_lib_manifest
     ok, messages = verify_lib_manifest()
     if not ok:
@@ -40,11 +55,13 @@ def _native_sample(number, identified=lambda sample: None):
     # Prefer the driver's standard temperature property. It avoids raw SMART
     # identification on devices whose ATA requests block despite usable Windows
     # temperature data. Unsupported properties fall back to the bundled reader.
+    progress("properties")
     properties = disk_properties(number, identified)
     if properties and properties.get("temp") is not None:
         properties["name"] = display_name(properties["name"])
         properties["source"] = "Windows storage temperature property"
         return properties
+    progress("runtime")
     import clr
     import System
     from System.Reflection import Assembly, BindingFlags
@@ -65,11 +82,13 @@ def _native_sample(number, identified=lambda sample: None):
     # The preceding Windows query and runtime verification can take seconds.
     # Identification in the constructor already performs native disk I/O.
     require_hardware_access("monitor")
+    progress("smart")
     storage = constructors[0].Invoke(System.Array[System.Object](["", descriptor]))
     try:
         if not storage_type.GetProperty("IsValid", flags).GetValue(storage, None):
             raise RuntimeError("Storage identification unavailable")
         require_hardware_access("monitor")
+        progress("read")
         storage.Update()
         sample = {"name": display_name(str(storage.Model).strip()), "disk_number": number,
                   "temp": finite(storage.Smart.Temperature, 1, 150)}
@@ -102,20 +121,28 @@ def _native_sample(number, identified=lambda sample: None):
         sample["source"] = "DiskInfoToolkit SMART"
         return sample
     finally:
-        storage.Dispose()
+        try:
+            progress("close")
+        finally:
+            storage.Dispose()
 
 
 def _probe_worker(number, pipe):
     def identified(sample):
         sample['name'] = display_name(sample['name'])
         sample['phase'] = 'identified'
-        pipe.send_bytes(json.dumps(sample, allow_nan=False).encode('utf-8'))
+        _send_probe_message(pipe, sample)
+
+    def progress(stage):
+        _send_probe_message(pipe, {"disk_number": number, "phase": "stage", "stage": stage})
+
     try:
         try:
-            result = _native_sample(number, identified)
+            progress("start")
+            result = _native_sample(number, identified, progress)
         except Exception as exc:
             result = {"disk_number": number, "error": str(exc)[:500]}
-        pipe.send_bytes(json.dumps(result, allow_nan=False).encode("utf-8"))
+        _send_probe_message(pipe, result)
     finally:
         pipe.close()
 
@@ -178,17 +205,31 @@ def run_bounded_probe(worker, argument, consume, failure, cancelled, timeout):
         started = True
         send.close()
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        while True:
+            now = time.monotonic()
             if cancelled():
                 return None
-            if receive.poll(min(0.1, max(0, deadline - time.monotonic()))):
+            expired = now >= deadline
+            if expired and timeout <= 0:
+                break
+            ready = receive.poll(0 if expired else min(0.1, max(0, deadline - time.monotonic())))
+            if ready:
                 result = json.loads(receive.recv_bytes(16384).decode("utf-8"))
+                # The owner can be descheduled while a finished child already
+                # has its reply queued. Accept only proven timely completion;
+                # never extend the native query deadline or refresh sample age.
+                stamped = isinstance(result, dict) and "sample_time" in result
+                if (expired or stamped) and (not isinstance(result, dict)
+                        or finite(result.get("sample_time"), 0, deadline) is None):
+                    break
                 sample = consume(result)
                 if sample is not None:
                     return sample
                 # A finished worker can have both identification and final
                 # messages queued. Its exit does not invalidate unread replies.
                 continue
+            if expired:
+                break
             if not process.is_alive() and not receive.poll(0):
                 break
         return failure("probe timed out or exited without a reading")
@@ -229,17 +270,31 @@ def probe_disk(number, cancelled=lambda: False, *, timeout=PROBE_TIMEOUT_SECONDS
     metadata = {}
 
     def consume(result):
+        if isinstance(result, dict) and result.get("phase") == "stage":
+            if (type(result.get("disk_number")) is not int or result["disk_number"] != number
+                    or result.get("stage") not in _PROBE_STAGES):
+                raise ValueError("Invalid storage probe stage")
+            _reply_sample_time(result)
+            metadata["probe_stage"] = result["stage"]
+            return None
         sample = _validated_sample(result, number)
         if result.get('phase') == 'identified':
             if 'error' in sample:
                 raise ValueError("Invalid storage identification message")
             metadata['name'] = sample['name']
             return None
+        if "sample_time" in result:
+            sample["sample_time"] = _reply_sample_time(result)
         return dict(metadata, **sample)
+
+    def failure(error):
+        stage = metadata.get("probe_stage")
+        detail = "Storage " + error + (f" (last stage: {stage})" if stage else "")
+        return {"disk_number": number, **metadata, "error": detail}
 
     return run_bounded_probe(
         _probe_worker, number, consume,
-        lambda error: {"disk_number": number, **metadata, "error": "Storage " + error},
+        failure,
         cancelled, timeout,
     )
 

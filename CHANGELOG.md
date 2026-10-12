@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.4.1 — 2026-10-12
+
+- Recover a GPU heartbeat timeout after untouched driver-curve standby, as well
+  as after verified restoration. Require explicit no-write/no-pending evidence;
+  unknown ownership, conflicts and restore errors still block the single retry.
+- Keep the UI polling chain alive after a transient refresh failure. Move manual
+  Task Scheduler changes off the UI thread and show in-app notices without a
+  native modal loop that stops fan-owner heartbeats. Keep the 15-second watchdog.
+- Drain already queued storage/volume replies after a scheduling delay only
+  when their timestamps prove completion within the existing deadline. Preserve
+  their actual age, reject late replies and honor cancellation after the deadline.
+- Include the last completed probe stage in disk timeout diagnostics, and log
+  long UI refreshes and polling gaps to help identify future interruptions.
+
 ## 1.4.0 — 2026-10-12
 
 - Add an explicitly commissioned SYS_FAN1/2/3 profile for the Gigabyte B850
