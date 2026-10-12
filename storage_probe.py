@@ -1,5 +1,6 @@
 """Bounded sensor probes of disks proven by Windows volume extents."""
 import json
+import logging
 import multiprocessing
 from pathlib import Path
 import re
@@ -12,6 +13,7 @@ from storage_identity import disk_properties
 
 PROBE_TIMEOUT_SECONDS = 8
 STORAGE_STALE_SECONDS = 45
+log = logging.getLogger(__name__)
 
 
 def display_name(model):
@@ -166,11 +168,12 @@ def run_bounded_probe(worker, argument, consume, failure, cancelled, timeout):
     """
     if cancelled():
         return None
-    context = multiprocessing.get_context("spawn")
-    receive, send = context.Pipe(duplex=False)
-    process = context.Process(target=worker, args=(argument, send), daemon=True)
+    receive = send = process = None
     started = False
     try:
+        context = multiprocessing.get_context("spawn")
+        receive, send = context.Pipe(duplex=False)
+        process = context.Process(target=worker, args=(argument, send), daemon=True)
         process.start()
         started = True
         send.close()
@@ -192,8 +195,12 @@ def run_bounded_probe(worker, argument, consume, failure, cancelled, timeout):
     except (OSError, EOFError, ValueError, RuntimeError) as exc:
         return failure("probe failed: " + str(exc)[:300])
     finally:
-        receive.close()
-        send.close()
+        for name, pipe in (("receive", receive), ("send", send)):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except OSError:
+                    log.warning("Storage probe %s pipe could not close", name, exc_info=True)
         if started:
             process.join(timeout=0.2)
             if process.is_alive():
@@ -209,6 +216,11 @@ def run_bounded_probe(worker, argument, consume, failure, cancelled, timeout):
                 # finalizer still closes process handles when it is collected.
                 from multiprocessing.process import _children
                 _children.discard(process)
+        elif process is not None:
+            try:
+                process.close()
+            except (OSError, ValueError):
+                log.warning("Storage probe process could not close after failed start", exc_info=True)
 
 
 def probe_disk(number, cancelled=lambda: False, *, timeout=PROBE_TIMEOUT_SECONDS):

@@ -2773,6 +2773,70 @@ def _reverify_pawnio_installer(path, metadata):
 # --- Main overlay class ---
 class OverlayApp:
     def __init__(self, autostart_result=None):
+        try:
+            self._initialize(autostart_result)
+        except BaseException:
+            try:
+                self._abort_startup()
+            except Exception:
+                log.exception('Failed to complete startup cleanup')
+            raise
+
+    def _abort_startup(self):
+        """Unwind partial construction without saving incomplete UI preferences."""
+        self.running = False
+        stop = getattr(self, '_stop_event', None)
+        if stop is not None:
+            stop.set()
+        root = getattr(self, 'root', None)
+        if root is not None:
+            try:
+                root.withdraw()
+            except tk.TclError:
+                pass
+        self._stop_fan_workers()
+        # Both owners receive stop before either wait. All native restoration
+        # and monitor cleanup share one deadline, even after thread-start failure.
+        deadline = time.monotonic() + 15
+        for attribute in ('gpu_fan_worker', 'fan_worker'):
+            worker = getattr(self, attribute, None)
+            process = getattr(worker, 'process', None)
+            if process is None:
+                continue
+            try:
+                process.wait(timeout=max(0, deadline - time.monotonic()))
+                status = worker.poll()
+                safe = (isinstance(status, dict) and status.get('state') in ('error', 'stopped')
+                        and status.get('restore_errors') == []
+                        and not status.get('recovery_pending') and not status.get('settings_conflict')
+                        and (status.get('restore_confirmed') is True
+                             or status.get('control_attempted') is False))
+                if not safe:
+                    log.error('%s startup restoration remains unconfirmed: %s', attribute, status)
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                log.exception('%s startup restoration did not finish', attribute)
+        for attribute in ('sensor_thread', 'storage_thread', 'volume_thread'):
+            thread = getattr(self, attribute, None)
+            if thread is not None and thread.is_alive():
+                try:
+                    thread.join(timeout=max(0, deadline - time.monotonic()))
+                except RuntimeError:
+                    log.debug('Startup thread did not finish: %s', attribute, exc_info=True)
+        if root is not None:
+            try:
+                for callback in list(root.tk.call('after', 'info') or ()):
+                    try:
+                        root.after_cancel(callback)
+                    except tk.TclError:
+                        log.debug('Startup callback already removed', exc_info=True)
+            except tk.TclError:
+                log.debug('Startup callbacks unavailable', exc_info=True)
+            try:
+                root.destroy()
+            except tk.TclError:
+                log.debug('Startup window already destroyed', exc_info=True)
+
+    def _initialize(self, autostart_result=None):
         # Hardware discovery runs on the sensor thread so it cannot delay Tk.
         self.computer = None
         self.config, config_warning = load_config_result()
@@ -3066,7 +3130,9 @@ class OverlayApp:
         try:
             value = simpledialog.askinteger("CPU fan percentage", "Rated maximum RPM for the CPU cooler fans.\n"
                 "NH-U12A standard: 2000 RPM; with low-noise adapter: 1700 RPM.\n"
-                "0 disables the estimate. This changes display only, not fan speed.",
+                "Used for display estimates and B850 case assistance when duty is unavailable.\n"
+                "Case assistance uses the saved value after restarting HeatMap.\n"
+                "0 disables the estimate; missing CPU duty/reference requires full case airflow.",
                 initialvalue=self.config.get("cpu_fan_reference_rpm", 0), minvalue=0, maxvalue=10000, parent=self.root)
         except tk.TclError:
             if self.running:

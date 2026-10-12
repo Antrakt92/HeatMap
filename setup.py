@@ -527,6 +527,8 @@ def _verify_authenticode(path, expected, run_command=None):
         actual = json.loads(result.stdout)
     except Exception as e:
         return [f"Authenticode verification returned invalid JSON: {e}"]
+    if not isinstance(actual, dict):
+        return ["Authenticode verification returned invalid JSON: expected an object"]
     messages = []
     for field in ("status", "subject", "thumbprint"):
         actual_value = str(actual.get(field.capitalize(), "")).strip()
