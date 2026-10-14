@@ -1,5 +1,28 @@
 # HeatMap Audit Backlog
 
+B850 no-reboot firmware follow-up (2026-10-14): three independent elevated
+read paths agree that the HWM index/data ports at 0xA45/0xA46 return 0xFF:
+strict successful PawnIO IOCTL replies, the installed signed Gigabyte driver,
+and the board's GSA1 firmware WMI interface. Configuration ID 0x8696, LDN4
+activation and base 0xA40 remain readable. This is a confirmed native-access
+failure; the upstream cause remains unresolved, rather than a proven GCC
+conflict or a guaranteed reboot fix. GCC remains running and Windows was not
+restarted, as requested.
+
+Firmware PCI method metadata reverses the device/function parameter names;
+compensating for the actual AML packing validates AMD LPC identity 0x790E1022.
+Both firmware ECAM and the installed driver still return all ones for legacy
+decode/SPI offsets beyond 0x40; those values are not usable register baselines.
+The documented AMD eSPI MMIO aperture at 0xFEC20000 is readable through GSA1.
+Decode 0x001F1F06 includes enabled extended I/O window 4, base 0xA00 and size
+128, which covers the HWM ports. Peripheral/VW/OOB channels are enabled
+(slave configuration 0xE000000E); status 0x10000000 has command-complete only,
+with no recorded no-response/timeout/bus-error bits. Thus an absent eSPI window
+or disabled peripheral channel is excluded by fresh reads; no routing writes
+are justified. Neither the installed SDK nor the inspected firmware interface
+provided an alternate RPM reader or a validated non-reboot recovery operation.
+The pending fan recovery journal is retained and restoration remains unconfirmed.
+
 B850 native-access/coexistence audit (2026-10-14): the exact board's sensorless
 IT8696E now marks its sample partial and requests the existing guarded LHM
 reinitialization, at the existing 30-second interval. LHM's constructor can
@@ -30,8 +53,9 @@ empty baseline now explicitly advises restarting Windows rather than a generic
 controller error. Regression coverage includes recovery before tach discovery.
 On this boot, elevated read-only LHM checks still found an IT8696E with no
 sensors and invalid native register readback; software handback is unconfirmed
-and the recovery journal is retained. A Windows restart and fresh readback are
-required before claiming hardware recovery. All four independent disk probes
+and the recovery journal is retained. Fresh successful native readback is
+required before claiming hardware recovery; reboot recovery is unverified.
+All four independent disk probes
 succeeded, including disk 0 in 0.12 seconds; the earlier disk timeout's cause
 was not established. No DLLs, drivers, firmware settings or protection checks
 were changed.
