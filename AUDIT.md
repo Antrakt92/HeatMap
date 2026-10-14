@@ -1,5 +1,9 @@
 # HeatMap Audit Backlog
 
+Settings interaction (2026-10-15): right-click no longer opens settings. The
+header's left-click gear button remains the settings entry point; control help
+and README instructions match it.
+
 B850 no-reboot firmware follow-up (2026-10-14): three independent elevated
 read paths agree that the HWM index/data ports at 0xA45/0xA46 return 0xFF:
 strict successful PawnIO IOCTL replies, the installed signed Gigabyte driver,

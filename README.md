@@ -579,7 +579,7 @@ those sensors are absent, the highest available CPU temperature is used.
 - **Dragging** — hold the title bar and drag it wherever you want
 - **Alerts** — sound at the red thresholds in the table above; repeats no more than once a minute, and stale data does not trigger alerts
 - **Autostart** — a least-privilege task starts HeatMap after login with no configured delay and shows the normal UAC prompt before accessing sensors. This does not promise to start before other applications: startup order and UAC timing depend on Windows and the user.
-- **Always on top** — toggle through the right-click menu
+- **Always on top** — toggle through the settings menu (⚙)
 - **Position memory** — remembers its location between sessions
 
 When `run_as_admin.bat` is started from Codex, HeatMap relays startup through
@@ -718,13 +718,13 @@ Verified environment: Python 3.13, pythonnet 3.1.0, psutil 7.2.2. Exact producti
 
 CPU, GPU, and CASE COOLING have section headings. The standalone cyan RAM row
 and orange drive rows follow without extra headings.
-The ⚙ title-bar button and right-click open the same menu with four sections.
+The ⚙ title-bar button opens the settings menu with four sections.
 The widget stays temporarily raised while the menu or CPU reference dialog is open.
 
 | Action | How |
 |----------|-----|
 | Move | Hold and drag the title bar |
-| Settings | ⚙ or right-click the widget |
+| Settings | Click ⚙ in the title bar |
 | Always on top | Display → Always on top |
 | Autostart | Display → Autostart |
 | Sound on/off | Alerts & limits → Alerts |

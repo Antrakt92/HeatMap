@@ -3049,7 +3049,7 @@ class OverlayApp:
         self.health_label.bind("<Button-1>", lambda _event: self.copy_diagnostics())
         self._fit_content()
 
-        # --- Grouped settings, also reachable from the header button ---
+        # --- Grouped settings, opened from the header button ---
         self.topmost = False
         self.peek_enabled = self.config.get("peek_enabled", True)
         self.menu = self._new_menu(self.root)
@@ -3084,7 +3084,6 @@ class OverlayApp:
             self._add_menu_item("pawnio", "Prepare verified PawnIO repair...", self.prepare_pawnio_repair, menus["Diagnostics"])
         self.menu.add_separator()
         self.menu.add_command(label="Close HeatMap", command=self.quit)
-        self.root.bind("<Button-3>", self.show_menu)
 
         # --- Temporary raise from the edge ---
         self.peek_visible = False
@@ -3524,7 +3523,7 @@ class OverlayApp:
         limits += (f"\nFan stall: previously running, then 0 RPM"
                    f" for {TACH_PERSISTENCE_SECONDS} seconds under heat.")
         self._show_info_notice("HeatMap sensor guide", meanings + limits +
-                           "\n\nClick the warning panel to copy full diagnostics. Control sound with Alerts in the right-click menu.")
+                           "\n\nClick the warning panel to copy full diagnostics. Control sound with Alerts in the settings menu (⚙).")
 
     def _poll_diagnostics(self):
         if not self.running or not getattr(self, "_diagnostics_running", False):
