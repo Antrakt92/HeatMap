@@ -2012,6 +2012,15 @@ def _read_hardware_block(hw, HardwareType, SensorType, data, candidates, update_
         data["disks"].append(disk_data)
 
     elif hw_type == HardwareType.Motherboard:
+        if str(hw.Name) == "Gigabyte B850 AORUS ELITE WIFI7 ICE":
+            for sub in hw.SubHardware:
+                if (str(getattr(sub, "Identifier", "")) == "/lpc/it8696e/0"
+                        and not list(sub.Sensors)):
+                    # The pinned IT87XX constructor can return before creating
+                    # sensors after a failed native read. Update cannot finish
+                    # that constructor; use the owner's existing guarded reopen.
+                    data[SENSOR_STATUS_KEY] = SENSOR_STATUS_PARTIAL
+                    data[SENSOR_REINIT_KEY] = True
         fan_sensors = []
         control_sensors = []
         board_fans = []

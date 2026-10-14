@@ -1,5 +1,26 @@
 # HeatMap Audit Backlog
 
+B850 native-access/coexistence audit (2026-10-14): the exact board's sensorless
+IT8696E now marks its sample partial and requests the existing guarded LHM
+reinitialization, at the existing 30-second interval. LHM's constructor can
+return before creating sensors after an invalid vendor/configuration read;
+ordinary Update calls cannot repair that object. Regressions exercise empty
+and healthy controllers, other-board isolation, repeated failed opens followed
+by recovery, resource cleanup and retained CPU/GPU readings. GCC is left running;
+its background presence is not treated as a case-controller ownership conflict.
+
+Elevated standalone reads on the same boot confirmed configuration ID 0x8696,
+active LDN4 and base 0xA40, but HWM address/data ports returned 0xFF, including
+vendor register 0x58 and control register 0x13. No fan commands were sent by
+these diagnostics. The existing signed bridge found no MMIO mapping and refused
+its addressing-state query as unsupported. An exploratory PCI-port query was
+discarded: those ports are blacklisted by the signed LpcIO module, so its output
+is not chipset-configuration evidence. Chipset decode/firmware/native-driver
+causes remain candidates; neither GCC causation nor recovery by a Windows reboot
+has been demonstrated. The original restart recommendation is a recovery step,
+not a proven root cause or guaranteed fix. No chipset registers, driver, DLL,
+BIOS setting or other monitoring application were changed.
+
 B850 interrupted-start recovery follow-up (2026-10-14): register restoration no
 longer requires published RPM sensors before the first LHM update. Exact board,
 chip, native backend and journal/register checks remain mandatory; new takeover

@@ -1,11 +1,33 @@
 """B850 CPU tach mapping must be board/chip specific and independent of fan control."""
 import unittest
+from types import SimpleNamespace as NS
+from unittest import mock
 
 import overlay
 from test_overlay_helpers import _FakeHardware, _FakeSensor, _fake_lhm_modules
 
 
 class B850FanReadingsTests(unittest.TestCase):
+    def test_sensorless_exact_b850_controller_requests_monitor_reinitialization(self):
+        modules, hardware, _sensor_type = _fake_lhm_modules()
+        chip = _FakeHardware("ITE", hardware.Motherboard)
+        chip.Identifier = "/lpc/it8696e/0"
+        board = _FakeHardware("Gigabyte B850 AORUS ELITE WIFI7 ICE", hardware.Motherboard,
+                              sub_hardware=[chip])
+        with mock.patch.dict("sys.modules", modules):
+            data = overlay.read_sensors(NS(Hardware=[board]))
+        self.assertTrue(data.get(overlay.SENSOR_REINIT_KEY))
+        self.assertEqual(data[overlay.SENSOR_STATUS_KEY], overlay.SENSOR_STATUS_PARTIAL)
+
+    def test_sensorless_other_board_does_not_inherit_b850_retry(self):
+        modules, hardware, _sensor_type = _fake_lhm_modules()
+        chip = _FakeHardware("ITE", hardware.Motherboard)
+        chip.Identifier = "/lpc/it8696e/0"
+        board = _FakeHardware("Other motherboard", hardware.Motherboard, sub_hardware=[chip])
+        with mock.patch.dict("sys.modules", modules):
+            data = overlay.read_sensors(NS(Hardware=[board]))
+        self.assertFalse(data.get(overlay.SENSOR_REINIT_KEY))
+
     def read(self, board_name="Gigabyte B850 AORUS ELITE WIFI7 ICE", chip="it8696e", reverse=False):
         _, hardware, sensor_type = _fake_lhm_modules()
         readings = []
@@ -15,8 +37,9 @@ class B850FanReadingsTests(unittest.TestCase):
             readings.append(sensor)
         if reverse:
             readings.reverse()
-        board = _FakeHardware(board_name, hardware.Motherboard,
-                              sub_hardware=[_FakeHardware("ITE", hardware.Motherboard, sensors=readings)])
+        controller = _FakeHardware("ITE", hardware.Motherboard, sensors=readings)
+        controller.Identifier = f"/lpc/{chip}/0"
+        board = _FakeHardware(board_name, hardware.Motherboard, sub_hardware=[controller])
         data = overlay._empty_sensor_data()
         overlay._read_hardware_block(board, hardware, sensor_type, data, {})
         return data
@@ -24,6 +47,7 @@ class B850FanReadingsTests(unittest.TestCase):
     def test_cpu_and_optional_tach_map_by_identity_not_enumeration(self):
         for reverse in (False, True):
             data = self.read(reverse=reverse)
+            self.assertFalse(data.get(overlay.SENSOR_REINIT_KEY))
             self.assertEqual((data["cpu_fan"], data["cpu_optional_fan"]), (1600, 1650))
             self.assertEqual(data["cpu_fan_id"], "/lpc/it8696e/0/fan/0")
             self.assertEqual(data["cpu_optional_fan_id"], "/lpc/it8696e/0/fan/4")

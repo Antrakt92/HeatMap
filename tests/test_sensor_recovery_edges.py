@@ -101,6 +101,29 @@ class SensorRecoveryEdgeTests(unittest.TestCase):
         self.assertEqual(app.sensor_data["gpu_temp"], 62)
         computer.Close.assert_called_once_with()
 
+    def test_sensorless_b850_reopens_at_existing_interval_and_preserves_cpu_gpu(self):
+        computers = [self.computer() for _ in range(3)]
+        for index, computer in enumerate(computers):
+            sensors = [] if index < 2 else [_FakeSensor("Fan #1", self.sensor_type.Fan, 1400)]
+            chip = _FakeHardware("ITE", self.hardware_type.Motherboard, sensors=sensors)
+            chip.Identifier = "/lpc/it8696e/0"
+            computer.Hardware.append(_FakeHardware("Gigabyte B850 AORUS ELITE WIFI7 ICE",
+                self.hardware_type.Motherboard, sub_hardware=[chip]))
+        app = sensor_app(25, computers[0])
+        attempts = []
+        def initialize():
+            attempts.append(app._stop_event.now)
+            return computers[len(attempts)]
+        with (mock.patch.object(overlay, "init_hardware_monitor", side_effect=initialize),
+              mock.patch.object(overlay.time, "monotonic", side_effect=lambda: app._stop_event.now)):
+            app.sensor_loop()
+        self.assertEqual(len(attempts), 2)
+        self.assertGreaterEqual(attempts[1] - attempts[0], overlay.SENSOR_INIT_RETRY_SECONDS)
+        self.assertEqual((app.sensor_data["cpu_temp"], app.sensor_data["gpu_temp"]), (45, 62))
+        self.assertNotIn(overlay.SENSOR_REINIT_KEY, app.sensor_data)
+        for computer in computers:
+            computer.Close.assert_called_once_with()
+
     def test_failed_storage_cannot_publish_cached_success_while_waiting_for_recovery(self):
         computers = [self.computer() for _ in range(3)]
         for index, computer in enumerate(computers):
