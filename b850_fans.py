@@ -156,17 +156,19 @@ def controller(computer):
 
 def select_tachs(computer, *, startup=False, require_running=True):
     chip = controller(computer)
+    if not require_running:
+        # Recovery uses only the verified native register interface and journal.
+        # LHM publishes active tachs after Update; their absence must not block
+        # returning interrupted ownership to firmware before sensor readiness.
+        return chip, []
     selected = []
     for index, name in zip((1, 2, 3), TARGETS):
         matches = [s for s in chip.Sensors if str(s.SensorType) == "Fan"
                    and str(s.Identifier) == f"{CHIP}/fan/{index}"]
+        if not matches and startup:
+            raise StartupNotReady(f"Waiting for {name} tachometer discovery")
         if len(matches) != 1 or str(matches[0].Name) != f"Fan #{index + 1}":
             raise RuntimeError(f"{name}: tachometer identity missing or ambiguous")
-        if not require_running:
-            # Interrupted register ownership must be returned even when its
-            # tachometer cannot prove rotation. Identity checks still apply.
-            selected.append(matches[0])
-            continue
         if matches[0].Value is None:
             raise StartupNotReady(f"Waiting for {name} tachometer")
         value = matches[0].Value
@@ -212,7 +214,7 @@ class RegisterBackend:
         args = self.Array[self.Object]([self.Byte(register), self.Boolean(False)])
         value = int(self.read_method.Invoke(self.sio, args))
         if not bool(args[1]):
-            raise RuntimeError("Unreadable B850 register")
+            raise RuntimeError(f"Unreadable B850 register 0x{register:02X}; native I/O readback failed")
         return value
 
     def write(self, register, value):

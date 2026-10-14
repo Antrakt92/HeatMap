@@ -203,6 +203,34 @@ class B850SessionTests(unittest.TestCase):
 
 
 class B850IntegrationTests(unittest.TestCase):
+    def test_recovery_needs_controller_identity_but_not_published_tachs(self):
+        chip = NS(Identifier=b850.CHIP, Sensors=[])
+        board = NS(HardwareType="Motherboard", Name=b850.BOARD, SubHardware=[chip])
+        computer = NS(Hardware=[board])
+        self.assertEqual(b850.select_tachs(computer, require_running=False), (chip, []))
+        board.Name = "foreign"
+        with self.assertRaises(RuntimeError):
+            b850.select_tachs(computer, require_running=False)
+
+    def test_startup_missing_tachs_wait_but_ambiguous_identity_fails_closed(self):
+        chip = NS(Identifier=b850.CHIP, Sensors=[])
+        computer = NS(Hardware=[NS(HardwareType="Motherboard", Name=b850.BOARD, SubHardware=[chip])])
+        with self.assertRaises(b850.StartupNotReady):
+            b850.select_tachs(computer, startup=True)
+        with self.assertRaises(RuntimeError):
+            b850.select_tachs(computer)
+        tach = NS(Name="Fan #2", Identifier=f"{b850.CHIP}/fan/1", SensorType="Fan", Value=700)
+        chip.Sensors = [tach, tach]
+        with self.assertRaises(RuntimeError) as error:
+            b850.select_tachs(computer, startup=True)
+        self.assertNotIsInstance(error.exception, b850.StartupNotReady)
+
+    def test_pending_recovery_without_baseline_requires_explicit_restart_advice(self):
+        status = dict(state="error", baseline=[], controlled_channels=list(b850.TARGETS),
+                      control_attempted=True, restore_confirmed=False, restore_errors=[],
+                      recovery_pending=True, reason="Unreadable B850 register")
+        self.assertIn("restart Windows", overlay._case_fan_advice(status))
+
     def test_restart_recognizes_junction_alias_but_not_unrelated_script(self):
         with mock.patch.object(enable_case_fans.os.path, "samefile", return_value=True):
             self.assertTrue(enable_case_fans.same_overlay_file("F:/GitHub/HeatMap/overlay.py", "C:/old/overlay.py"))
@@ -257,6 +285,11 @@ class B850WorkerTests(unittest.TestCase):
             control_pct=round(backend.values[b850.DUTIES[index]] * 100 / 255))
             for index, name, tach in zip((1, 2, 3), b850.TARGETS, backend.tachs)]
         chip = NS(Identifier=b850.CHIP, Sensors=backend.tachs)
+        if fault == "recovery_hidden_tachs":
+            interrupted = b850.B850Session(backend, Path(path).parent / "b850-recovery.json", Bus)
+            interrupted.apply(72)
+            backend.writes.clear()
+            chip.Sensors = []
         computer = NS(Hardware=[NS(HardwareType="Motherboard", Name=b850.BOARD, SubHardware=[chip])],
                       Open=mock.Mock(), Close=mock.Mock())
         clock = NS(now=100, stopped=False, samples=0)
@@ -274,6 +307,8 @@ class B850WorkerTests(unittest.TestCase):
                     clock.stopped = True
         def read(_computer, **_kwargs):
             clock.samples += 1
+            if fault == "recovery_hidden_tachs":
+                chip.Sensors = backend.tachs
             if fault == "startup_zero" and clock.samples == 1:
                 backend.tachs[0].Value = 0
             elif fault == "startup_zero":
@@ -305,7 +340,8 @@ class B850WorkerTests(unittest.TestCase):
               mock.patch.object(overlay, "load_config_result", return_value=(dict(cpu_fan_reference_rpm=2000, gpu_fan_max_rpm=3442), None)),
               mock.patch.object(overlay, "read_sensors", side_effect=read),
               mock.patch("shared_fans.make_shared_computer", return_value=computer),
-              mock.patch.object(b850, "RegisterBackend", return_value=backend),
+              mock.patch.object(b850, "RegisterBackend", side_effect=lambda comp, **kw:
+                                (b850.select_tachs(comp, **kw), backend)[1]),
               mock.patch.object(b850, "B850Session", side_effect=lambda a, b: real_session(a, b, Bus)),
               mock.patch.object(b850, "IsaBus", Bus),
               mock.patch.object(b850, "require_hardware_access"),
@@ -331,6 +367,14 @@ class B850WorkerTests(unittest.TestCase):
         self.assertTrue(terminal["restore_confirmed"])
         self.assertEqual(terminal["restore_errors"], [])
         self.assertTrue(all(backend.values[r] == 0xC0 for r in b850.MODES))
+
+    def test_interrupted_control_restores_before_tach_discovery_then_restarts(self):
+        result, publish, terminal, backend = self.run_worker(fault="recovery_hidden_tachs")
+        self.assertEqual(result, 0)
+        self.assertEqual(backend.writes[:2], [(b850.MODES[1], 0xC0), (b850.DUTIES[1], 67)])
+        self.assertEqual(publish.call_args_list[0].kwargs["phase"], "recovering")
+        self.assertTrue(terminal["restore_confirmed"])
+        self.assertFalse(terminal["recovery_pending"])
 
     def test_normal_full_gpu_duty_rises_over_several_seconds(self):
         result, publish, terminal, _backend = self.run_worker(fault="normal_gpu_full")

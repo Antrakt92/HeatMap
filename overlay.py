@@ -2269,7 +2269,8 @@ def _case_fan_never_acquired(status):
 def _case_fan_advice(status):
     if status.get("state") != "error":
         return None
-    if status.get("restore_errors") or (status.get("baseline") and not status.get("restore_confirmed")):
+    if (status.get("recovery_pending") or status.get("restore_errors")
+            or (status.get("baseline") and not status.get("restore_confirmed"))):
         return "Case fans: restore unconfirmed; restart Windows. Copy diagnostics for details."
     if status.get("restore_confirmed"):
         return "Case fans: automatic control stopped; firmware restored. Copy diagnostics for details."

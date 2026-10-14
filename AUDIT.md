@@ -1,5 +1,20 @@
 # HeatMap Audit Backlog
 
+B850 interrupted-start recovery follow-up (2026-10-14): register restoration no
+longer requires published RPM sensors before the first LHM update. Exact board,
+chip, native backend and journal/register checks remain mandatory; new takeover
+still needs two running samples. Missing startup tachs wait within the existing
+deadline; duplicate or wrong identities fail closed. Pending recovery with an
+empty baseline now explicitly advises restarting Windows rather than a generic
+controller error. Regression coverage includes recovery before tach discovery.
+On this boot, elevated read-only LHM checks still found an IT8696E with no
+sensors and invalid native register readback; software handback is unconfirmed
+and the recovery journal is retained. A Windows restart and fresh readback are
+required before claiming hardware recovery. All four independent disk probes
+succeeded, including disk 0 in 0.12 seconds; the earlier disk timeout's cause
+was not established. No DLLs, drivers, firmware settings or protection checks
+were changed.
+
 Live watchdog/storage follow-up (2026-10-12):
 [recovery repair and evidence](docs/watchdog-and-probe-recovery-2026-10-12.md).
 Untouched GPU standby now qualifies for one watchdog retry with explicit
