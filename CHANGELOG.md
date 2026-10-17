@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.2 — 2026-10-17
+
+- Retry GPU cooling startup once after a temporary access conflict clears,
+  instead of leaving Cooling in ERROR. Retry only when the AMD interface was
+  never opened, no commands were sent and no recovery is pending; preserve
+  driver-installation safeguards and the original diagnostics.
+- Recover temporarily missing B850 motherboard sensors through guarded monitor
+  reopening, and check pending fan handback before waiting for tachometers.
+  Keep an unconfirmed restoration visible instead of treating it as success.
+- Open settings only through the header gear button; right-click no longer
+  opens the menu.
+
 ## 1.4.1 — 2026-10-12
 
 - Recover a GPU heartbeat timeout after untouched driver-curve standby, as well
