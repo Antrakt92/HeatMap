@@ -1,5 +1,20 @@
 # HeatMap Audit Backlog
 
+GPU startup access recovery (2026-10-17): a transient `pnputil.exe` access
+conflict before ADLX initialization previously left Cooling in ERROR until
+manual intervention. The GPU worker now identifies that untouched startup path;
+the UI permits one retry only after the worker exits, explicit no-command and
+no-recovery evidence, and two seconds of clear GPU access checks. Original
+diagnostics are retained. Native faults, conflicts after opening ADLX, unknown
+restoration, and installer-latched sensor pauses remain excluded from this retry.
+The original PnPUtil command line was not retained, so its exact operation is
+unconfirmed; this correction does not weaken driver-installation guards.
+Local verification: 1,104 unit tests, compileall, runtime-manifest check, DLL
+verification and preflight passed. After normal elevated shutdown/relaunch,
+fresh repeated GPU reports showed thermally ready standby (driver curve) and
+the B850 case controller remained active. This is startup/idle evidence;
+gaming, sleep/resume and a real driver replacement were not exercised.
+
 Settings interaction (2026-10-15): right-click no longer opens settings. The
 header's left-click gear button remains the settings entry point; control help
 and README instructions match it.

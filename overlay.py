@@ -4618,20 +4618,31 @@ class OverlayApp:
             self._fan_recovery = {}
         recovery = self._fan_recovery.setdefault(attribute, {"attempts": 0})
         now = time.monotonic()
-        # WHY: a UI pause must still release hardware. Retry only a positively
-        # identified watchdog stop with verified rollback, never a native fault
-        # or settings conflict. One retry per explicit enable prevents loops.
+        # Retry verified watchdog rollback or an untouched GPU startup rejected
+        # before native initialization. One retry per enable prevents loops.
         with self.lock:
+            startup_blocked = (
+                attribute == 'gpu_fan_worker'
+                and status.get('startup_access_blocked') is True
+                and status.get('control_attempted') is False
+                and status.get('recovery_pending') is False
+                and status.get('baseline') is None
+            )
             eligible = (
                 self.running and self.config.get(setting, False)
                 and not getattr(self, "_hardware_pause_reason", None)
                 and not self._fan_control_paused(attribute)
                 and status.get("state") == "error"
-                and status.get("stop_cause") == "heartbeat_expired"
+                and (status.get("stop_cause") == "heartbeat_expired" or startup_blocked)
                 and fan_control_released(status)
                 and recovery["attempts"] == 0
                 and worker.process is not None and worker.process.poll() is not None
             )
+            if eligible and startup_blocked:
+                try:
+                    require_hardware_access('gpu_control')
+                except HardwareAccessConflict:
+                    eligible = False
             if eligible:
                 previous_poll = recovery.get("last_poll")
                 if previous_poll is None or not 0 <= now - previous_poll <= 5:
@@ -4640,10 +4651,12 @@ class OverlayApp:
                 if now - recovery["responsive_since"] >= 2:
                     recovery["attempts"] += 1
                     recovery["previous_stop"] = dict(status)
-                    log.warning("Restarting %s after verified watchdog rollback: %s",
+                    log.warning("Restarting %s after safe controller stop: %s",
                                 attribute, status.get("reason"))
                     worker.start()  # GPU recovery must not accept external settings.
-                    status = {"state": "checking", "reason": "Restarting after UI heartbeat timeout"}
+                    status = {"state": "checking", "reason": (
+                        "Retrying GPU startup after access conflict cleared" if startup_blocked
+                        else "Restarting after UI heartbeat timeout")}
             else:
                 recovery.pop("last_poll", None)
                 recovery.pop("responsive_since", None)

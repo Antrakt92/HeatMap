@@ -543,6 +543,13 @@ or another timeout requires reviewing diagnostics and manually toggling OFF → 
 The automatic attempt does not accept external GPU settings. Copy diagnostics
 retains the original reason and previous stop report even after successful recovery.
 
+A GPU access conflict detected before opening the native AMD interface also
+permits one automatic retry. The previous worker must have exited without opening
+the interface or sending commands, with no pending recovery or restoration errors.
+GPU control access must remain available for two seconds of responsive polling.
+Conflicts after native initialization and live driver-installation sensor pauses
+still require review and a restart; external GPU settings are never auto-accepted.
+
 Autostart from a user-writable checkout retains the normal UAC prompt at Windows
 login. After HeatMap starts, the profile regulates itself. Fully silent privileged
 autostart requires a separate protected installation, which this release does

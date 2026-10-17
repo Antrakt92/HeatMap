@@ -17,7 +17,7 @@ from case_fans import (FanWorkerClient, TerminalStatusWriteError, WorkerMutex,
 import fan_common
 from fan_common import (OwnerHeartbeat, OwnerHeartbeatExpired, GPU_TERMINAL_KEYS,
                         read_status_report, check_status, write_alive, StatusPolicy)
-from hardware_access_guard import require_hardware_access as _require_hardware_access
+from hardware_access_guard import HardwareAccessConflict, require_hardware_access as _require_hardware_access
 from thermal_policy import (finite, interpolate, SENSOR_STALE_DEGRADE_SECONDS, SENSOR_STALE_FAIL_SECONDS,
                             TACH_PERSISTENCE_SECONDS)
 from startup_readiness import StartupCancelled, StartupNotReady, wait_for_readiness
@@ -429,6 +429,9 @@ def mode_text(status):
 
 def _gpu_extra_late(status):
     """Command and standby checks, in historical order. Returns reason or None."""
+    if ('startup_access_blocked' in status
+            and type(status['startup_access_blocked']) is not bool):
+        return 'Invalid GPU startup access report'
     if any(status.get(key) is not None and type(status[key]) is not bool
            for key in ('control_attempted', 'recovery_pending')):
         return 'Invalid GPU restoration report'
@@ -543,6 +546,8 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
     recovered = False
     control_attempted = False
     startup_cancelled = False
+    startup_access_blocked = False
+    native_open_attempted = False
     journal_path = Path(path).parent / 'recovery.json'
 
     def publish(state, **details):
@@ -568,8 +573,9 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
         last_observed_stamp = None
 
         def probe():
-            nonlocal adapter, baseline_readings, last_ready_stamp, last_observed_stamp
+            nonlocal adapter, baseline_readings, last_ready_stamp, last_observed_stamp, native_open_attempted
             if adapter is None:
+                native_open_attempted = True
                 adapter = AmdGpuFan()
             data = adapter.readings(strict=True)
             if data is None:
@@ -733,6 +739,11 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
         error, stop_cause = str(exc), 'heartbeat_expired'
     except StartupCancelled:
         startup_cancelled = not (control_attempted or bool(session and session.touched))
+    except HardwareAccessConflict as exc:
+        error = str(exc)
+        # Only a rejected guard before ADLX construction permits a fresh start.
+        # A conflict after opening native resources still requires manual review.
+        startup_access_blocked = not native_open_attempted
     except Exception as exc:
         error = str(exc)
     finally:
@@ -756,6 +767,7 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
                 restore_confirmed=bool((control_attempted or recovered) and not restore_errors),
                 restore_errors=restore_errors, baseline=session.baseline if session else None,
                 settings_conflict=session.conflict if session else None,
+                **({'startup_access_blocked': True} if startup_access_blocked else {}),
                 **({'stop_cause': stop_cause} if stop_cause else {}))
         error = error or publication_error
     return 1 if error or restore_errors else 0

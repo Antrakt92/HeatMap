@@ -35,7 +35,7 @@ CASE_TERMINAL_KEYS = ("profile", "restore_confirmed", "restore_errors", "control
                       "controlled_channels", "firmware_channels",
                       "recovery_pending", "settings_conflict")
 GPU_TERMINAL_KEYS = ("profile", "restore_confirmed", "restore_errors", "control_attempted",
-                     "recovery_pending", "settings_conflict")
+                     "recovery_pending", "settings_conflict", "startup_access_blocked")
 
 
 class OwnerHeartbeatExpired(StartupCancelled):
