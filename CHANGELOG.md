@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Keep GPU and case-fan heartbeats alive between progressing UI layout passes,
+  preventing a slow multi-pass refresh from exhausting watchdog recovery.
+  A frozen UI still releases control through the unchanged 15-second watchdog.
+- Log slow layout flushes separately to help trace future UI delays.
+
 ## 1.4.2 — 2026-10-17
 
 - Retry GPU cooling startup once after a temporary access conflict clears,

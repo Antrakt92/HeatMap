@@ -1,5 +1,28 @@
 # HeatMap Audit Backlog
 
+UI layout heartbeat starvation (2026-10-18): both owners stopped twice with
+`heartbeat_expired` and explicit restoration/no-command evidence. Logs record
+UI refreshes of 16.5–27 seconds; the single automatic retry was exhausted.
+Heartbeats previously occurred only at controller polling before rendering.
+Repeated synchronous layout passes could cumulatively exceed the watchdog
+despite ongoing UI progress. Both clients now receive keepalives between those
+passes and before status polling, on the UI thread only. The 15-second timeout,
+single retry and restoration/conflict requirements are unchanged. Slow completed
+layout flushes now have a specific log message.
+
+A regression reproduces six four-second layout passes starving both owners
+before the fix, and verifies renewal with the fix. A single blocked call still
+expires ownership; shutdown and broken-pipe paths are covered. The original
+slow native call was not identified: a bounded 90-second startup trace did not
+reproduce it. Extended ordinary-use/load acceptance remains open; do not claim
+that this fixes every possible Windows, driver or event-loop stall.
+Verification: 1,111 unit tests passed, as did compileall, runtime verification,
+preflight, manifest synchronization and disposable Win32/notice checks. A local
+Tk/pipe smoke test kept two sensor-free child owners alive through six real
+three-second layout passes (18 seconds total), then confirmed expiry during
+one 16-second blocked call. Normal elevated restart produced fresh GPU standby
+and active B850 case-fan reports; no new full-speed commissioning was run.
+
 GPU startup access recovery (2026-10-17): a transient `pnputil.exe` access
 conflict before ADLX initialization previously left Cooling in ERROR until
 manual intervention. The GPU worker now identifies that untouched startup path;

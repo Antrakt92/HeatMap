@@ -543,6 +543,12 @@ or another timeout requires reviewing diagnostics and manually toggling OFF → 
 The automatic attempt does not accept external GPU settings. Copy diagnostics
 retains the original reason and previous stop report even after successful recovery.
 
+The UI also renews both worker heartbeats between synchronous layout passes.
+A long refresh that continues making progress therefore does not starve the
+controllers. Heartbeats still come from the UI thread: a single blocked call,
+frozen event loop or lost owner receives no background keepalive and retains
+the same 15-second watchdog. Slow completed layout flushes are recorded in the log.
+
 A GPU access conflict detected before opening the native AMD interface also
 permits one automatic retry. The previous worker must have exited without opening
 the interface or sending commands, with no pending recovery or restoration errors.

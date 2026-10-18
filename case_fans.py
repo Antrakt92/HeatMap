@@ -208,6 +208,11 @@ class FanWorkerClient:
             status = dict(status, controlled_channels=list(ALL_TARGETS), firmware_channels=[])
         return status
 
+    def heartbeat(self):
+        """Renew a live worker from UI progress without status-file I/O."""
+        if self.process is not None and self.process.poll() is None:
+            write_alive(self.process)
+
     def _poll_status(self):
         if self.error:
             return {"state": "error", "reason": self.error}

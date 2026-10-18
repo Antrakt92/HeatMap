@@ -3177,7 +3177,7 @@ class OverlayApp:
         if getattr(self, "_drag_active", False):
             return False
         self._fit_content()
-        self.root.update_idletasks()
+        self._flush_layout()
         x, y = _clamp_overlay_to_monitor_areas(
             self.config.get("x", 50),
             self.config.get("y", 50),
@@ -3613,6 +3613,32 @@ class OverlayApp:
         else:
             self.details_frame.pack_forget()
 
+    def _service_fan_heartbeats(self):
+        """Renew owners only from actual UI progress, never a background timer."""
+        stop = getattr(self, '_stop_event', None)
+        if not getattr(self, 'running', False) or (stop is not None and stop.is_set()):
+            return
+        for attribute in ('gpu_fan_worker', 'fan_worker'):
+            worker = getattr(self, attribute, None)
+            heartbeat = getattr(worker, 'heartbeat', None)
+            if heartbeat is not None:
+                try:
+                    heartbeat()
+                except (OSError, ValueError):
+                    # One failed owner pipe must not starve the other owner.
+                    log.debug('Could not renew %s during UI progress', attribute, exc_info=True)
+
+    def _flush_layout(self):
+        # A refresh can contain many slow Tk passes. Progress between them is
+        # liveness; a single blocked call still gets no heartbeat for 15 seconds.
+        self._service_fan_heartbeats()
+        started = time.monotonic()
+        self.root.update_idletasks()
+        self._service_fan_heartbeats()
+        elapsed = time.monotonic() - started
+        if elapsed > 3:
+            log.warning('UI layout flush took %.1f seconds', elapsed)
+
     def _fit_content(self):
         """Keep the header and health panel visible when metrics exceed the work area."""
         if not hasattr(self, "canvas"):
@@ -3631,7 +3657,7 @@ class OverlayApp:
             self.footer.pack(fill="x", padx=6, pady=(0, 4))
         else:
             self.footer.pack_forget()
-        self.root.update_idletasks()
+        self._flush_layout()
         areas = _get_monitor_areas()
         area = _select_monitor_for_window(
             self.config.get("x", 50), self.config.get("y", 50),
@@ -3643,11 +3669,11 @@ class OverlayApp:
         detail_values = [value for key, value in self.rows.items() if key.startswith("detail_")]
         for value in detail_values:
             value.configure(wraplength=260)
-        self.root.update_idletasks()
+        self._flush_layout()
         preferred_width = max(240, self.content.winfo_reqwidth())
         if hasattr(self, "health_label"):
             self.health_label.configure(wraplength=max(100, min(preferred_width, work_width - 24)))
-        self.root.update_idletasks()
+        self._flush_layout()
         footer_height = self.footer.winfo_reqheight() if self.footer.winfo_manager() else 0
         available = max(40, work_height - self.header.winfo_reqheight() - footer_height - 12)
         # Wrapping can introduce overflow; the scrollbar then reduces row width.
@@ -3660,7 +3686,7 @@ class OverlayApp:
                 label_width = sum(child.winfo_reqwidth() for child in value.master.winfo_children() if child is not value)
                 value.configure(wraplength=max(20, min(260, width - label_width - 20)))
             self.canvas.itemconfigure(self._content_window, width=width)
-            self.root.update_idletasks()
+            self._flush_layout()
             height = self.content.winfo_reqheight()
             overflow = height > available
         if overflow:
@@ -3670,7 +3696,7 @@ class OverlayApp:
             self.canvas.yview_moveto(0)
         self.canvas.configure(width=width, height=min(height, available), scrollregion=(0, 0, width, height))
         self._content_overflow = overflow
-        self.root.update_idletasks()
+        self._flush_layout()
         size = (self.root.winfo_reqwidth(), self.root.winfo_reqheight())
         self._content_layout_size = size
 
@@ -3682,7 +3708,7 @@ class OverlayApp:
 
     def _get_hwnd(self):
         """Get the native Windows HWND for the tkinter root window."""
-        self.root.update_idletasks()
+        self._flush_layout()
         frame_id = self.root.wm_frame()
         if frame_id:
             try:
@@ -3738,7 +3764,7 @@ class OverlayApp:
         set_tool_window(hwnd)
         self._desktop_fallback_ready = self._set_window_layer(False)
         self.root.wm_attributes("-alpha", 0.88)
-        self.root.update_idletasks()
+        self._flush_layout()
         self._desktop_fallback_ready = self._set_window_layer(False)
         _show_without_reordering(hwnd)
 
@@ -4716,6 +4742,8 @@ class OverlayApp:
         if not self.running:
             return
 
+        self._service_fan_heartbeats()
+
         # Poll both independent owners before touching Tk. A broken GPU label
         # or report must not starve the case owner while the event loop is alive.
         failure = None
@@ -4947,7 +4975,7 @@ class OverlayApp:
 
         if hasattr(self, "health_label"):
             self._fit_content()
-            self.root.update_idletasks()
+            self._flush_layout()
             size = (self.root.winfo_reqwidth(), self.root.winfo_reqheight())
             if size != getattr(self, "_thermal_layout_size", None):
                 self._thermal_layout_size = size
