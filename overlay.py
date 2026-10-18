@@ -3171,13 +3171,17 @@ class OverlayApp:
             widget.pack(side="right", padx=(6, 0))
             self.rows[f"{prefix}_{metric}"] = widget
 
-    def _clamp_saved_position_to_visible_screen(self, persist=False):
+    def _clamp_saved_position_to_visible_screen(self, persist=False, *, fit=True):
         if not hasattr(self, "root"):
             return False
         if getattr(self, "_drag_active", False):
             return False
-        self._fit_content()
-        self._flush_layout()
+        if fit:
+            if getattr(self, '_ui_refresh_in_progress', False):
+                self._request_layout()
+                return False
+            self._fit_content()
+            self._flush_layout()
         x, y = _clamp_overlay_to_monitor_areas(
             self.config.get("x", 50),
             self.config.get("y", 50),
@@ -3640,6 +3644,45 @@ class OverlayApp:
             log.warning('UI layout flush took %.1f seconds', elapsed)
 
     def _fit_content(self):
+        if getattr(self, '_ui_refresh_in_progress', False):
+            self._request_layout()
+            return
+        for _ in self._layout_steps():
+            self._flush_layout()
+
+    def _request_layout(self):
+        if (not self.running or not hasattr(self, 'canvas')
+                or getattr(self, '_layout_iterator', None) is not None):
+            return
+        self._layout_iterator = self._layout_steps()
+        self._layout_after_id = self.root.after(10, self._advance_layout)
+
+    def _advance_layout(self):
+        self._layout_after_id = None
+        steps = getattr(self, '_layout_iterator', None)
+        if steps is None:
+            return
+        if not self.running:
+            steps.close()
+            self._layout_iterator = None
+            return
+        try:
+            self._service_fan_heartbeats()
+            next(steps)
+        except StopIteration:
+            self._layout_iterator = None
+            # Geometry has settled in the event loop since the final yield.
+            self._clamp_saved_position_to_visible_screen(persist=True, fit=False)
+        except Exception:
+            steps.close()
+            self._layout_iterator = None
+            log.exception('Deferred UI layout failed; next refresh will retry')
+        else:
+            # A short timer yields to geometry, edge-hover and owner polling.
+            # update_idletasks() can drain an unbounded repaint queue under load.
+            self._layout_after_id = self.root.after(10, self._advance_layout)
+
+    def _layout_steps(self):
         """Keep the header and health panel visible when metrics exceed the work area."""
         if not hasattr(self, "canvas"):
             return
@@ -3657,7 +3700,7 @@ class OverlayApp:
             self.footer.pack(fill="x", padx=6, pady=(0, 4))
         else:
             self.footer.pack_forget()
-        self._flush_layout()
+        yield
         areas = _get_monitor_areas()
         area = _select_monitor_for_window(
             self.config.get("x", 50), self.config.get("y", 50),
@@ -3669,11 +3712,11 @@ class OverlayApp:
         detail_values = [value for key, value in self.rows.items() if key.startswith("detail_")]
         for value in detail_values:
             value.configure(wraplength=260)
-        self._flush_layout()
+        yield
         preferred_width = max(240, self.content.winfo_reqwidth())
         if hasattr(self, "health_label"):
             self.health_label.configure(wraplength=max(100, min(preferred_width, work_width - 24)))
-        self._flush_layout()
+        yield
         footer_height = self.footer.winfo_reqheight() if self.footer.winfo_manager() else 0
         available = max(40, work_height - self.header.winfo_reqheight() - footer_height - 12)
         # Wrapping can introduce overflow; the scrollbar then reduces row width.
@@ -3686,7 +3729,7 @@ class OverlayApp:
                 label_width = sum(child.winfo_reqwidth() for child in value.master.winfo_children() if child is not value)
                 value.configure(wraplength=max(20, min(260, width - label_width - 20)))
             self.canvas.itemconfigure(self._content_window, width=width)
-            self._flush_layout()
+            yield
             height = self.content.winfo_reqheight()
             overflow = height > available
         if overflow:
@@ -3696,7 +3739,7 @@ class OverlayApp:
             self.canvas.yview_moveto(0)
         self.canvas.configure(width=width, height=min(height, available), scrollregion=(0, 0, width, height))
         self._content_overflow = overflow
-        self._flush_layout()
+        yield
         size = (self.root.winfo_reqwidth(), self.root.winfo_reqheight())
         self._content_layout_size = size
 
@@ -3708,6 +3751,9 @@ class OverlayApp:
 
     def _get_hwnd(self):
         """Get the native Windows HWND for the tkinter root window."""
+        cached = getattr(self, '_native_hwnd', None)
+        if cached and user32.IsWindow(cached):
+            return cached
         self._flush_layout()
         frame_id = self.root.wm_frame()
         if frame_id:
@@ -3716,8 +3762,10 @@ class OverlayApp:
             except (ValueError, TypeError):
                 hwnd = 0
             if hwnd and hwnd != 0:
+                self._native_hwnd = hwnd
                 return hwnd
-        return self.root.winfo_id()
+        self._native_hwnd = self.root.winfo_id()
+        return self._native_hwnd
 
     def _can_embed_now(self):
         return (
@@ -4715,6 +4763,7 @@ class OverlayApp:
         if previous is not None and started - previous > 5:
             log.warning('UI polling resumed after %.1f seconds', started - previous)
         self._ui_last_update_time = started
+        self._ui_refresh_in_progress = True
         try:
             self._update_ui_once()
         except Exception:
@@ -4734,6 +4783,7 @@ class OverlayApp:
                 log.info('UI refresh recovered after %d failures', self._ui_refresh_failures)
             self._ui_refresh_failures = 0
         finally:
+            self._ui_refresh_in_progress = False
             elapsed = time.monotonic() - started
             if elapsed > 5:
                 log.warning('UI refresh took %.1f seconds', elapsed)
@@ -4975,6 +5025,9 @@ class OverlayApp:
 
         if hasattr(self, "health_label"):
             self._fit_content()
+            if getattr(self, '_ui_refresh_in_progress', False):
+                self.root.after(2000, self.update_ui)
+                return
             self._flush_layout()
             size = (self.root.winfo_reqwidth(), self.root.winfo_reqheight())
             if size != getattr(self, "_thermal_layout_size", None):
@@ -5124,6 +5177,10 @@ class OverlayApp:
         if not self.running:
             return
         self.running = False
+        steps = getattr(self, '_layout_iterator', None)
+        self._layout_iterator = None
+        if steps is not None:
+            steps.close()
         self._stop_event.set()
         self._cancel_scheduled_embed()
         self._stop_fan_workers()

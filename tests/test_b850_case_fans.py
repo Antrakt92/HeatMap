@@ -292,6 +292,12 @@ class B850WorkerTests(unittest.TestCase):
             chip.Sensors = []
         computer = NS(Hardware=[NS(HardwareType="Motherboard", Name=b850.BOARD, SubHardware=[chip])],
                       Open=mock.Mock(), Close=mock.Mock())
+        if fault in ('late_chip', 'missing_chip'):
+            computer.Hardware[0].SubHardware = []
+            def discover():
+                if computer.Open.call_count > 1 and fault == 'late_chip':
+                    computer.Hardware[0].SubHardware = [chip]
+            computer.Open.side_effect = discover
         clock = NS(now=100, stopped=False, samples=0)
         class Event:
             def is_set(self):
@@ -302,7 +308,8 @@ class B850WorkerTests(unittest.TestCase):
                 clock.now += seconds
                 for tach in backend.tachs:
                     tach.Value = 1250 if backend.values[b850.DUTIES[1]] == 255 else 850
-                stop_at = 170 if fault == "permanent_zero" else 130 if commission else 108
+                stop_at = (170 if fault in ('permanent_zero', 'missing_chip') else
+                           125 if fault == 'late_chip' else 130 if commission else 108)
                 if clock.now >= stop_at:
                     clock.stopped = True
         def read(_computer, **_kwargs):
@@ -354,7 +361,10 @@ class B850WorkerTests(unittest.TestCase):
               mock.patch.object(case_fans, "write_terminal_status",
                   return_value="disk publication failed" if fault == "terminal_publication" else None) as terminal):
             result = b850.worker(path, 7, 1, {name: 1250 for name in b850.TARGETS}, commission)
-        computer.Close.assert_called_once_with()
+        if fault in ('late_chip', 'missing_chip'):
+            self.assertEqual(computer.Close.call_count, 2 if fault == 'late_chip' else 6)
+        else:
+            computer.Close.assert_called_once_with()
         return result, publish, terminal.call_args.kwargs, backend
 
     def test_normal_start_tracks_cpu_then_hot_gpu_and_restores(self):
@@ -423,6 +433,20 @@ class B850WorkerTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertFalse(terminal["control_attempted"])
         self.assertEqual(backend.writes, [])
+
+    def test_missing_startup_chip_is_rediscovered_before_any_takeover(self):
+        result, publish, terminal, backend = self.run_worker(fault='late_chip')
+        self.assertEqual(result, 0)
+        self.assertTrue(any(c.kwargs.get('phase') == 'waiting' for c in publish.call_args_list))
+        self.assertTrue(backend.writes)
+        self.assertTrue(terminal['restore_confirmed'])
+
+    def test_permanently_missing_chip_times_out_without_commands(self):
+        result, _publish, terminal, backend = self.run_worker(fault='missing_chip')
+        self.assertEqual(result, 1)
+        self.assertIn('timed out', terminal['reason'])
+        self.assertEqual(backend.writes, [])
+        self.assertFalse(terminal['control_attempted'])
 
     def test_explicit_commission_checks_full_and_minimum_endpoints(self):
         result, publish, terminal, _backend = self.run_worker(commission=True)

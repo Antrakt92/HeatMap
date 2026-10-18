@@ -1,5 +1,37 @@
 # HeatMap Audit Backlog
 
+UI redraw/edge-hover follow-up (2026-10-18): the loaded runtime again recorded
+single layout flushes of 15–16 seconds and a 60–73 second refresh. A bounded
+stack trace sampled the UI in Tk `update_idletasks`, including native message
+dispatch through the mouse-activation subclass. This establishes the blocking
+UI path, not a GPU-driver defect or a complete explanation of CPU scheduling.
+Regular refreshes now run the same layout algorithm as scheduled short stages,
+without explicitly draining the idle queue. Repeated HWND checks use the stable
+live HWND instead of flushing layout every 250 ms. Completed deferred geometry
+always clamps the widget to the monitor work area. Watchdog and ownership
+requirements remain unchanged; no unconditional background heartbeat was added.
+
+The fresh case-worker report separately confirmed missing IT8696E discovery on
+the exact B850 board before any commands. A missing startup controller now
+reopens the read-only monitor at most five times within the existing 60-second
+readiness wait. Ambiguous chips and wrong boards remain fatal; pending ownership
+is never bypassed by this retry. GPU executable and checkout paths existed in
+the inspected process. The earlier raw WinError 2 screenshot alone does not
+identify which missing file generated it.
+
+Regressions cover no idle draining during regular layout, coalesced requests,
+cached HWND lookup, final work-area bounds, shutdown, transient/permanent chip
+absence and original hardware identity guards. Existing DPI/clipping assertions
+now wait for deferred completion rather than weakening their bounds. Two WoW
+clients were closed by the user during diagnosis; a new identical-load gaming
+comparison has not been performed.
+Local verification passed 1,117 unit tests, compilation, DLL/preflight/manifest
+checks and disposable Windows placement/notice integration. After normal
+elevated restart, WM_NULL completed within the one-second inspection timeout;
+the live overlay was visible at (1749,193)-(2046,710), inside the 2048x1104 work
+area. Fresh GPU standby and active B850 reports were read independently of the
+UI. These are restart/responsiveness checks, not identical-load gaming proof.
+
 UI layout heartbeat starvation (2026-10-18): both owners stopped twice with
 `heartbeat_expired` and explicit restoration/no-command evidence. Logs record
 UI refreshes of 16.5–27 seconds; the single automatic retry was exhausted.

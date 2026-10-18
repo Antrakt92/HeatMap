@@ -2,7 +2,7 @@ from unittest.mock import Mock
 
 import overlay
 from test_thermal_advisor import sample
-from test_ui_layout import TkTestCase, layout_app
+from test_ui_layout import TkTestCase, layout_app, settle_layout
 
 
 class ReadinessUiTests(TkTestCase):
@@ -42,7 +42,7 @@ class ReadinessUiTests(TkTestCase):
                 app.gpu_fan_worker = Mock()
                 app.gpu_fan_worker.poll.return_value = self.waiting()
                 app.update_ui()
-                app.root.update_idletasks()
+                settle_layout(app)
                 for key in ('case_fan_1', 'gpu_fan_control'):
                     self.assertLessEqual(app.rows[key].master.master.winfo_reqwidth(),
                                          int(app.canvas.itemcget(app._content_window, 'width')))

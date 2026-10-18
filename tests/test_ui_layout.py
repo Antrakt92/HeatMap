@@ -3,11 +3,23 @@ from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
 import gc
 import threading
+import time
 import unittest
 from unittest import mock
 import weakref
 
 import overlay
+
+
+def settle_layout(app):
+    """Wait for deferred geometry before asserting the same clipping bounds."""
+    deadline = time.monotonic() + 2
+    while getattr(app, '_layout_iterator', None) is not None:
+        if time.monotonic() >= deadline:
+            raise AssertionError('Deferred layout did not finish')
+        app.root.update()
+        time.sleep(.005)
+    app.root.update_idletasks()
 
 
 @contextmanager
@@ -31,6 +43,7 @@ def layout_app(scaling=1.333, height=720):
         stack.enter_context(mock.patch.object(overlay, "save_config", return_value=(True, "")))
         app = overlay.OverlayApp(overlay.AutostartReconcileResult(False, True, "disabled", False))
         try:
+            settle_layout(app)
             yield app
         finally:
             app.running = False

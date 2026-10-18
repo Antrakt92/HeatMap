@@ -142,20 +142,26 @@ def synchronized_demand(data, cpu_reference, gpu_reference):
     return max(MIN_DUTY, demands[reason]), reason, fractions
 
 
-def controller(computer):
+class ControllerNotReady(StartupNotReady):
+    """The exact board has not exposed its controller during startup yet."""
+
+
+def controller(computer, *, startup=False):
     boards = [hw for hw in computer.Hardware if str(hw.HardwareType) == "Motherboard"]
     if not boards:
-        raise StartupNotReady("Waiting for B850 motherboard")
+        raise ControllerNotReady("Waiting for B850 motherboard")
     if len(boards) != 1 or str(boards[0].Name) != BOARD:
         raise RuntimeError("B850 SYS1/2/3 profile motherboard identity mismatch")
     chips = [hw for hw in boards[0].SubHardware if str(hw.Identifier) == CHIP]
+    if not chips and startup:
+        raise ControllerNotReady("Waiting for B850 IT8696E controller discovery")
     if len(chips) != 1:
         raise RuntimeError("B850 IT8696E controller is missing or ambiguous")
     return getattr(chips[0], "__implementation__", chips[0])
 
 
 def select_tachs(computer, *, startup=False, require_running=True):
-    chip = controller(computer)
+    chip = controller(computer, startup=startup)
     if not require_running:
         # Recovery uses only the verified native register interface and journal.
         # LHM publishes active tachs after Update; their absence must not block
@@ -445,13 +451,25 @@ def worker(path, owner_pid, owner_created, full_rpm=None, commission=False):
         ready_samples = 0
         source_identity = None
         gpu_feedback = GpuTachFeedback()
+        last_discovery = time.monotonic()
         def ready():
-            nonlocal ready_samples, source_identity
+            nonlocal ready_samples, source_identity, last_discovery
             data = overlay.read_sensors(computer, update_storage=False)
             if not isinstance(data, dict):
                 raise RuntimeError("Invalid B850 startup snapshot; no fan commands sent")
             try:
                 chip, tachs = select_tachs(computer, startup=True)
+            except ControllerNotReady:
+                ready_samples = 0
+                if not attempted and session is None and time.monotonic() - last_discovery >= 10:
+                    # Open can produce an empty controller inventory under load.
+                    # Reopen only before ownership, within the existing 60s wait.
+                    guard()
+                    computer.Close()
+                    guard()
+                    computer.Open()
+                    last_discovery = time.monotonic()
+                raise
             except StartupNotReady:
                 ready_samples = 0
                 raise

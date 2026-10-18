@@ -4,7 +4,7 @@ import unittest
 import overlay
 from test_layout_audit import mapped_layout_app
 from test_overlay_helpers import _FakeHardware, _FakeSensor, _fake_lhm_modules
-from test_ui_layout import TkTestCase
+from test_ui_layout import TkTestCase, settle_layout
 
 
 def fan_preview(app):
@@ -30,7 +30,7 @@ def fan_preview(app):
                                            (4, 1100, None), (5, 1300, 81), (6, 1300, None))],
     )
     app.update_ui()
-    app.root.update_idletasks()
+    settle_layout(app)
 
 
 class FanPercentTests(unittest.TestCase):

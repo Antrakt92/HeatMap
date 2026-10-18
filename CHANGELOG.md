@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Split regular layout work into short event-loop stages and cache the window
+  handle, avoiding repeated forced redraws that could block edge-hover and
+  controller polling under load. Keep the resized widget inside the work area.
+- Retry discovery of a temporarily absent B850 controller before taking fan
+  ownership; wrong or ambiguous hardware identities remain blocked.
 - Keep GPU and case-fan heartbeats alive between progressing UI layout passes,
   preventing a slow multi-pass refresh from exhausting watchdog recovery.
   A frozen UI still releases control through the unchanged 15-second watchdog.
