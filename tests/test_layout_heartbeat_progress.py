@@ -11,6 +11,41 @@ from test_ui_layout import TkTestCase, layout_app
 
 
 class LayoutHeartbeatProgressTests(TkTestCase):
+    def test_slow_sensor_rendering_renews_both_owners(self):
+        for sensor_error in (False, True):
+            with self.subTest(sensor_error=sensor_error), layout_app() as app:
+                app.sensor_data = ({'error': 'unavailable'} if sensor_error
+                                   else dict(overlay._empty_sensor_data(), cpu_temp=50))
+                now = [0.0]
+                with mock.patch.object(fan_common.time, 'monotonic', side_effect=lambda: now[0]):
+                    owners = [fan_common.OwnerHeartbeat(threading.Event()) for _ in range(2)]
+                    workers = [mock.Mock(), mock.Mock()]
+                    for worker, owner in zip(workers, owners):
+                        def beat(owner=owner):
+                            self.assertFalse(owner.expired(), 'Rendering starved a fan owner')
+                            owner.last_seen = now[0]
+                        worker.heartbeat.side_effect = beat
+                    app.fan_worker, app.gpu_fan_worker = workers
+                    patches = []
+                    try:
+                        for label in list(app.rows.values()) + list(app.fan_percent_labels.values()):
+                            original = label.config
+                            def slow_config(*args, original=original, **kwargs):
+                                now[0] += 1
+                                self.assertTrue(all(not owner.expired() for owner in owners))
+                                return original(*args, **kwargs)
+                            patch = mock.patch.object(label, 'config', side_effect=slow_config)
+                            patch.start()
+                            patches.append(patch)
+                        with mock.patch.object(app, '_poll_fan_controller', return_value={'state': 'off'}):
+                            app.update_ui()
+                        self.assertEqual(app._ui_refresh_failures, 0)
+                        self.assertGreater(now[0], fan_common.HEARTBEAT_TIMEOUT_SECONDS)
+                        self.assertTrue(all(not owner.expired() for owner in owners))
+                    finally:
+                        for patch in reversed(patches):
+                            patch.stop()
+
     def test_slow_layout_passes_do_not_starve_either_owner(self):
         with layout_app() as app:
             now = [0.0]

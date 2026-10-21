@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Renew fan-owner heartbeats between completed sensor-rendering stages, including
+  storage and unavailable readings, so a long but progressing refresh does not
+  unnecessarily stop automatic cooling. A single blocked call still times out.
 - Split regular layout work into short event-loop stages and cache the window
   handle, avoiding repeated forced redraws that could block edge-hover and
   controller polling under load. Keep the resized widget inside the work area.

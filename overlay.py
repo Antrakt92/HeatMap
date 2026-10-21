@@ -4882,6 +4882,7 @@ class OverlayApp:
                     volume_errors=volumes.get("volume_errors", []))
         data = _gpu_activity_for_display(data, getattr(self, '_gpu_fan_status', {}))
         self._update_thermal_advice(data)
+        self._service_fan_heartbeats()
 
         # CPU: temp + clock + load%
         cpu_temp = data.get("cpu_temp")
@@ -4901,6 +4902,9 @@ class OverlayApp:
             fg=load_color(cpu_load)
         )
 
+        # Rendering can take longer than the watchdog in aggregate under load.
+        # Renew only between completed UI stages; a blocked call still expires.
+        self._service_fan_heartbeats()
         # GPU: temp + clock + load%
         gpu_temp = data.get("gpu_temp")
         gpu_load = data.get("gpu_load")
@@ -4934,6 +4938,7 @@ class OverlayApp:
             fg=load_color(gpu_load)
         )
 
+        self._service_fan_heartbeats()
         # VRAM capacity is useful in the primary view, independently of Details.
         vram_pct = data.get("gpu_vram_pct")
         vram_gb = _format_vram_gb(data.get("gpu_vram_used_gb"), data.get("gpu_vram_total_gb"))
@@ -4944,6 +4949,7 @@ class OverlayApp:
 
         stalled_ids = {finding.key for finding in self.thermal_findings if finding.severity == 2}
         for key in ("gpu_fan", "cpu_fan"):
+            self._service_fan_heartbeats()
             rpm = data.get(key)
             stalled = (any(fan["id"] in stalled_ids for fan in data.get("gpu_fans", []))
                        if key == "gpu_fan" else data.get("cpu_fan_id") in stalled_ids)
@@ -4959,6 +4965,7 @@ class OverlayApp:
                     text=text if len(data.get("gpu_fans", [])) <= 1 else "",
                     fg=_fan_percent_color(percent))
         if "cpu_optional_fan" in self.rows:
+            self._service_fan_heartbeats()
             rpm = data.get("cpu_optional_fan")
             self._set_fan_reading("cpu_optional_fan", rpm, data.get("cpu_optional_fan_pct"),
                                   self.config.get("cpu_fan_reference_rpm"), data.get("cpu_optional_fan_id") in stalled_ids)
@@ -4967,6 +4974,7 @@ class OverlayApp:
             key = f"case_fan_{number}"
             if key not in self.rows:
                 continue
+            self._service_fan_heartbeats()
             fan = case_sensors.get(f"System Fan #{number}") or case_sensors.get(f"System Fan #{number} / Pump")
             rpm = fan.get("rpm") if fan else None
             if rpm and hasattr(self, "_seen_case_fans") and number not in self._seen_case_fans:
@@ -4982,6 +4990,7 @@ class OverlayApp:
                                   owner=_case_fan_owner(getattr(self, "_case_fan_status", {}),
                                                         fan["name"] if fan else f"System Fan #{number}"))
 
+        self._service_fan_heartbeats()
         # RAM: used/total GB + %
         ram_pct = data.get("ram_pct")
         ram_used = data.get("ram_used_gb")
@@ -5001,10 +5010,12 @@ class OverlayApp:
             self.rows["ram_pct"].config(text="", fg="#888888")
 
         self._update_storage_rows(data.get("disks", []), volumes)
+        self._service_fan_heartbeats()
 
         _update_peak_values(self.peaks, data)
         for key, text in _detail_row_values(data, self.peaks).items():
             if key in self.rows:
+                self._service_fan_heartbeats()
                 # Unrated auxiliary sensors and historical peaks are information,
                 # not a green claim that the component is currently healthy.
                 color = "#cbd5e1" if text != "--" else "#888888"
@@ -5020,6 +5031,7 @@ class OverlayApp:
                     fg=color,
                 )
 
+        self._service_fan_heartbeats()
         # Check critical thresholds and alert
         self._check_alerts(data)
 
@@ -5059,16 +5071,19 @@ class OverlayApp:
         if identities != self._last_disk_names:
             self._last_disk_names = identities
             for child in list(self.disk_frame.winfo_children()):
+                self._service_fan_heartbeats()
                 child.destroy()
             for key in self.disk_labels:
                 self.rows.pop(key, None)
                 self.rows.pop(key + "_usage", None)
             self.disk_labels.clear()
             for index, (_, name, _) in enumerate(entries):
+                self._service_fan_heartbeats()
                 key = f"disk_{index}"
                 self._make_disk_row(key, name, parent=self.disk_frame)
                 self.disk_labels.append(key)
         for key, (kind, name, entry) in zip(self.disk_labels, entries):
+            self._service_fan_heartbeats()
             temperature = entry.get("temp")
             value = f"{temperature}°C" if temperature is not None else "--"
             color = (disk_temp_color(temperature, entry.get("device_name", name))
@@ -5099,6 +5114,7 @@ class OverlayApp:
             if severity == 2 or getattr(self, "_gpu_fan_status", {}).get("state") == "error":
                 self._check_alerts({})
         for child in list(self.disk_frame.winfo_children()):
+            self._service_fan_heartbeats()
             child.destroy()
         for key in list(self.disk_labels):
             self.rows.pop(key, None)
@@ -5108,8 +5124,10 @@ class OverlayApp:
 
         for key, label in self.rows.items():
             if key != "gpu_fan_control":
+                self._service_fan_heartbeats()
                 label.config(text=text, fg=color)
         for label in getattr(self, "fan_percent_labels", {}).values():
+            self._service_fan_heartbeats()
             label.config(text=" · --%", fg="#888888")
         self._update_storage_rows([], volume_data)
         self._fit_content()

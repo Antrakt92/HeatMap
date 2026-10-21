@@ -1,5 +1,22 @@
 # HeatMap Audit Backlog
 
+Sensor-rendering heartbeat follow-up (2026-10-21): both workers again stopped
+with `heartbeat_expired`; the log includes a 33.8-second refresh and a later
+24.9-second polling gap. Deferred layout alone did not cover sensor rendering.
+The UI now renews both owners between completed CPU/GPU/RAM rendering stages,
+fan rows, storage rows and detail/error labels. No background heartbeat, timeout
+extension or additional automatic recovery was added. Regressions simulate
+36-second normal and error refreshes; both failed before the change and pass
+afterward. This proves aggregate rendering starvation is repaired, not the
+cause of every individual slow native call or scheduling gap.
+
+Local verification passed 1,118 unit tests, compileall, runtime integrity,
+preflight, manifest synchronization and disposable desktop/notice integration.
+Normal shutdown and independent scheduled-task restart produced a visible,
+responsive window inside the work area, fresh active B850 SYS1/2/3 reports and
+GPU standby on its saved driver curve. Extended load stability and the cause of
+the earlier volume/disk probe timeouts remain unconfirmed.
+
 UI redraw/edge-hover follow-up (2026-10-18): the loaded runtime again recorded
 single layout flushes of 15–16 seconds and a 60–73 second refresh. A bounded
 stack trace sampled the UI in Tk `update_idletasks`, including native message
