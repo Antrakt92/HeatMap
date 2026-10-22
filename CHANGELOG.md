@@ -22,6 +22,9 @@
   preventing a slow multi-pass refresh from exhausting watchdog recovery.
   A frozen UI still releases control through the unchanged 15-second watchdog.
 - Log slow layout flushes separately to help trace future UI delays.
+- Run autostarted sensor owners at normal interactive priority instead of
+  background priority, reducing scheduling delays under load. Migrate enabled
+  tasks with the old priority while preserving disabled autostart preferences.
 
 ## 1.4.2 — 2026-10-17
 
