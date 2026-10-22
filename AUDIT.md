@@ -1,5 +1,36 @@
 # HeatMap Audit Backlog
 
+Storage/UI scheduling follow-up (2026-10-22): the live log again showed UI
+polling gaps and the supplied diagnostics had failed volume discovery and disk
+probe timeouts. The owned Scheduler task used its implicit priority 7; the live
+overlay had BELOW_NORMAL CPU priority. Windows assigns background CPU, I/O and
+memory priority to that task setting. The task now explicitly requests ordinary
+interactive priority 6, parses/validates it, and migrates enabled owned old tasks
+through the existing guarded replacement. Disabled tasks, foreign owners,
+read-only checks and the LeastPrivilege/UAC boundary remain preserved.
+Reference: [Microsoft task priority mapping](https://learn.microsoft.com/en-us/windows/win32/taskschd/taskschedulerschema-priority-settingstype-element).
+
+Five new regressions failed before the repair and pass afterward. Local checks:
+1,123 unit tests, compileall, DLL integrity, preflight, manifest synchronization,
+disposable Scheduler round-trip (exported priority 6), desktop/notice checks and
+bounded volume integration passed. The elevated migration and normal close/task
+restart succeeded; the new overlay has NORMAL CPU priority, is responsive and
+fits its work area. A window capture confirms C:/D:/E:/F: rows with fullness and
+temperatures, with only the expected CPU-warm warning. Independent elevated
+reads returned all four capacities in 0.16–0.17 seconds each and all four disk
+temperatures in 0.22–0.98 seconds each. Fresh controller reports show active B850
+SYS1/2/3 and GPU driver-curve standby. Evidence is retained under
+`%LOCALAPPDATA%/HeatMap/repair-priority-20261022.json`,
+`render-live-20261022.json` and `storage-repair-window-20261022.png`.
+
+A same-session normal-priority volume check succeeded at 100% CPU; lowering its
+priority slowed queries. However, CPU load had fallen to about 34% by the live
+restart, so this is a verified scheduling defect and current recovery, not proof
+that every earlier timeout or CPU load source is explained or that identical-load
+stability is established. Probe deadlines, stale-data rules and fan watchdogs
+were not relaxed. Extended load, reboot/login and physical display checks remain
+informational follow-ups.
+
 Sensor-rendering heartbeat follow-up (2026-10-21): both workers again stopped
 with `heartbeat_expired`; the log includes a 33.8-second refresh and a later
 24.9-second polling gap. Deferred layout alone did not cover sensor rendering.

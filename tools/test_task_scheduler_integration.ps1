@@ -82,6 +82,9 @@ print(base64.b64encode(xml_bytes).decode("ascii"))
     $arguments = $exportedXml.SelectSingleNode(
         "/*[local-name()='Task']/*[local-name()='Actions']/*[local-name()='Exec']/*[local-name()='Arguments']"
     ).InnerText
+    $priority = $exportedXml.SelectSingleNode(
+        "/*[local-name()='Task']/*[local-name()='Settings']/*[local-name()='Priority']"
+    ).InnerText
     $logonTrigger = $exportedXml.SelectSingleNode(
         "/*[local-name()='Task']/*[local-name()='Triggers']/*[local-name()='LogonTrigger']"
     )
@@ -95,6 +98,9 @@ print(base64.b64encode(xml_bytes).decode("ascii"))
     Assert-IntegrationCondition `
         -Condition ($null -ne $logonTrigger) `
         -Message "Exported task did not retain its logon trigger."
+    Assert-IntegrationCondition `
+        -Condition ($priority -eq "6") `
+        -Message "Exported task priority was '$priority', expected ordinary interactive priority 6."
 
     $env:HEATMAP_INTEGRATION_XML = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($exportedXmlText))
     $env:HEATMAP_INTEGRATION_TASK_NAME = $taskName
@@ -132,6 +138,7 @@ print(json.dumps({
         UserId = $currentSid
         Classification = $classification
         RunLevel = $runLevel
+        Priority = $priority
         RunLevelWasDefaulted = ($null -eq $runLevelNode)
         Command = $command
         Arguments = $arguments

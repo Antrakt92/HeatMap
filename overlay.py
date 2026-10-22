@@ -546,6 +546,9 @@ AUTOSTART_SCHEMA_VERSION = "2"
 AUTOSTART_SOURCE = "HeatMap"
 AUTOSTART_DELAY = "PT0S"
 AUTOSTART_EXECUTION_TIME_LIMIT = "PT0S"
+# Task Scheduler defaults to 7 (background CPU/I/O/memory priority). Sensor
+# deadlines and the UI heartbeat need ordinary interactive scheduling under load.
+AUTOSTART_PRIORITY = "6"
 RUN_AS_ADMIN_PATH = os.path.join(APP_DIR, "run_as_admin.bat")
 # Legacy registry key — cleaned up when switching to Task Scheduler
 _LEGACY_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -590,6 +593,7 @@ class AutostartTaskDefinition:
     idle_stop_on_end: str = ""
     idle_restart: str = ""
     execution_time_limit: str = ""
+    priority: str = ""
     total_action_count: int = 0
     exec_action_count: int = 0
     actions_context: str = ""
@@ -826,6 +830,7 @@ def _parse_autostart_task_xml(xml_data):
         idle_stop_on_end=_element_text(idle_settings, "StopOnIdleEnd"),
         idle_restart=_element_text(idle_settings, "RestartOnIdle"),
         execution_time_limit=_element_text(settings, "ExecutionTimeLimit"),
+        priority=_element_text(settings, "Priority"),
         total_action_count=len(action_elements),
         exec_action_count=len(exec_elements),
         actions_context=(actions_element.get("Context", "").strip() if actions_element is not None else ""),
@@ -880,6 +885,7 @@ def _build_autostart_task_xml(user_id, app_dir=None, system_root=None):
         ("Hidden", "false"),
         ("WakeToRun", "false"),
         ("ExecutionTimeLimit", AUTOSTART_EXECUTION_TIME_LIMIT),
+        ("Priority", AUTOSTART_PRIORITY),
     ):
         _add_xml_text(settings, name, value)
     idle = ET.SubElement(settings, _xml_tag("IdleSettings"))
@@ -955,6 +961,7 @@ def _classify_autostart_task(
         and definition.idle_stop_on_end.casefold() in ("", "false")
         and definition.idle_restart.casefold() in ("", "false")
         and definition.execution_time_limit == AUTOSTART_EXECUTION_TIME_LIMIT
+        and definition.priority == AUTOSTART_PRIORITY
         and definition.total_action_count == 1
         and definition.exec_action_count == 1
         and definition.actions_context == "Author"

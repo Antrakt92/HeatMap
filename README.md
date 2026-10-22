@@ -790,6 +790,10 @@ a disable/verification/delete/re-create sequence. XML is passed to Task Schedule
 in memory, without privileged reading of a file from the user's `%TEMP%`.
 Autostart must be configured by the same Windows account that opened the desktop
 session; over-the-shoulder UAC using different administrator credentials is rejected.
+The task explicitly uses ordinary interactive priority (Scheduler level 6), so
+sensor deadlines do not inherit Scheduler's background CPU/I/O/memory priority.
+Enabled owned tasks with the old background setting are migrated on startup;
+disabled autostart preferences remain disabled.
 A checkout path containing `%` is unsupported for the Task Scheduler action
 because `cmd.exe` performs environment expansion. Silent autostart without UAC
 requires a separate protected installation in an admin-owned location; checking
