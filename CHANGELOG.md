@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.4.3 — 2026-10-22
 
 - Resume sensor and storage-temperature monitoring after a temporary driver or
   process-inventory block clears, using a fresh native reader after 15 seconds
