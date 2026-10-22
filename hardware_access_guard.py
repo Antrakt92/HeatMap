@@ -22,12 +22,34 @@ RYZEN_MASTER_PROCESS_NAMES = frozenset({
 })
 _INVENTORY_ERROR = (
     "Cannot verify which hardware monitoring tools are running. "
-    "Close other hardware monitoring or fan-control tools, then restart HeatMap."
+    "Sensor access will be checked again automatically."
 )
 
 
 class HardwareAccessConflict(RuntimeError):
     """Exclusive sensor access is blocked or cannot be verified."""
+
+    def __init__(self, message, *, kind=None):
+        super().__init__(message)
+        # Recovery callers must opt in to a known condition; an unclassified
+        # conflict may also mean failed controller restoration and stays latched.
+        self.kind = kind
+
+
+def _pnputil_changes_live_devices(command):
+    """Classify only a complete argv; unavailable arguments remain guarded."""
+    if (not isinstance(command, (list, tuple)) or not command
+            or any(not isinstance(arg, str) for arg in command)
+            or not command[0].strip()):
+        return True
+    aliases = {'-a': '/add-driver', '-i': '/install',
+               '-d': '/delete-driver', '-f': '/force'}
+    args = {aliases.get(arg.casefold(), arg.casefold()) for arg in command[1:]}
+    # Legacy -a/-i and -d/-f remain supported by Windows. Enumeration, export,
+    # and package staging alone do not replace an in-use device driver.
+    return bool({'/add-driver', '/install'} <= args
+                or ('/delete-driver' in args and args & {'/uninstall', '/force'})
+                or args & _PNPUTIL_DEVICE_OPERATIONS)
 
 
 def _is_gnu_compiler(process):
@@ -83,18 +105,18 @@ def hardware_conflicts():
             except psutil.NoSuchProcess:
                 continue
             if not isinstance(info, dict):
-                raise HardwareAccessConflict(_INVENTORY_ERROR)
+                raise HardwareAccessConflict(_INVENTORY_ERROR, kind='inventory_unverified')
             name = info.get("name", _UNREADABLE)
             # psutil reports Windows' Secure System kernel entry as an empty
             # executable basename. Unreadable names use ad_value instead.
             if isinstance(name, str) and name == "":
                 continue
             if not isinstance(name, str) or not name.strip():
-                raise HardwareAccessConflict(_INVENTORY_ERROR)
+                raise HardwareAccessConflict(_INVENTORY_ERROR, kind='inventory_unverified')
             name = name.casefold()
             if name == "pnputil.exe":
                 try:
-                    args = {arg.casefold() for arg in process.cmdline()}
+                    command = process.cmdline()
                 except psutil.NoSuchProcess:
                     continue
                 except (psutil.AccessDenied, OSError):
@@ -103,9 +125,7 @@ def hardware_conflicts():
                 # Package staging/enumeration is read-only for live devices.
                 # Installation, forced removal and PnP state changes can detach
                 # or replace devices during an in-flight native sensor call.
-                if ({"/add-driver", "/install"} <= args
-                        or ("/delete-driver" in args and args & {"/uninstall", "/force"})
-                        or args & _PNPUTIL_DEVICE_OPERATIONS):
+                if _pnputil_changes_live_devices(command):
                     conflicts.add(name)
                 continue
             if name in CONFLICTING_PROCESS_NAMES:
@@ -117,7 +137,7 @@ def hardware_conflicts():
                         continue
                 conflicts.add(name)
     except (psutil.Error, OSError) as exc:
-        raise HardwareAccessConflict(_INVENTORY_ERROR) from exc
+        raise HardwareAccessConflict(_INVENTORY_ERROR, kind='inventory_unverified') from exc
     return sorted(conflicts)
 
 
@@ -143,7 +163,8 @@ def require_hardware_access(scope="control"):
             return "shared"
         raise HardwareAccessConflict(
             "Driver installation detected: " + ", ".join(installers) + ". "
-            "Finish driver installation, then restart HeatMap."
+            "Sensor access will be checked again after driver activity finishes.",
+            kind='driver_change',
         )
     if conflicts:
         raise HardwareAccessConflict(

@@ -115,7 +115,9 @@ class VolumeSpaceTests(TestCase):
         app.sensor_data = dict(error='LHM read failed', **data)
         app._sensor_sample_time = 100
         app._volume_snapshot = (99, data)
-        with mock.patch.object(overlay.time, 'monotonic', return_value=100):
+        with (mock.patch.object(overlay.time, 'monotonic', return_value=100),
+              mock.patch.object(overlay.psutil, 'virtual_memory', return_value=NS(
+                  percent=50, used=8 * 1024 ** 3, total=16 * 1024 ** 3))):
             app.update_ui()
         self.assertTrue(any(item.key == 'volume:C:' for item in app.thermal_findings))
         self.assertTrue(any('Volume C:' in message for message in app.health_messages))
@@ -123,7 +125,8 @@ class VolumeSpaceTests(TestCase):
         self.assertEqual(app.rows['cpu_temp'].options['text'], 'ERR')
         self.assertEqual(app._last_disk_names, [('volume', 'C:')])
         self.assertEqual(app.rows['disk_0_usage'].options['text'], '99.0%')
-        app._check_alerts.assert_called_once_with({})
+        app._check_alerts.assert_called_once_with(
+            dict(data, ram_pct=50, ram_used_gb=8.0, ram_total_gb=16.0))
 
     def test_old_or_unstamped_volume_values_are_not_reused_during_sensor_errors(self):
         data = dict(volumes=[dict(name='C:', used_pct=99, free_bytes=2**30)], volume_errors=[])
