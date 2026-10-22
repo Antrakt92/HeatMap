@@ -537,7 +537,7 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
     stop = threading.Event()
     heartbeat = OwnerHeartbeat(stop)
     threading.Thread(target=heartbeat.listen, daemon=True).start()
-    adapter = session = None
+    adapter = session = journal = None
     error = None
     stop_cause = None
     restore_errors = []
@@ -573,10 +573,24 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
         last_observed_stamp = None
 
         def probe():
-            nonlocal adapter, baseline_readings, last_ready_stamp, last_observed_stamp, native_open_attempted
+            nonlocal adapter, journal, recovered, recovery_pending
+            nonlocal baseline_readings, last_ready_stamp, last_observed_stamp, native_open_attempted
             if adapter is None:
                 native_open_attempted = True
                 adapter = AmdGpuFan()
+            if recovery_pending and journal is None:
+                check_startup()
+                recovery_pending = None
+                recovery_pending = recovery_journal_exists(journal_path)
+                journal = RecoveryJournal(journal_path, adapter.identity)
+                publish('checking', phase='recovering', baseline=None, control_attempted=None,
+                        recovery_pending=True, reason='Restoring interrupted GPU fan session')
+                # Interrupted ownership must be handed back even if thermal
+                # metrics are missing/frozen. Identity/settings checks and the
+                # owner mutex still guard recovery; new takeover waits below.
+                recovered = journal.recover(adapter, accept_external=accept_external,
+                                            before_write=check_startup, check_cancelled=check_owner)
+                recovery_pending = False
             data = adapter.readings(strict=True)
             if data is None:
                 last_ready_stamp = None
@@ -613,17 +627,16 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
 
         wait_for_readiness(probe, stop, check_startup, waiting, clock=time.monotonic)
         check_startup()
-        recovery_pending = None
-        recovery_pending = recovery_journal_exists(journal_path)
-        journal = RecoveryJournal(journal_path, adapter.identity)
-        if recovery_pending:
-            publish('checking', phase='recovering', baseline=None, control_attempted=None,
-                    recovery_pending=True, reason='Restoring interrupted GPU fan session')
-        # The named owner mutex covers both recovery and this new session.
-        # Never adopt a leftover HeatMap curve as the user's original settings.
-        recovered = journal.recover(adapter, accept_external=accept_external,
-                                    before_write=check_startup, check_cancelled=check_owner)
-        recovery_pending = False
+        if journal is None:
+            recovery_pending = None
+            recovery_pending = recovery_journal_exists(journal_path)
+            journal = RecoveryJournal(journal_path, adapter.identity)
+            if recovery_pending:
+                publish('checking', phase='recovering', baseline=None, control_attempted=None,
+                        recovery_pending=True, reason='Restoring interrupted GPU fan session')
+            recovered = journal.recover(adapter, accept_external=accept_external,
+                                        before_write=check_startup, check_cancelled=check_owner)
+            recovery_pending = False
         started = time.monotonic()
         ramp = GpuRamp()
         target_control = GpuTemperatureTarget()

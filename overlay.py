@@ -113,6 +113,8 @@ VOLUME_REFRESH_SECONDS = 30
 VOLUME_STALE_SECONDS = VOLUME_REFRESH_SECONDS + SENSOR_STALE_SECONDS
 SENSOR_WARMUP_SECONDS = 60
 SENSOR_INIT_RETRY_SECONDS = 30
+HARDWARE_ACCESS_CLEAR_SECONDS = 15
+HARDWARE_ACCESS_POLL_SECONDS = 2
 STATUS_CONFIG_SAVE_ERROR = "config_save_error"
 STATUS_CONFIG_ADJUSTED = "config_adjusted"
 CONFIG_STATUSES = (STATUS_CONFIG_SAVE_ERROR, STATUS_CONFIG_ADJUSTED)
@@ -1367,6 +1369,8 @@ def _close_hardware_monitor(computer):
             computer.Close()
         except Exception:
             log.debug("Failed to close hardware monitor", exc_info=True)
+            return False
+    return True
 
 
 def init_hardware_monitor(*, coexistence=False, storage_enabled=True):
@@ -1402,7 +1406,11 @@ def init_hardware_monitor(*, coexistence=False, storage_enabled=True):
         return computer
     except Exception:
         log.warning("Failed to init LibreHardwareMonitor, falling back to psutil", exc_info=True)
-        _close_hardware_monitor(computer)
+        if not _close_hardware_monitor(computer):
+            # A partially opened native object may still own device handles.
+            # Returning fallback here would authorize another Open next retry.
+            raise HardwareAccessConflict(
+                "Hardware monitor initialization cleanup failed; restart HeatMap before reopening sensors")
         return None
 
 
@@ -2289,7 +2297,7 @@ def _case_fan_advice(status):
             or (status.get("baseline") and not status.get("restore_confirmed"))):
         return "Case fans: restore unconfirmed; restart Windows. Copy diagnostics for details."
     if status.get("restore_confirmed"):
-        return "Case fans: automatic control stopped; firmware restored. Copy diagnostics for details."
+        return "Case fans: automatic control stopped; firmware restored. Copy diagnostics; toggle Automatic case fans OFF then ON to retry."
     if _case_fan_never_acquired(status):
         return "Case fans: automatic control could not start; no fan commands sent. Copy diagnostics for the cause."
     if status.get("reason", "").startswith("Shared controller requires"):
@@ -4419,6 +4427,43 @@ class OverlayApp:
     def show_menu(self, event):
         self.menu.tk_popup(event.x_root, event.y_root)
 
+    def _wait_for_hardware_recovery(self):
+        """Require continuous verified access and completed controller handback."""
+        clear_since = None
+        while self.running and not self._stop_event.is_set():
+            try:
+                require_hardware_access("monitor")
+            except HardwareAccessConflict as exc:
+                clear_since = None
+                with self.lock:
+                    self._hardware_pause_reason = "Sensors paused: " + str(exc)
+                if getattr(exc, "kind", None) not in ("driver_change", "inventory_unverified"):
+                    return False
+            else:
+                now = time.monotonic()
+                if clear_since is None:
+                    clear_since = now
+                if now - clear_since >= HARDWARE_ACCESS_CLEAR_SECONDS:
+                    for attribute in ("fan_worker", "gpu_fan_worker"):
+                        worker = getattr(self, attribute, None)
+                        process = getattr(worker, "process", None)
+                        if process is None:
+                            continue
+                        # A process exit alone does not prove that firmware or
+                        # the driver's original curve was restored.
+                        if process.poll() is None or not fan_control_released(worker.poll()):
+                            with self.lock:
+                                self._hardware_pause_reason = (
+                                    "Sensors paused: fan restoration is unconfirmed; "
+                                    "check Cooling diagnostics before restarting HeatMap")
+                            return False
+                    with self.lock:
+                        self._hardware_pause_reason = None
+                    log.info("Hardware access stable; resuming sensor monitoring")
+                    return True
+            self._stop_event.wait(HARDWARE_ACCESS_POLL_SECONDS)
+        return False
+
     def sensor_loop(self):
         # psutil maintains its CPU baseline per thread.
         psutil.cpu_percent(interval=0)
@@ -4433,124 +4478,151 @@ class OverlayApp:
         first_initialization = computer is None
         try:
             while self.running and not self._stop_event.is_set():
-                access_mode = require_hardware_access("monitor")
-                if getattr(self, "config", {}).get("case_fans_b850_enabled") and not getattr(self, "_case_monitor_coexistence", False):
-                    try:
-                        require_hardware_access("independent_case_control")
-                    except HardwareAccessConflict:
-                        self._case_monitor_coexistence = True
-                        self._gpu_monitor_coexistence = not _gpu_control_available()
-                        self._stop_fan_workers_for_monitor()
-                if access_mode == "shared" and not getattr(self, "_monitor_coexistence", False):
-                    # Hand back affected owners; GCC alone permits independent ADLX control.
-                    self._monitor_coexistence = True
-                    if not getattr(self, "_gpu_monitor_coexistence", True):
-                        self._gpu_monitor_coexistence = not _gpu_control_available()
-                    self._stop_fan_workers_for_monitor()
-                    needs_reinit = computer is not None
-                    next_init_retry = 0
-                if getattr(self, "_monitor_coexistence", False):
-                    access_mode = "shared"  # Stay restricted until restart, even if the other tool exits.
-                with self.lock:
-                    snapshot = getattr(self, '_volume_snapshot', None)
-                volume_data = _fresh_volume_data(snapshot, time.monotonic()) or {'volumes': [], 'volume_errors': []}
-                if (computer is None or needs_reinit) and time.monotonic() >= next_init_retry:
-                    if computer is not None:
-                        log.warning("Reinitializing hardware monitor after incomplete sensor samples or read errors")
-                    elif not first_initialization:
-                        log.warning("Retrying unavailable hardware monitor initialization")
-                    with self.lock:
-                        self.computer = None
-                    # Close/Open can take seconds. Only this worker owns the handle;
-                    # never hold the UI data lock during native hardware operations.
-                    _close_hardware_monitor(computer)
-                    computer = None
-                    if not self.running or self._stop_event.is_set():
-                        break
-                    options = ({} if not getattr(self, "_isolated_storage", False)
-                               and getattr(self, "config", {}).get("storage_temperatures_enabled", True)
-                               else {"storage_enabled": False})
-                    if access_mode == "shared":
-                        computer = init_hardware_monitor(coexistence=True, **options)
-                    else:
-                        try:
-                            computer = init_hardware_monitor(**options)
-                        except HardwareAccessConflict:
-                            # A monitor can start between this poll and Open's
-                            # stricter guard. Re-enter the loop for fan handback
-                            # and shared initialization instead of latching off.
-                            if require_hardware_access("monitor") == "shared":
-                                continue
-                            raise
-                    now = time.monotonic()
-                    next_init_retry = now + SENSOR_INIT_RETRY_SECONDS
-                    next_storage_update = 0
-                    if first_initialization:
-                        self._sensor_start_time = now
-                        first_initialization = False
-                    if not self.running or self._stop_event.is_set():
-                        break
-                    with self.lock:
-                        self.computer = computer
-                    needs_reinit = False
-                    consecutive_errors = consecutive_reinit_hints = 0
                 try:
-                    update_storage = time.monotonic() >= next_storage_update
-                    data = read_sensors(computer, update_storage=update_storage)
-                    data.update(volume_data)
-                    if not getattr(self, "config", {}).get("storage_temperatures_enabled", True):
-                        data["storage_temperatures_disabled"] = True
-                    elif getattr(self, "_isolated_storage", False):
-                        numbers = {volume["disk_number"] for volume in volume_data.get("volumes", [])
-                                   if type(volume.get("disk_number")) is int}
+                    while self.running and not self._stop_event.is_set():
+                        access_mode = require_hardware_access("monitor")
+                        if getattr(self, "config", {}).get("case_fans_b850_enabled") and not getattr(self, "_case_monitor_coexistence", False):
+                            try:
+                                require_hardware_access("independent_case_control")
+                            except HardwareAccessConflict:
+                                self._case_monitor_coexistence = True
+                                self._gpu_monitor_coexistence = not _gpu_control_available()
+                                self._stop_fan_workers_for_monitor()
+                        if access_mode == "shared" and not getattr(self, "_monitor_coexistence", False):
+                            # Hand back affected owners; GCC alone permits independent ADLX control.
+                            self._monitor_coexistence = True
+                            if not getattr(self, "_gpu_monitor_coexistence", True):
+                                self._gpu_monitor_coexistence = not _gpu_control_available()
+                            self._stop_fan_workers_for_monitor()
+                            needs_reinit = computer is not None
+                            next_init_retry = 0
+                        if getattr(self, "_monitor_coexistence", False):
+                            access_mode = "shared"  # Stay restricted until restart, even if the other tool exits.
                         with self.lock:
-                            storage_snapshot = dict(self._storage_snapshot)
-                            numbers.update(getattr(self, "_storage_numbers", set()))
-                        data.update(storage_snapshot_data(storage_snapshot, numbers, time.monotonic()))
-                    if update_storage:
-                        next_storage_update = time.monotonic() + VOLUME_REFRESH_SECONDS
-                        storage_failed = bool(data.get(SENSOR_STORAGE_FAILED_KEY))
-                    if storage_failed:
-                        # Cached LHM reads are not evidence that a failed native
-                        # storage update recovered. Hide stale disks until refresh.
-                        data["disks"] = []
-                        data[SENSOR_STATUS_KEY] = SENSOR_STATUS_PARTIAL
-                        data[SENSOR_REINIT_KEY] = True
-                    warmup = (
-                        computer is not None
-                        and time.monotonic() - self._sensor_start_time < SENSOR_WARMUP_SECONDS
-                    )
-                    if warmup and data.get(SENSOR_REINIT_KEY):
-                        data[SENSOR_STATUS_KEY] = SENSOR_STATUS_WARMING_UP
-                    elif computer is not None and not warmup and data.get("cpu_temp") is None:
-                        data[SENSOR_STATUS_KEY] = SENSOR_STATUS_CPU_UNAVAILABLE
+                            snapshot = getattr(self, '_volume_snapshot', None)
+                        volume_data = _fresh_volume_data(snapshot, time.monotonic()) or {'volumes': [], 'volume_errors': []}
+                        if (computer is None or needs_reinit) and time.monotonic() >= next_init_retry:
+                            if computer is not None:
+                                log.warning("Reinitializing hardware monitor after incomplete sensor samples or read errors")
+                            elif not first_initialization:
+                                log.warning("Retrying unavailable hardware monitor initialization")
+                            with self.lock:
+                                self.computer = None
+                            # Close/Open can take seconds. Only this worker owns the handle;
+                            # never hold the UI data lock during native hardware operations.
+                            if not _close_hardware_monitor(computer):
+                                raise HardwareAccessConflict(
+                                    "Hardware monitor close failed; restart HeatMap before reopening sensors")
+                            computer = None
+                            if not self.running or self._stop_event.is_set():
+                                break
+                            options = ({} if not getattr(self, "_isolated_storage", False)
+                                       and getattr(self, "config", {}).get("storage_temperatures_enabled", True)
+                                       else {"storage_enabled": False})
+                            if access_mode == "shared":
+                                computer = init_hardware_monitor(coexistence=True, **options)
+                            else:
+                                try:
+                                    computer = init_hardware_monitor(**options)
+                                except HardwareAccessConflict:
+                                    # A monitor can start between this poll and Open's
+                                    # stricter guard. Re-enter the loop for fan handback
+                                    # and shared initialization instead of latching off.
+                                    if require_hardware_access("monitor") == "shared":
+                                        continue
+                                    raise
+                            now = time.monotonic()
+                            next_init_retry = now + SENSOR_INIT_RETRY_SECONDS
+                            next_storage_update = 0
+                            if first_initialization:
+                                self._sensor_start_time = now
+                                first_initialization = False
+                            if not self.running or self._stop_event.is_set():
+                                break
+                            with self.lock:
+                                self.computer = computer
+                            needs_reinit = False
+                            consecutive_errors = consecutive_reinit_hints = 0
+                        try:
+                            update_storage = time.monotonic() >= next_storage_update
+                            data = read_sensors(computer, update_storage=update_storage)
+                            data.update(volume_data)
+                            if not getattr(self, "config", {}).get("storage_temperatures_enabled", True):
+                                data["storage_temperatures_disabled"] = True
+                            elif getattr(self, "_isolated_storage", False):
+                                numbers = {volume["disk_number"] for volume in volume_data.get("volumes", [])
+                                           if type(volume.get("disk_number")) is int}
+                                with self.lock:
+                                    storage_snapshot = dict(self._storage_snapshot)
+                                    numbers.update(getattr(self, "_storage_numbers", set()))
+                                data.update(storage_snapshot_data(storage_snapshot, numbers, time.monotonic()))
+                            if update_storage:
+                                next_storage_update = time.monotonic() + VOLUME_REFRESH_SECONDS
+                                storage_failed = bool(data.get(SENSOR_STORAGE_FAILED_KEY))
+                            if storage_failed:
+                                # Cached LHM reads are not evidence that a failed native
+                                # storage update recovered. Hide stale disks until refresh.
+                                data["disks"] = []
+                                data[SENSOR_STATUS_KEY] = SENSOR_STATUS_PARTIAL
+                                data[SENSOR_REINIT_KEY] = True
+                            warmup = (
+                                computer is not None
+                                and time.monotonic() - self._sensor_start_time < SENSOR_WARMUP_SECONDS
+                            )
+                            if warmup and data.get(SENSOR_REINIT_KEY):
+                                data[SENSOR_STATUS_KEY] = SENSOR_STATUS_WARMING_UP
+                            elif computer is not None and not warmup and data.get("cpu_temp") is None:
+                                data[SENSOR_STATUS_KEY] = SENSOR_STATUS_CPU_UNAVAILABLE
+                            with self.lock:
+                                self.sensor_data = data
+                                self._sensor_sample_time = time.monotonic()
+                            try:
+                                self._cache_sensor_diagnostics(computer, data)
+                            except Exception as exc:
+                                # Diagnostic formatting must not trigger native Close/Open.
+                                log.warning("Could not cache sensor diagnostics: %s", exc)
+                            consecutive_errors = 0
+                            if computer is not None and data.get(SENSOR_REINIT_KEY):
+                                consecutive_reinit_hints += 1
+                                needs_reinit = consecutive_reinit_hints >= (1 if warmup else 3)
+                            else:
+                                consecutive_reinit_hints = 0
+                                needs_reinit = False
+                        except Exception as e:
+                            consecutive_errors += 1
+                            consecutive_reinit_hints = 0
+                            log.error("Sensor read error: %s", e, exc_info=True)
+                            with self.lock:
+                                self.sensor_data = {"error": str(e), **volume_data}
+                                self._sensor_sample_time = time.monotonic()
+                            needs_reinit = consecutive_errors >= 3
+                        self._stop_event.wait(2)
+                except HardwareAccessConflict as exc:
+                    if getattr(exc, "kind", None) not in ("driver_change", "inventory_unverified"):
+                        raise
+                    # One owner closes and reopens its own native handle. Never
+                    # spawn a replacement reader while an old call is in flight.
                     with self.lock:
-                        self.sensor_data = data
+                        self._hardware_pause_reason = "Sensors paused: " + str(exc)
+                        self.sensor_data = {"error": self._hardware_pause_reason}
                         self._sensor_sample_time = time.monotonic()
-                    try:
-                        self._cache_sensor_diagnostics(computer, data)
-                    except Exception as exc:
-                        # Diagnostic formatting must not trigger native Close/Open.
-                        log.warning("Could not cache sensor diagnostics: %s", exc)
-                    consecutive_errors = 0
-                    if computer is not None and data.get(SENSOR_REINIT_KEY):
-                        consecutive_reinit_hints += 1
-                        needs_reinit = consecutive_reinit_hints >= (1 if warmup else 3)
-                    else:
-                        consecutive_reinit_hints = 0
-                        needs_reinit = False
-                except Exception as e:
-                    consecutive_errors += 1
-                    consecutive_reinit_hints = 0
-                    log.error("Sensor read error: %s", e, exc_info=True)
-                    with self.lock:
-                        self.sensor_data = {"error": str(e), **volume_data}
-                        self._sensor_sample_time = time.monotonic()
-                    needs_reinit = consecutive_errors >= 3
-                self._stop_event.wait(2)
+                        self.computer = None
+                    self._stop_fan_workers()
+                    closed = _close_hardware_monitor(computer)
+                    computer = None
+                    if not closed:
+                        with self.lock:
+                            self._hardware_pause_reason = (
+                                "Sensors paused: hardware monitor close failed; restart HeatMap")
+                        break
+                    if not self._wait_for_hardware_recovery():
+                        break
+                    needs_reinit = True
+                    next_init_retry = 0
+                    first_initialization = True
         except HardwareAccessConflict as exc:
-            # Latch until restart: a disappearing installer is not evidence that
-            # its driver has finished changing. Stop our fan owner normally.
+            # Unknown conflicts and unconfirmed controller handback remain
+            # hard failures. Only typed transient guard failures auto-recover.
             reason = "Sensors paused: " + str(exc)
             log.warning("%s", reason)
             with self.lock:
@@ -4639,11 +4711,16 @@ class OverlayApp:
     def storage_loop(self):
         """Keep slow disk identification independent of the CPU/GPU sensor owner."""
         retry_after = {}
-        def cancelled():
-            return (self._stop_event.is_set() or not self.running
-                    or bool(getattr(self, "_hardware_pause_reason", None)))
+        def stopped():
+            return self._stop_event.is_set() or not self.running
 
-        while not cancelled():
+        def cancelled():
+            return stopped() or bool(getattr(self, "_hardware_pause_reason", None))
+
+        while not stopped():
+            if cancelled():
+                self._stop_event.wait(HARDWARE_ACCESS_POLL_SECONDS)
+                continue
             with self.lock:
                 volume_snapshot = getattr(self, "_volume_snapshot", None)
             volumes = _fresh_volume_data(volume_snapshot, time.monotonic()) or {}
@@ -4663,19 +4740,19 @@ class OverlayApp:
                        if type(volume.get("disk_number")) is int}
             for number in sorted(numbers, key=lambda number: (number not in mounted, number)):
                 if cancelled():
-                    return
+                    break
                 if time.monotonic() < retry_after.get(number, 0):
                     continue
                 try:
                     require_hardware_access("monitor")
                     sample = probe_disk(number, cancelled)
                 except HardwareAccessConflict:
-                    # The sensor owner publishes the pause and stops fan owners.
-                    return
+                    # Keep this owner alive; the sensor owner controls recovery.
+                    break
                 except (OSError, ValueError) as exc:
                     sample = {"disk_number": number, "error": str(exc)}
                 if sample is None or cancelled():
-                    return
+                    break
                 if "error" in sample:
                     # Do not hammer a driver/device that timed out. Healthy
                     # disks retain the normal 30-second refresh interval.
@@ -5106,10 +5183,25 @@ class OverlayApp:
     def _show_sensor_error(self, text="ERR", color="#f87171", volume_data=None):
         if hasattr(self, "advisor"):
             self.advisor.reset()
-        # Evaluate only independently fresh Windows volumes, never old thermal
-        # values or the thermal advisor's missing-sensor history on this path.
-        self.thermal_findings = (ThermalAdvisor().evaluate(volume_data, time.monotonic(),
-            _METRIC_THRESHOLDS, _disk_temperature_thresholds) if volume_data is not None else [])
+        # One fresh Windows snapshot serves display, warnings and alerts; old
+        # thermal data and the advisor's missing-sensor history stay excluded.
+        independent = dict(volume_data or {})
+        memory_data = {}
+        if "ram_gb" in self.rows and "ram_pct" in self.rows:
+            try:
+                memory = psutil.virtual_memory()
+                percent = finite(memory.percent, 0, 100)
+                total = finite(memory.total, 1, 1e18)
+                used = finite(memory.used, 0, total if total is not None else 0)
+                if percent is not None and total is not None and used is not None:
+                    memory_data = {"ram_pct": round(percent),
+                        "ram_used_gb": round(used / 1024 ** 3, 1),
+                        "ram_total_gb": round(total / 1024 ** 3, 1)}
+                    independent.update(memory_data)
+            except (OSError, psutil.Error):
+                log.warning("Windows memory reading unavailable", exc_info=True)
+        self.thermal_findings = ThermalAdvisor().evaluate(independent, time.monotonic(),
+            _METRIC_THRESHOLDS, _disk_temperature_thresholds)
         if hasattr(self, "health_label"):
             status = getattr(self, "_case_fan_status", {})
             controller_error = status.get("state") == "error"
@@ -5119,7 +5211,7 @@ class OverlayApp:
                            max((item.severity for item in self.thermal_findings), default=0))
             self._set_health_panel(messages, severity)
             if severity == 2 or getattr(self, "_gpu_fan_status", {}).get("state") == "error":
-                self._check_alerts({})
+                self._check_alerts(independent)
         for child in list(self.disk_frame.winfo_children()):
             self._service_fan_heartbeats()
             child.destroy()
@@ -5136,6 +5228,12 @@ class OverlayApp:
         for label in getattr(self, "fan_percent_labels", {}).values():
             self._service_fan_heartbeats()
             label.config(text=" · --%", fg="#888888")
+        if memory_data:
+            percent = memory_data["ram_pct"]
+            color = _metric_color(percent, _METRIC_THRESHOLDS["ram_pct"])
+            self.rows["ram_gb"].config(
+                text=f"{memory_data['ram_used_gb']}/{memory_data['ram_total_gb']} GiB", fg=color)
+            self.rows["ram_pct"].config(text=f"{percent}%", fg=color)
         self._update_storage_rows([], volume_data)
         self._fit_content()
         if hasattr(self, "canvas"):

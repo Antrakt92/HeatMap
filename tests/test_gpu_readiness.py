@@ -62,7 +62,11 @@ class GpuReadinessTests(unittest.TestCase):
             reads.append((now[0], strict))
             if strict:
                 self.assertEqual(adapter.writes, [])
-                journal.recover.assert_not_called()
+                # With no interrupted owner, readiness still precedes every
+                # potential recovery write/new takeover. A pending journal is
+                # checked earlier to hand back the previous owner's settings.
+                if not pending:
+                    journal.recover.assert_not_called()
             if mode == 'native_error':
                 raise AdlxError('metrics: unsupported', result=12)
             sample = dict(gpu_core_temp=40, gpu_hotspot_temp=50, gpu_memory_temp=60,
@@ -144,13 +148,13 @@ class GpuReadinessTests(unittest.TestCase):
         journal.recover.assert_not_called()
         adapter.close.assert_called_once()
 
-    def test_pending_recovery_never_claims_firmware_ownership_while_waiting(self):
+    def test_pending_recovery_is_checked_before_waiting_for_thermal_readiness(self):
         _, adapter, reports, journal, _, _ = self.run_startup('cancel', stop_at=2, pending=True)
-        self.assertTrue(all(report['control_attempted'] is None for report in reports))
+        self.assertIsNone(reports[0]['control_attempted'])
         self.assertTrue(reports[0]['recovery_pending'])
-        self.assertTrue(reports[-1]['recovery_pending'])
+        self.assertFalse(reports[-1]['recovery_pending'])
         self.assertEqual(adapter.writes, [])
-        journal.recover.assert_not_called()
+        journal.recover.assert_called_once()
 
     def test_conflict_heartbeat_and_native_errors_do_not_retry_or_write(self):
         for mode in ('conflict', 'heartbeat', 'native_error', 'unsupported'):
@@ -168,7 +172,7 @@ class GpuReadinessTests(unittest.TestCase):
         self.assertEqual(gpu_fans.mode_text(dict(state='checking', phase='waiting',
                                                 remaining_seconds=58.2)), 'Waiting GPU 59s')
 
-    def test_recovery_conflict_after_readiness_is_terminal_without_new_writes(self):
+    def test_recovery_conflict_before_readiness_is_terminal_without_new_writes(self):
         result, adapter, reports, journal, _, created = self.run_startup('recovery_conflict', pending=True)
         self.assertEqual(result, 1)
         self.assertEqual(created, [0])

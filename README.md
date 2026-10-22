@@ -422,8 +422,16 @@ SPD/SMBus inventory is disabled beside these tools. The control pause remains un
 HeatMap restarts, including if the other tools close during the session. Starting
 or closing additional monitoring tools does not stop sensor updates. When another
 tool starts, HeatMap confirms handback of the affected fan controllers before shared reads.
-An installer detected before the next sensor call pauses monitoring until restart;
-this cannot guarantee recovery from a driver removed during an in-flight native call.
+An installer detected before the next sensor call pauses native monitoring and
+stops fan assistance normally. Monitoring checks access every two seconds and
+reopens its native reader after 15 seconds of uninterrupted verified access,
+successful closure of the old reader, and confirmed fan handback. Another driver
+operation resets this wait. Windows RAM and volume capacity remain available.
+Storage-temperature polling also resumes after the pause. Fan assistance remains
+stopped; re-enable its saved toggle OFF then ON after checking Cooling diagnostics.
+An unknown conflict, failed native closure, or unconfirmed fan handback still
+requires intervention. This cannot guarantee recovery from a driver removed
+during an in-flight native call.
 An empty secondary display adapter does not repeatedly reopen a healthy GPU monitor.
 Standard AMD Adrenalin is not blocked. For the ambiguous `gcc.exe` name, HeatMap
 checks compiler/runtime files to recognize MinGW/MSYS and w64devkit installations;

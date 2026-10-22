@@ -1,4 +1,5 @@
-from unittest.mock import Mock
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from gpu_fans import mode_text
 from test_ui_layout import TkTestCase, layout_app
@@ -25,10 +26,13 @@ class GpuFanLayoutTests(TkTestCase):
             app.gpu_fan_worker = Mock()
             app.gpu_fan_worker.poll.return_value = dict(state='error', reason='Recovery conflict')
             app._check_alerts = Mock()
-            app.update_ui()
+            with patch('overlay.psutil.virtual_memory', return_value=SimpleNamespace(
+                    percent=50, used=8 * 1024 ** 3, total=16 * 1024 ** 3)):
+                app.update_ui()
             self.assertIn('GPU fans: Recovery conflict', app.health_messages)
             self.assertEqual(app.health_label.cget('fg'), '#f87171')
-            app._check_alerts.assert_called_once_with({})
+            app._check_alerts.assert_called_once_with(
+                {'ram_pct': 50, 'ram_used_gb': 8.0, 'ram_total_gb': 16.0})
 
     def test_cooling_row_fits_at_supported_scales_and_survives_sensor_failure(self):
         for scaling in (1.333, 2.0, 2.666):

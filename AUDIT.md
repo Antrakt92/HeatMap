@@ -1,5 +1,30 @@
 # HeatMap Audit Backlog
 
+Driver-pause recovery audit (2026-10-22): the supplied diagnostics showed a
+historical 72-second sensor snapshot after a PnPUtil pause. HeatMap.log records
+the pause at 12:38:49; Windows setupapi.dev.log confirms live driver-package
+uninstall operations at 12:38:50. The guard was justified, rather than a proven
+false positive. The sensor thread and storage-temperature thread previously
+terminated on that transient condition, leaving readings unavailable indefinitely.
+They now retain one owner, close the old native monitor, and reopen only after
+15 seconds of continuously clear access and verified controller handback.
+Unknown conflicts, failed Close, pending recovery, and a still-running fan owner
+remain hard stops. Fan assistance requires a deliberate OFF/ON after the pause;
+fresh Windows RAM and volume capacity remain independent of native sensors.
+
+An independent GPU audit reproduced interrupted ownership being left pending
+when a temperature was unavailable: recovery waited behind thermal readiness.
+Valid interrupted settings are now restored first under the existing identity,
+ownership and external-change guards. A new takeover still requires complete
+advancing temperatures. Legacy PnPUtil mutation syntax and unreadable arguments
+also now remain guarded. No driver, DLL, thermal threshold or watchdog was changed.
+Regression and live verification details: docs/driver-recovery-audit-2026-10-22.md.
+Local integration passed 1,143 tests, compilation, runtime/preflight/manifest
+and license-provenance checks, plus disposable native window/notice checks.
+Normal elevated restart produced a responsive visible overlay and repeated
+fresh active B850/standby GPU reports. Real driver replacement, sustained load,
+sleep/resume and native-call hangs remain separate verification boundaries.
+
 Storage/UI scheduling follow-up (2026-10-22): the live log again showed UI
 polling gaps and the supplied diagnostics had failed volume discovery and disk
 probe timeouts. The owned Scheduler task used its implicit priority 7; the live

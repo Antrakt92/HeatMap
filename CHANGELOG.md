@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Resume sensor and storage-temperature monitoring after a temporary driver or
+  process-inventory block clears, using a fresh native reader after 15 seconds
+  of verified access and confirmed fan handback. Keep Windows RAM available
+  during pauses, including its normal warnings and alerts.
+- Restore an interrupted GPU fan session before waiting for missing or frozen
+  temperature readings; new fan takeover still requires fresh complete metrics.
+- Guard legacy PnPUtil driver-change commands and unavailable command lines.
+  Keep read-only enumeration and package staging available.
 - Renew fan-owner heartbeats between completed sensor-rendering stages, including
   storage and unavailable readings, so a long but progressing refresh does not
   unnecessarily stop automatic cooling. A single blocked call still times out.

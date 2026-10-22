@@ -164,6 +164,48 @@ class HardwareAccessGuardTests(unittest.TestCase):
             with mock.patch.object(guard.psutil, 'process_iter', return_value=[candidate]):
                 self.assertEqual(guard.hardware_conflicts(), ['pnputil.exe'] if blocked else [])
 
+    def test_pnputil_legacy_live_mutations_block_but_queries_and_staging_do_not(self):
+        candidate = mock.Mock(info={'name': 'pnputil.exe'})
+        for args, blocked in ((['-a', 'amd.inf', '-i'], True),
+                              (['-I', '-A', 'amd.inf'], True),
+                              (['-d', 'oem0.inf', '-f'], True),
+                              (['-F', '-D', 'oem0.inf'], True),
+                              (['-e'], False),
+                              (['-a', 'amd.inf'], False),
+                              (['-d', 'oem0.inf'], False)):
+            candidate.cmdline.return_value = ['pnputil.exe', *args]
+            with self.subTest(args=args), mock.patch.object(
+                guard.psutil, 'process_iter', return_value=[candidate]
+            ):
+                self.assertEqual(guard.hardware_conflicts(), ['pnputil.exe'] if blocked else [])
+
+    def test_pnputil_missing_or_malformed_command_line_cannot_authorize_native_reads(self):
+        candidate = mock.Mock(info={'name': 'pnputil.exe'})
+        for command in (None, [], '', 'pnputil.exe /enum-devices',
+                        ['pnputil.exe', None], ['pnputil.exe', 123],
+                        [None, '/enum-devices'], ['', '/enum-devices']):
+            candidate.cmdline.return_value = command
+            with self.subTest(command=command), mock.patch.object(
+                guard.psutil, 'process_iter', return_value=[candidate]
+            ):
+                with self.assertRaises(guard.HardwareAccessConflict):
+                    guard.require_hardware_access('monitor')
+
+    def test_transient_kinds_distinguish_inventory_and_driver_from_generic_conflicts(self):
+        self.assertIsNone(guard.HardwareAccessConflict('unclassified').kind)
+        with mock.patch.object(guard.psutil, 'process_iter', side_effect=psutil.AccessDenied(42)):
+            with self.assertRaises(guard.HardwareAccessConflict) as caught:
+                guard.require_hardware_access('monitor')
+            self.assertEqual(caught.exception.kind, 'inventory_unverified')
+        with mock.patch.object(guard.psutil, 'process_iter', return_value=[process('atisetup.exe')]):
+            with self.assertRaises(guard.HardwareAccessConflict) as caught:
+                guard.require_hardware_access('monitor')
+            self.assertEqual(caught.exception.kind, 'driver_change')
+        with mock.patch.object(guard.psutil, 'process_iter', return_value=[process('cpuz.exe')]):
+            with self.assertRaises(guard.HardwareAccessConflict) as caught:
+                guard.require_hardware_access('control')
+            self.assertIsNone(caught.exception.kind)
+
     def test_unreadable_pnputil_is_guarded_and_exited_pnputil_is_ignored(self):
         candidate = mock.Mock(info={'name': 'pnputil.exe'})
         for error, expected in ((psutil.AccessDenied(1), ['pnputil.exe']),
