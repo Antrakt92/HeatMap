@@ -484,6 +484,56 @@ def _window_has_class(hwnd, classes):
     return False
 
 
+def _windows_above(hwnd):
+    """Bound traversal because windows can disappear or move while polling."""
+    seen = {hwnd}
+    for _ in range(256):
+        hwnd = user32.GetWindow(hwnd, GW_HWNDPREV)
+        if not hwnd or hwnd in seen:
+            break
+        seen.add(hwnd)
+        yield hwnd
+
+
+def _native_menu_windows():
+    """Return our visible native popups in front-to-back order."""
+    menus = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+    def collect(hwnd, _param):
+        if user32.IsWindowVisible(hwnd) and _window_has_class(hwnd, {"#32768"}):
+            pid = ctypes.wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == os.getpid():
+                menus.append(hwnd)
+        return True
+
+    user32.EnumWindows(collect, 0)
+    return menus
+
+
+def _foreign_topmost_above(hwnd):
+    """Detect another topmost window covering any part of the raised widget."""
+    bounds = ctypes.wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(bounds)):
+        return False
+    for hwnd in _windows_above(hwnd):
+        if (not user32.IsWindowVisible(hwnd)
+                or not user32.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST):
+            continue
+        other = ctypes.wintypes.RECT()
+        if (not user32.GetWindowRect(hwnd, ctypes.byref(other))
+                or other.right <= bounds.left or other.left >= bounds.right
+                or other.bottom <= bounds.top or other.top >= bounds.bottom):
+            continue
+        pid = ctypes.wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        # Keep HeatMap's own dialogs and native popup menus ahead of the root.
+        if pid.value and pid.value != os.getpid():
+            return True
+    return False
+
+
 def _find_desktop_surface():
     """Find the shell icon host; it is a z-order reference, never our parent."""
     progman = user32.FindWindowW("Progman", None)
@@ -3809,7 +3859,14 @@ class OverlayApp:
         hwnd = self._get_hwnd()
         flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
         if raised:
-            return bool(user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags))
+            menus = _native_menu_windows() if getattr(self, "_menu_open", False) else []
+            if not user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags):
+                return False
+            # Native Tk menus are not owned dialogs: raising the root can cover
+            # them. Restore the existing submenu order above their anchor.
+            for menu in reversed(menus):
+                user32.SetWindowPos(menu, HWND_TOPMOST, 0, 0, 0, 0, flags)
+            return True
         if user32.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST:
             if not user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags):
                 return False
@@ -3945,7 +4002,8 @@ class OverlayApp:
             if user32.IsIconic(hwnd) or not user32.IsWindowVisible(hwnd):
                 user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
             raised = self.topmost or self.peek_visible
-            if not raised or not user32.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST:
+            if (not raised or not user32.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST
+                    or _foreign_topmost_above(hwnd)):
                 self._set_window_layer(raised)
         except tk.TclError:
             log.debug("Desktop visibility changed during window transition", exc_info=True)

@@ -629,6 +629,11 @@ to its left. Hovering over another monitor's edge raises the widget in its exist
 location; it does not move it to the pointer. `Always on top` separately enables
 permanent placement above applications.
 
+While raised by either mode, HeatMap checks every 250 ms for an overlapping
+topmost window, such as picture-in-picture video, and restores its position
+above that window without taking keyboard focus. Its settings menus and dialogs
+remain above the widget. Uncovered topmost windows do not cause reordering.
+
 The window remains on the desktop continuously; covering it with an application
 does not hide or recreate it. HeatMap does not attach its window to Explorer.
 Placement beneath desktop icons is not guaranteed, so choose an area without

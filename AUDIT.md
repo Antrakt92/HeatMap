@@ -1,5 +1,32 @@
 # HeatMap Audit Backlog
 
+PiP/topmost ordering repair (2026-10-24): the visibility poll previously checked
+only WS_EX_TOPMOST, allowing a later topmost video window to cover HeatMap
+indefinitely. The existing 250 ms poll now detects visible, overlapping foreign
+topmost windows above the widget and reasserts its z-order without activation,
+movement or resizing. Both Always on top and temporary edge raise use this path;
+ordinary desktop mode still stays below applications. Hidden/nonoverlapping
+windows and HeatMap's own windows do not trigger repeated reordering. Traversal
+is bounded against disappearing/cyclic window chains.
+
+Native popup inspection also found that raising an owner can cover its Windows
+menu. Recovery now restores only this process's visible native menus, preserving
+submenu order. Owned dialogs remain above their owner. The initial regression
+failed in both persistent and hover modes before the fix. Focused unit checks,
+real off-screen Win32 PiP-order tests (foreign PID modeled), and a real native Tk
+popup check passed. The PiP fixture starts in the existing topmost band, matching
+the reported defect; it verifies recovery, retained dialog order, unchanged
+foreground and the other window's unchanged topmost style.
+
+Final local checks passed: 1,156 unit tests, compileall, DLL integrity, startup
+preflight, runtime manifest synchronization and native desktop/PiP integration.
+
+Manual elevated follow-up: overlap real browser PiP with HeatMap, raise PiP again
+after showing HeatMap, and check recovery in both edge-hover and Always on top
+modes. Open submenus and Cooling/CPU reference dialogs, check their order and
+departure cancellation, then disable Always on top and confirm desktop behavior.
+This does not claim acceptance of a particular browser/video player.
+
 Settings/edge-hover repair (2026-10-24): native Windows Tk menus report an
 unmapped 1x1 Tk placeholder while their actual popup remains visible. The old
 hover check could therefore lower the widget beneath other applications and

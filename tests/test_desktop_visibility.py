@@ -1,4 +1,5 @@
 import ctypes
+import os
 import unittest
 from unittest import mock
 
@@ -7,6 +8,100 @@ from test_overlay_helpers import _FakeRoot
 
 
 class DesktopVisibilityTests(unittest.TestCase):
+    def test_native_menu_collection_never_includes_another_process(self):
+        def enumerate_windows(callback, _param):
+            for hwnd in (10, 20, 30):
+                callback(hwnd, 0)
+            return True
+        def owner(hwnd, pointer):
+            pointer._obj.value = os.getpid() if hwnd == 10 else os.getpid() + 1
+            return 1
+        with (
+            mock.patch.object(overlay.user32, "EnumWindows", side_effect=enumerate_windows),
+            mock.patch.object(overlay.user32, "IsWindowVisible", side_effect=lambda hwnd: hwnd != 30),
+            mock.patch.object(overlay, "_window_has_class", return_value=True),
+            mock.patch.object(overlay.user32, "GetWindowThreadProcessId", side_effect=owner),
+        ):
+            self.assertEqual(overlay._native_menu_windows(), [10])
+
+    def test_topmost_recovery_preserves_native_submenu_order(self):
+        app = self.make_app()
+        app._menu_open = True
+        with (
+            mock.patch.object(overlay, "_native_menu_windows", return_value=[10, 20]),
+            mock.patch.object(overlay.user32, "SetWindowPos", return_value=True) as position,
+        ):
+            self.assertTrue(app._set_window_layer(True))
+        self.assertEqual([call.args[0] for call in position.call_args_list], [100, 20, 10])
+        for call in position.call_args_list:
+            self.assertEqual(call.args[1], overlay.HWND_TOPMOST)
+            self.assertEqual(call.args[6], overlay.SWP_NOMOVE | overlay.SWP_NOSIZE | overlay.SWP_NOACTIVATE)
+
+    def test_foreign_topmost_detection_skips_hidden_and_own_windows(self):
+        chain = {100: 200, 200: 300, 300: 400, 400: 0}
+        def owner(hwnd, pointer):
+            pointer._obj.value = os.getpid() if hwnd == 200 else os.getpid() + 1
+            return 1
+        def bounds(_hwnd, pointer):
+            pointer._obj.left = pointer._obj.top = 0
+            pointer._obj.right = pointer._obj.bottom = 100
+            return True
+        with (
+            mock.patch.object(overlay.user32, "GetWindowRect", side_effect=bounds),
+            mock.patch.object(overlay.user32, "GetWindow", side_effect=lambda hwnd, _: chain[hwnd]),
+            mock.patch.object(overlay.user32, "IsWindowVisible", side_effect=lambda hwnd: hwnd != 300),
+            mock.patch.object(overlay.user32, "GetWindowLongW", return_value=overlay.WS_EX_TOPMOST),
+            mock.patch.object(overlay.user32, "GetWindowThreadProcessId", side_effect=owner),
+        ):
+            self.assertTrue(overlay._foreign_topmost_above(100))
+            with mock.patch.object(overlay.user32, "GetWindowLongW", side_effect=lambda hwnd, _: 0 if hwnd == 400 else overlay.WS_EX_TOPMOST):
+                self.assertFalse(overlay._foreign_topmost_above(100))
+            def separate(hwnd, pointer):
+                bounds(hwnd, pointer)
+                if hwnd == 400:
+                    pointer._obj.left, pointer._obj.right = 200, 300
+                return True
+            with mock.patch.object(overlay.user32, "GetWindowRect", side_effect=separate):
+                self.assertFalse(overlay._foreign_topmost_above(100))
+
+    def test_stale_or_cyclic_window_chain_does_not_spin(self):
+        with (
+            mock.patch.object(overlay.user32, "GetWindowRect", return_value=True),
+            mock.patch.object(overlay.user32, "GetWindow", return_value=200) as previous,
+            mock.patch.object(overlay.user32, "IsWindowVisible", return_value=False),
+        ):
+            self.assertFalse(overlay._foreign_topmost_above(100))
+        self.assertEqual(previous.call_count, 2)
+
+    def test_raised_window_without_competition_does_not_reorder(self):
+        app = self.make_app()
+        app.topmost = True
+        with (
+            mock.patch.object(overlay.user32, "IsIconic", return_value=False),
+            mock.patch.object(overlay.user32, "IsWindowVisible", return_value=True),
+            mock.patch.object(overlay.user32, "GetWindowLongW", return_value=overlay.WS_EX_TOPMOST),
+            mock.patch.object(overlay, "_foreign_topmost_above", return_value=False),
+            mock.patch.object(app, "_set_window_layer") as layer,
+        ):
+            app._poll_desktop_visibility()
+        layer.assert_not_called()
+
+    def test_topmost_and_hover_recover_when_another_topmost_window_moves_above(self):
+        for mode in ("topmost", "hover"):
+            with self.subTest(mode=mode):
+                app = self.make_app()
+                app.topmost = mode == "topmost"
+                app.peek_visible = mode == "hover"
+                with (
+                    mock.patch.object(overlay.user32, "IsIconic", return_value=False),
+                    mock.patch.object(overlay.user32, "IsWindowVisible", return_value=True),
+                    mock.patch.object(overlay.user32, "GetWindowLongW", return_value=overlay.WS_EX_TOPMOST),
+                    mock.patch.object(overlay, "_foreign_topmost_above", return_value=True, create=True),
+                    mock.patch.object(app, "_set_window_layer", return_value=True) as layer,
+                ):
+                    app._poll_desktop_visibility()
+                layer.assert_called_once_with(True)
+
     def test_application_foreground_keeps_desktop_window_mapped(self):
         app = self.make_app()
         with (

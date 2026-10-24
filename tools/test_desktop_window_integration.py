@@ -4,6 +4,7 @@ No sensors, elevation, clipboard access, shell toggles or user windows are used.
 The shell reference is synthetic; actual Explorer/Win+D acceptance is separate.
 """
 import ctypes
+import os
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -26,11 +27,11 @@ def main():
     owned = []
     flags = overlay.SWP_NOMOVE | overlay.SWP_NOSIZE | overlay.SWP_NOACTIVATE
 
-    def create():
+    def create(owner=0, topmost=False):
         hwnd = user32.CreateWindowExW(
-            overlay.WS_EX_TOOLWINDOW | overlay.WS_EX_NOACTIVATE,
+            overlay.WS_EX_TOOLWINDOW | overlay.WS_EX_NOACTIVATE | (overlay.WS_EX_TOPMOST if topmost else 0),
             "STATIC", "HeatMap synthetic native check", overlay.WS_POPUP,
-            -32000, -32000, 16, 16, 0, 0, 0, None,
+            -32000, -32000, 16, 16, owner, 0, 0, None,
         )
         if not hwnd:
             raise RuntimeError("Could not create disposable native window")
@@ -78,6 +79,32 @@ def main():
             assert user32.GetWindow(desktop, overlay.GW_HWNDPREV) == widget
             assert user32.GetForegroundWindow() == foreground, "Recovery changed foreground focus"
         print("Native desktop checks passed: DWM exclusion, under-app z-order, minimize recovery, unchanged focus")
+        # Start this fixture in the topmost band, as in the reported PiP bug.
+        widget = create(topmost=True)
+        dialog = create(widget, topmost=True)
+        application = create(topmost=True)
+        native_pid = user32.GetWindowThreadProcessId
+
+        def process_id(hwnd, pointer):
+            result = native_pid(hwnd, pointer)
+            if hwnd == application:
+                pointer._obj.value = os.getpid() + 1
+            return result
+
+        # Real z-order with a synthetic PiP; only its foreign process ID is modeled.
+        with mock.patch.object(user32, "GetWindowThreadProcessId", side_effect=process_id):
+            for mode in ("topmost", "hover"):
+                app.topmost, app.peek_visible = mode == "topmost", mode == "hover"
+                assert app._set_window_layer(True)
+                assert user32.SetWindowPos(dialog, overlay.HWND_TOPMOST, 0, 0, 0, 0, flags)
+                assert user32.SetWindowPos(application, overlay.HWND_TOPMOST, 0, 0, 0, 0, flags)
+                assert overlay._foreign_topmost_above(widget), "Synthetic PiP did not cover widget"
+                app._poll_desktop_visibility()
+                assert not overlay._foreign_topmost_above(widget), "PiP stayed above raised widget"
+                assert user32.GetWindow(widget, overlay.GW_HWNDPREV) == dialog, "Owned settings fell behind widget"
+                assert user32.GetForegroundWindow() == foreground, "Topmost recovery stole focus"
+                assert user32.GetWindowLongW(application, overlay.GWL_EXSTYLE) & overlay.WS_EX_TOPMOST
+        print("Native PiP checks passed: topmost/hover recovery, owned settings above owner, unchanged focus and PiP style")
     finally:
         for hwnd in reversed(owned):
             user32.DestroyWindow(hwnd)
