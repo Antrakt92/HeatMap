@@ -1,5 +1,30 @@
 # HeatMap Audit Backlog
 
+Settings/edge-hover repair (2026-10-24): native Windows Tk menus report an
+unmapped 1x1 Tk placeholder while their actual popup remains visible. The old
+hover check could therefore lower the widget beneath other applications and
+leave its settings stranded above them. Native menu hover now checks the popup
+under the cursor and its process identity. HeatMap dialogs also participate in
+hover bounds rather than pinning the preview open indefinitely. Departure closes
+the native menu and invokes each dialog's normal Cancel/Close handler before
+lowering the widget; the next hover starts with no old settings. Nested dialogs
+close before their parents; cancelling the CPU reference does not save input.
+
+Three regressions failed against the previous transition methods and pass with
+the repair. Local verification: 1,150 unit tests, compileall, DLL verification,
+runtime manifest synchronization, and provenance checks for 23 licensed packages
+passed. A real Windows popup check confirmed menu hover, native EndMenu during
+the popup event loop, owner lowering, clean popup return and reentry. Disposable
+native dialog/modal tests and the desktop integration check passed. No driver,
+sensor, fan-control policy or runtime dependency changed.
+
+Manual elevated smoke checklist: hover the edge, open settings and each submenu,
+move between menu and widget, then leave both; settings should close together
+with the temporary raise. Repeat with CPU reference and Cooling status; unsaved
+CPU reference must cancel. Reenter repeatedly and confirm no stale dialog or
+overlay above old settings. Check Always on top and dragging separately. Physical
+Explorer/multi-monitor acceptance remains outside the disposable-window checks.
+
 Driver-pause recovery audit (2026-10-22): the supplied diagnostics showed a
 historical 72-second sensor snapshot after a PnPUtil pause. HeatMap.log records
 the pause at 12:38:49; Windows setupapi.dev.log confirms live driver-package

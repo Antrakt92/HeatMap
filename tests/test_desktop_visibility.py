@@ -22,17 +22,24 @@ class DesktopVisibilityTests(unittest.TestCase):
         layer.assert_called_once_with(False)
         self.assertEqual(app.root.geometry_calls, [])
 
-    def test_preview_stays_raised_while_its_menu_or_settings_are_open(self):
+    def test_preview_leaves_open_settings_when_pointer_is_outside(self):
         for dialog in (True, False):
             app = self.make_app()
             app.peek_visible = True
             app.menu = mock.Mock()
             app.menu.winfo_ismapped.return_value = not dialog
             app._settings_dialog_open = dialog
-            with mock.patch.object(overlay.user32, "GetCursorPos") as cursor:
+            app.root.winfo_rootx = lambda: 120
+            app.root.winfo_rooty = lambda: 140
+            app._peek_monitor_area = app._monitor_areas[0]
+            def outside(pointer):
+                pointer._obj.x, pointer._obj.y = 900, 900
+                return True
+            with (mock.patch.object(overlay.user32, "GetCursorPos", side_effect=outside) as cursor,
+                  mock.patch.object(app, "_peek_hide") as hide):
                 app._peek_check_mouse()
-            cursor.assert_not_called()
-            self.assertEqual(app.root.after_calls[-1][0], 200)
+            cursor.assert_called_once()
+            hide.assert_called_once()
 
     def test_stable_fallback_does_not_hide_and_reembed_every_five_seconds(self):
         app = self.make_app()

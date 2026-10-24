@@ -616,8 +616,12 @@ normal UAC launcher.
 the right edge of the work area. Its position and size stay unchanged: hovering
 changes only window order, with no slide-out movement or animation. When the
 pointer leaves both the edge and the widget, the widget returns beneath applications
-and stays visible on uncovered desktop space. An open menu, the CPU reference
-dialog, and dragging keep it temporarily raised.
+and stays visible on uncovered desktop space. Moving into the settings menu,
+its submenus, or a HeatMap dialog keeps it raised while you use those controls.
+Leaving the widget, active edge, and settings closes the menu and dialogs
+(cancelling unsaved input), then returns the widget to its desktop layer.
+The next edge hover starts with the settings closed. Dragging keeps it raised
+until the mouse button is released.
 
 The hover zone excludes the taskbar, the Show Desktop button, and the internal
 boundary between two monitors. With a right-side taskbar, use the edge immediately

@@ -232,6 +232,10 @@ user32.GetClassName.restype = ctypes.c_int
 GA_PARENT = 1
 user32.GetWindowThreadProcessId.argtypes = [ctypes.wintypes.HWND, ctypes.POINTER(ctypes.wintypes.DWORD)]
 user32.GetWindowThreadProcessId.restype = ctypes.wintypes.DWORD
+user32.EndMenu.argtypes = []
+user32.EndMenu.restype = ctypes.wintypes.BOOL
+user32.GetWindowRect.argtypes = [ctypes.wintypes.HWND, ctypes.POINTER(ctypes.wintypes.RECT)]
+user32.GetWindowRect.restype = ctypes.wintypes.BOOL
 _MONITOR_ENUM_PROC = ctypes.WINFUNCTYPE(
     ctypes.c_bool,
     ctypes.wintypes.HMONITOR,
@@ -4031,12 +4035,7 @@ class OverlayApp:
         def retry():
             self.root.after(200, lambda: self._peek_check_mouse(expected_generation))
 
-        # Menus extend beyond the widget; hold the anchor while choosing settings.
-        menu = getattr(self, "menu", None)
-        cooling_dialog = getattr(self, "_cooling_dialog", None)
-        if (getattr(self, "_drag_active", False) or getattr(self, "_settings_dialog_open", False)
-                or (cooling_dialog is not None and cooling_dialog.winfo_exists())
-                or (menu is not None and menu.winfo_ismapped())):
+        if getattr(self, "_drag_active", False):
             retry()
             return
 
@@ -4063,7 +4062,12 @@ class OverlayApp:
         edge_monitor = _exposed_right_edge_monitor(mx, my, self._monitor_areas, width=10)
         over_trigger = edge_monitor is not None and edge_monitor == self._peek_monitor_area
 
-        if over_overlay or over_trigger:
+        try:
+            over_settings = self._pointer_over_settings(mx, my)
+        except tk.TclError:
+            retry()
+            return
+        if over_overlay or over_trigger or over_settings:
             retry()
         else:
             self._peek_hide()
@@ -4072,9 +4076,51 @@ class OverlayApp:
         """Return to the desktop layer while remaining mapped in the same place."""
         if not self.running or not self.peek_visible:
             return
+        self._close_peek_settings()
         if not self._restore_desktop_mode():
             generation = self._window_transition_generation
             self.root.after(200, lambda: self._peek_check_mouse(generation))
+
+    def _settings_windows(self, parent=None):
+        """Include nested modal dialogs, but leave ordinary overlay widgets alone."""
+        parent = self.root if parent is None else parent
+        children = getattr(parent, "winfo_children", lambda: ())()
+        windows = []
+        for child in children:
+            if isinstance(child, tk.Toplevel):
+                windows.append(child)
+                windows.extend(self._settings_windows(child))
+        return windows
+
+    def _pointer_over_settings(self, x, y):
+        # Windows Tk menus run a native modal loop: winfo_ismapped/geometry
+        # report an unmapped 1x1 Tk placeholder even while the menu is visible.
+        if getattr(self, "_menu_open", False):
+            hwnd = user32.WindowFromPoint(POINT(x, y))
+            pid = ctypes.wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == os.getpid() and _window_has_class(hwnd, {"#32768"}):
+                return True
+        for window in self._settings_windows():
+            if window.winfo_ismapped():
+                bounds = ctypes.wintypes.RECT()
+                if not user32.GetWindowRect(int(window.wm_frame(), 16), ctypes.byref(bounds)):
+                    raise tk.TclError("Settings window bounds unavailable")
+                if bounds.left <= x < bounds.right and bounds.top <= y < bounds.bottom:
+                    return True
+        return False
+
+    def _close_peek_settings(self):
+        if getattr(self, "_menu_open", False):
+            user32.EndMenu()
+        for window in reversed(self._settings_windows()):
+            if window.winfo_exists():
+                # Use the dialog's Cancel/Close path to release grabs and timers.
+                close = window.protocol("WM_DELETE_WINDOW")
+                if close:
+                    window.tk.call(close)
+                else:
+                    window.destroy()
 
     def toggle_peek(self):
         self.peek_enabled = not self.peek_enabled
@@ -4425,7 +4471,13 @@ class OverlayApp:
             self._set_window_layer(False)
 
     def show_menu(self, event):
-        self.menu.tk_popup(event.x_root, event.y_root)
+        self._menu_open = True
+        try:
+            self.menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._menu_open = False
+            if self.running:
+                self.menu.grab_release()
 
     def _wait_for_hardware_recovery(self):
         """Require continuous verified access and completed controller handback."""
