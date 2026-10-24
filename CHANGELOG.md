@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.4.4 — 2026-10-24
+
+- Close settings menus and dialogs when the pointer leaves the temporarily raised
+  widget, active edge and settings. Cancel unsaved CPU reference input and start
+  the next hover with no stranded settings window.
+- Recognize native Windows menus and dialog bounds while hovering, keeping
+  settings usable when they extend beyond the widget.
+- Restore raised HeatMap above overlapping picture-in-picture and other topmost
+  windows without stealing focus or moving the widget. Apply this in both
+  Always on top and edge-hover modes; keep normal desktop placement unchanged.
+- Preserve settings dialogs and native submenu order above the widget during
+  topmost recovery. Runtime dependencies, drivers and fan-control policies are
+  unchanged from 1.4.3.
+
 ## 1.4.3 — 2026-10-22
 
 - Resume sensor and storage-temperature monitoring after a temporary driver or
