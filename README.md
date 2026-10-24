@@ -776,6 +776,11 @@ leaving the widget, settings and active edge closes settings and ends the raise.
 | Reset peaks | Alerts & limits → Reset recorded peaks |
 | Close | ✕ button or Close HeatMap |
 
+The rotating log records startup version and process IDs, normal shutdown requests,
+process exits and unhandled main-thread errors. An abrupt external termination or
+native failure can still prevent a final entry; a missing exit entry alone does
+not establish the cause.
+
 `Copy diagnostics` gathers information in the background. While
 `Collecting diagnostics...` is displayed, the window remains responsive; the
 result is copied to the clipboard when complete. Clicking again does not start

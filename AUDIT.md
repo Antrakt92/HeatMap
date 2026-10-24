@@ -1,5 +1,23 @@
 # HeatMap Audit Backlog
 
+Unexpected-exit investigation (2026-10-24): no overlay process remained when
+reported. The previous case/GPU status files ended at approximately 17:55 in
+active/standby states, without terminal reports. No matching Application Error,
+Windows Error Reporting, .NET error, application hang or system reboot event was
+found for that interval. The warning-only HeatMap log contained no current exit
+evidence, so the historical termination cause remains unconfirmed; this is not
+proof of a native crash, a normal close or external process termination.
+
+Lifecycle diagnostics now retain startup version/PIDs, normal shutdown requests,
+process exits and unhandled main-thread exception tracebacks in the existing
+rotating log. INFO logging also retains the existing recovery messages. No sensor,
+fan-control, driver, timeout or automatic-restart policy changed. Regression tests
+exercise actual file logging, propagated exceptions with cleanup, and idempotent
+shutdown logging. Check a normal elevated close/restart and fresh controller
+statuses; future forced termination can still prevent a final log entry.
+Local verification passed 1,159 tests, compilation, DLL integrity and startup
+preflight. The prior termination cause remains open despite the logging repair.
+
 PiP/topmost ordering repair (2026-10-24): the visibility poll previously checked
 only WS_EX_TOPMOST, allowing a later topmost video window to cover HeatMap
 indefinitely. The existing 250 ms poll now detects visible, overlapping foreign

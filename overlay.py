@@ -75,7 +75,7 @@ log = logging.getLogger("HeatMap")
 
 def _configure_logging():
     logging.basicConfig(level=logging.WARNING, format=_LOG_FORMAT, datefmt=_LOG_DATEFMT)
-    log.setLevel(logging.WARNING)
+    log.setLevel(logging.INFO)
 
     log_path = _get_log_path()
     abs_log_path = os.path.abspath(log_path)
@@ -88,7 +88,7 @@ def _configure_logging():
         handler = logging.handlers.RotatingFileHandler(
             log_path, maxBytes=1024 * 1024, backupCount=3, encoding="utf-8"
         )
-        handler.setLevel(logging.WARNING)
+        handler.setLevel(logging.INFO)
         handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT))
         handler._heatmap_log_path = abs_log_path
         log.addHandler(handler)
@@ -5409,6 +5409,7 @@ class OverlayApp:
     def quit(self):
         if not self.running:
             return
+        log.info("HeatMap shutdown requested pid=%s", os.getpid())
         self.running = False
         steps = getattr(self, '_layout_iterator', None)
         self._layout_iterator = None
@@ -5498,6 +5499,7 @@ def main():
         return
 
     try:
+        log.info("HeatMap starting version=%s pid=%s parent_pid=%s", VERSION, os.getpid(), os.getppid())
         if not _is_admin():
             log.warning("Running without admin privileges — hardware sensors may be unavailable")
         app = OverlayApp(autostart_result=AutostartReconcileResult(False, True, "Checking", None))
@@ -5508,8 +5510,12 @@ def main():
             pass
         finally:
             app.quit()
+    except Exception:
+        log.exception("HeatMap terminated unexpectedly")
+        raise
     finally:
         release_single_instance()
+        log.info("HeatMap process exit pid=%s", os.getpid())
 
 
 if __name__ == "__main__":
