@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.5 — 2026-10-29
+
+- Discover fixed volumes from Windows drive letters and types, avoiding a global
+  filesystem enumeration that could time out and hide capacity for healthy disks.
+  Keep individual volume reads isolated with the existing deadlines and freshness.
+- Retain startup, normal shutdown, process-exit and unhandled main-thread error
+  details in the rotating log to help investigate unexpected exits.
+- Separate installation instructions and the sensor/cooling reference from the
+  overview, and add a contributor guide.
+- Configure weekly Dependabot update proposals. Runtime dependencies, drivers,
+  sensor thresholds and fan-control policies are unchanged from 1.4.4.
+
 ## 1.4.4 — 2026-10-24
 
 - Close settings menus and dialogs when the pointer leaves the temporarily raised
