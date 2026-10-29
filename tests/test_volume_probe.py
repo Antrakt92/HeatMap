@@ -258,15 +258,26 @@ class VolumeIsolationTests(unittest.TestCase):
         receive.close.assert_called_once()
         send.close.assert_called()
 
-    def test_fixed_inventory_deduplicates_letters_and_excludes_remote_optical_paths(self):
-        from types import SimpleNamespace as NS
-        partitions = [NS(mountpoint=mount, opts=opts) for mount, opts in (
-            ('C:\\', 'rw,fixed'), ('c:/', 'rw,fixed'), ('D:\\', 'rw,cdrom'),
-            ('Z:\\', 'rw,remote'), ('\\\\server\\share', 'rw,fixed'))]
-        with (mock.patch.object(volume_probe.psutil, 'disk_partitions', return_value=partitions),
+    def test_fixed_inventory_never_queries_filesystems_or_remote_volumes(self):
+        # C/D/E/Z are fixed/optical/removable/network respectively.
+        mask = sum(1 << (ord(letter) - ord('A')) for letter in 'CDEZ')
+        with (mock.patch.object(volume_probe, '_kernel') as kernel,
+              mock.patch.object(volume_probe.psutil, 'disk_partitions',
+                                side_effect=OSError('blocked filesystem metadata')) as partitions,
               mock.patch.object(volume_probe.psutil, 'disk_usage') as usage):
+            kernel.GetLogicalDrives.return_value = mask
+            kernel.GetDriveTypeW.side_effect = [3, 5, 2, 4]
             self.assertEqual(volume_probe._query(None), {'mounts': ['C:\\']})
+            self.assertEqual([call.args[0] for call in kernel.GetDriveTypeW.call_args_list],
+                             ['C:\\', 'D:\\', 'E:\\', 'Z:\\'])
+        partitions.assert_not_called()
         usage.assert_not_called()
+
+    def test_failed_drive_inventory_is_an_error_not_verified_absence(self):
+        with mock.patch.object(volume_probe, '_kernel') as kernel:
+            kernel.GetLogicalDrives.return_value = 0
+            with self.assertRaises(OSError):
+                volume_probe._query(None)
 
 
 if __name__ == '__main__':

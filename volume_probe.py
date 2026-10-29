@@ -1,4 +1,6 @@
 """Bounded Windows filesystem queries, independent of native sensor ownership."""
+import ctypes
+from ctypes import wintypes
 import re
 
 import psutil
@@ -9,13 +11,27 @@ from storage_probe import (PROBE_TIMEOUT_SECONDS, run_bounded_probe,
 from thermal_policy import finite
 
 
+_kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+_kernel.GetLogicalDrives.argtypes = []
+_kernel.GetLogicalDrives.restype = wintypes.DWORD
+_kernel.GetDriveTypeW.argtypes = [wintypes.LPCWSTR]
+_kernel.GetDriveTypeW.restype = wintypes.UINT
+
+
+def _fixed_mounts():
+    # WHY: disk_partitions reads filesystem metadata for every drive, including
+    # remote/unresponsive drives, before returning even the healthy local ones.
+    # Enumerate only letters/types here; isolate all filesystem I/O per volume.
+    mask = _kernel.GetLogicalDrives()
+    if not mask:
+        raise ctypes.WinError(ctypes.get_last_error())
+    mounts = [chr(ord('A') + index) + ':\\' for index in range(26) if mask & (1 << index)]
+    return [mount for mount in mounts if _kernel.GetDriveTypeW(mount) == 3]  # DRIVE_FIXED
+
+
 def _query(mount, capacity=lambda result: None, *, include_identity=True):
     if mount is None:
-        mounts = sorted({partition.mountpoint[:2].upper() + '\\'
-                         for partition in psutil.disk_partitions(all=False)
-                         if 'fixed' in partition.opts.split(',')
-                         and re.fullmatch(r'[A-Za-z]:[\\/]', partition.mountpoint)})
-        return {'mounts': mounts}
+        return {'mounts': _fixed_mounts()}
     usage = psutil.disk_usage(mount)
     volume = {'name': mount[:2], 'total_bytes': usage.total, 'free_bytes': usage.free}
     # Capacity is independent of physical-disk identity. Retain this reading

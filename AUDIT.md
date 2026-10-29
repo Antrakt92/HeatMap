@@ -1,5 +1,31 @@
 # HeatMap Audit Backlog
 
+Storage inventory repair (2026-10-29): elevated fixed-volume enumeration through
+`psutil.disk_partitions` reproduced an eight-second timeout while individual
+C:/D:/E:/F: capacity/extent queries succeeded in 0.10–0.68 seconds. Enumeration
+now uses Windows drive letters and drive types without querying filesystem
+metadata for all drives. Each fixed volume retains its isolated bounded read;
+remote, optical and removable drive types are excluded. A failed drive-letter
+inventory remains an error rather than a verified empty inventory.
+
+The blocked-enumeration regression fails against the prior implementation and
+passes with the repair. Local checks passed 1,160 unit tests, compileall, DLL
+integrity, startup preflight, manifest synchronization and volume integration
+(including synthetic blocked-child disposal). Elevated probes returned all four
+volumes and temperatures for all four disks in two consecutive passes. The
+individual temperature timeouts in the supplied report were not reproduced;
+their original runtime/SMART cause remains unconfirmed. Deadlines, freshness,
+backoff, fan policy and dependencies are unchanged.
+
+Normal close recorded process exit and verified case-fan restoration. The
+existing close helper initially timed out waiting for the launcher; after exit
+was confirmed, the normal Scheduler task restarted HeatMap. A live window
+capture showed all four volume rows with capacity and temperature, and WM_NULL
+confirmed responsiveness. Fresh case/GPU status reports showed active/standby.
+Evidence: `%LOCALAPPDATA%/HeatMap/storage-{baseline,stages,live}-20261029.*`.
+Extended load, sleep/resume and physical reboot/login remain unperformed.
+
+
 Unexpected-exit investigation (2026-10-24): no overlay process remained when
 reported. The previous case/GPU status files ended at approximately 17:55 in
 active/standby states, without terminal reports. No matching Application Error,
