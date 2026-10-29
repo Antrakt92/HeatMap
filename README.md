@@ -15,6 +15,10 @@
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 </p>
 
+<p align="center">
+  <img src="docs/heatmap-overlay.png" alt="HeatMap desktop overlay showing CPU and GPU temperatures, fan speeds, RAM use and drive readings" width="367">
+</p>
+
 Keep hardware readings on your desktop. HeatMap normally sits beneath
 application windows, with optional Always on top and edge-hover modes. Drag the
 title bar to position it; the app remembers its location.
@@ -34,10 +38,6 @@ CPU, GPU and RAM readings update every two seconds; storage readings update
 approximately every 30 seconds. Missing or expired readings stay marked as
 unavailable. Use **Display → Details** for additional metrics and
 **Diagnostics → Copy diagnostics** for a technical report.
-
-![HeatMap showing hardware readings](docs/ui-1.1.0-normal.png)
-
-*Earlier interface version shown.*
 
 ## Installation
 
