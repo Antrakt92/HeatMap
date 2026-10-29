@@ -3,7 +3,7 @@
 <p align="center">Hardware temperatures, load, memory and fan readings on the Windows desktop.</p>
 
 <p align="center">
-  <a href="https://github.com/Antrakt92/HeatMap/releases/latest">Download</a>
+  <a href="https://github.com/Antrakt92/HeatMap/releases/latest">Download Python app</a>
   · <a href="docs/SETUP.md">Setup</a>
   · <a href="docs/REFERENCE.md">Sensor and cooling reference</a>
   · <a href="https://github.com/Antrakt92/HeatMap/issues">Report a problem</a>
@@ -15,9 +15,9 @@
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 </p>
 
-HeatMap is a Python desktop overlay. It normally sits beneath application
-windows, with optional Always on top and edge-hover modes. Drag the title bar
-to position it; the app remembers its location.
+Keep hardware readings on your desktop. HeatMap normally sits beneath
+application windows, with optional Always on top and edge-hover modes. Drag the
+title bar to position it; the app remembers its location.
 
 ## What it shows
 
