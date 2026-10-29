@@ -8,7 +8,7 @@
 - 64-bit Windows
 - Administrator privileges (required to read sensors)
 
-Verified environment: Python 3.13, pythonnet 3.1.0, psutil 7.2.2. Exact production versions are pinned in `constraints-known-good.txt`; a separate CI lane checks newer allowed versions. CI exercises 3.10, 3.13, and 3.14; other 3.10+ versions are accepted but less covered.
+Exact production versions are pinned in `constraints-known-good.txt`: Python 3.10 uses pythonnet 3.1.0 and pycparser 3.0, while Python 3.11 and later use pythonnet 3.2.1 and pycparser 3.12. Preflight verifies the installed versions and the bundled CLR bridge; it does not read hardware sensors. A separate CI lane checks newer allowed versions. CI exercises 3.10, 3.13, and 3.14; other 3.10+ versions are less covered.
 
 ### Steps
 

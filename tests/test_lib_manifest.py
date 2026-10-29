@@ -220,7 +220,7 @@ class LibManifestTests(unittest.TestCase):
 
         self.assertEqual(
             messages,
-            ["unsupported dependency version pythonnet: expected 3.1.0, got 3.0.5"],
+            [f"unsupported dependency version pythonnet: expected {expected_versions['pythonnet']}, got 3.0.5"],
         )
 
     def test_preflight_dependency_check_accepts_all_locked_versions(self):
@@ -247,6 +247,37 @@ class LibManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate constraint"):
                 setup._read_known_good_versions(path)
 
+    def test_known_good_versions_select_python_boundary(self):
+        old = setup._read_known_good_versions(python_version=(3, 10))
+        new = setup._read_known_good_versions(python_version=(3, 11))
+        self.assertEqual((old["pythonnet"], old["pycparser"]), ("3.1.0", "3.0"))
+        self.assertEqual((new["pythonnet"], new["pycparser"]), ("3.2.1", "3.12"))
+        self.assertEqual(old["clr_loader"], new["clr_loader"])
+
+    def test_known_good_versions_accept_whitespace_around_exact_pin(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "constraints.txt")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(" psutil  ==  7.2.2  # pinned\n")
+            self.assertEqual(setup._read_known_good_versions(path), {"psutil": "7.2.2"})
+
+    def test_known_good_versions_reject_ambiguous_or_unsupported_markers(self):
+        invalid = (
+            'pythonnet==3.1.0; python_version < "3.11"\n',
+            'pythonnet==3.1.0; python_version < "3.11"\npythonnet==3.2.1; python_version < "3.11"\n',
+            'pythonnet==3.1.0\npythonnet==3.2.1; python_version >= "3.11"\n',
+            'pythonnet==3.1.0; python_version < "3.12"\n',
+            'pythonnet==3.1.0; sys_platform == "win32"\n',
+            'pythonnet==3.1.0; python_version < "3.11" or python_version >= "3.11"\n',
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "constraints.txt")
+            for content in invalid:
+                with self.subTest(content=content):
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    with self.assertRaises(ValueError):
+                        setup._read_known_good_versions(path)
     def test_preflight_main_warns_but_succeeds_when_pawnio_driver_missing(self):
         with (
             mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),

@@ -223,25 +223,41 @@ def _print_manifest_result(ok, messages):
         print(f"  ERROR: {message}")
 
 
-def _read_known_good_versions(constraints_path=CONSTRAINTS_PATH):
-    versions = {}
-    seen = set()
+def _read_known_good_versions(constraints_path=CONSTRAINTS_PATH, python_version=None):
+    # Only the complementary Python 3.11 boundary is supported here. Reject
+    # every other marker rather than silently treating it as a version pin.
+    python_version = sys.version_info[:2] if python_version is None else python_version
+    groups = {}
     with open(constraints_path, "r", encoding="utf-8") as constraints_file:
         for raw_line in constraints_file:
             line = raw_line.partition("#")[0].strip()
             if not line:
                 continue
-            if "==" not in line:
+            match = re.fullmatch(
+                r"([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)\s*==\s*"
+                r"([0-9][A-Za-z0-9._+!-]*)"
+                r"(?:\s*;\s*python_version\s*(<|>=)\s*(['\"])3\.11\4)?",
+                line,
+            )
+            if not match:
                 raise ValueError(f"constraint must use an exact version: {line}")
-            package_name, version = (part.strip() for part in line.split("==", 1))
-            if not package_name or not version:
-                raise ValueError(f"invalid exact constraint: {line}")
-            if package_name.casefold() in seen:
+            package_name, version, operator, _quote = match.groups()
+            canonical_name = re.sub(r"[-_.]+", "-", package_name).casefold()
+            group = groups.setdefault(canonical_name, {})
+            if operator in group:
                 raise ValueError(f"duplicate constraint for package: {package_name}")
-            seen.add(package_name.casefold())
-            versions[package_name] = version
-    if not versions:
+            group[operator] = (package_name, version)
+    if not groups:
         raise ValueError("known-good constraints are empty")
+    versions = {}
+    for group in groups.values():
+        if set(group) == {None}:
+            name, version = group[None]
+        elif set(group) == {"<", ">="}:
+            name, version = group["<" if tuple(python_version) < (3, 11) else ">="]
+        else:
+            raise ValueError("conditional constraints must have exactly one pin on each side of Python 3.11")
+        versions[name] = version
     return versions
 
 
