@@ -72,6 +72,7 @@ Assert-IntegrationCondition `
 $fixtureRoot = Join-Path $env:TEMP (
     "HeatMap launcher O'Brien & Unicode Ж $([Guid]::NewGuid().ToString('N'))"
 )
+$fixtureParent = [IO.Path]::GetFullPath($env:TEMP)
 $checkout = Join-Path $fixtureRoot "checkout O'Brien & Ж"
 $fixtureTemp = Join-Path $fixtureRoot "temp O'Brien & Ж"
 $fixtureLocalAppData = Join-Path $fixtureRoot "local O'Brien & Ж"
@@ -92,6 +93,7 @@ $originalEnvironment = @{
     HEATMAP_FIXTURE_POWERSHELL = $env:HEATMAP_FIXTURE_POWERSHELL
     HEATMAP_FIXTURE_PREFLIGHT_MODE = $env:HEATMAP_FIXTURE_PREFLIGHT_MODE
     HEATMAP_FIXTURE_PREFLIGHT_TRACE = $env:HEATMAP_FIXTURE_PREFLIGHT_TRACE
+    HEATMAP_FIXTURE_NATIVE_EXIT = $env:HEATMAP_FIXTURE_NATIVE_EXIT
 }
 
 try {
@@ -118,6 +120,14 @@ try {
     New-Item -ItemType File -Path (Join-Path $checkout "overlay.py") | Out-Null
     # Exercise the ordinary launch path; Codex task relay has separate tests.
     'raise SystemExit(0)' | Set-Content -LiteralPath (Join-Path $checkout "codex_detach.py") -Encoding utf8
+    @'
+import os
+import sys
+if sys.argv[1:] != ["--native-only"]:
+    raise SystemExit(99)
+raise SystemExit(int(os.environ.get("HEATMAP_FIXTURE_NATIVE_EXIT", "20")))
+'@ | Set-Content -LiteralPath (Join-Path $checkout "launch.py") -Encoding utf8
+    $env:HEATMAP_FIXTURE_NATIVE_EXIT = "20"
 
     @'
 import os
@@ -263,6 +273,18 @@ public static class BrokenPython
         -Message "Preserved warning did not contain the preflight output."
 
     Remove-Item -LiteralPath $capturePath -Force
+    $env:HEATMAP_FIXTURE_PREFLIGHT_MODE = "clean"
+    foreach ($nativeExit in @(0, 1, 35)) {
+        $env:HEATMAP_FIXTURE_NATIVE_EXIT = [string]$nativeExit
+        $nativeOutput = @(& $launcher 2>&1)
+        $actualNativeExit = $LASTEXITCODE
+        Assert-IntegrationCondition -Condition ($actualNativeExit -eq $nativeExit) `
+            -Message "Native route exit $nativeExit became $actualNativeExit."
+        $nativeRecords = @(Read-CaptureRecords -Path $capturePath)
+        Assert-IntegrationCondition -Condition ($nativeRecords.Count -eq 0) `
+            -Message "Native route exit $nativeExit incorrectly reached x64 elevation."
+    }
+    $env:HEATMAP_FIXTURE_NATIVE_EXIT = "20"
     $env:HEATMAP_FIXTURE_PREFLIGHT_MODE = "failure"
     & $launcher
     $failureExitCode = $LASTEXITCODE
@@ -343,6 +365,10 @@ finally {
     }
 
     if (Test-Path -LiteralPath $fixtureRoot) {
+        $resolvedFixture = [IO.Path]::GetFullPath($fixtureRoot)
+        if (-not $resolvedFixture.StartsWith($fixtureParent.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing fixture cleanup outside its original temporary directory."
+        }
         Remove-Item -LiteralPath $fixtureRoot -Recurse -Force
     }
 }

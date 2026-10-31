@@ -11,6 +11,11 @@ from test_sensor_lifecycle import sensor_app
 
 
 class SensorAccessPauseTests(unittest.TestCase):
+    def setUp(self):
+        mode = mock.patch.object(overlay, "windows_only_mode", return_value=False)
+        mode.start()
+        self.addCleanup(mode.stop)
+
     def test_disabled_storage_recovers_other_sensors_in_full_and_shared_modes(self):
         for mode in ('full', 'shared'):
             with self.subTest(mode=mode):

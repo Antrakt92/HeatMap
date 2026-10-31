@@ -21,6 +21,7 @@ import sys
 import tempfile
 import zipfile
 import urllib.request
+from windows_native import check_windows_dependencies, windows_only_mode
 try:
     import winreg
 except ImportError:  # pragma: no cover - setup is Windows-only at runtime.
@@ -661,6 +662,8 @@ def _check_shared_fan_module():
 
 
 def run_preflight():
+    if windows_only_mode():
+        return check_windows_dependencies()
     messages = []
 
     unsupported = _unsupported_runtime_message()
@@ -1283,11 +1286,14 @@ def main(argv=None):
     if args.preflight:
         ok, messages = run_preflight()
         _print_preflight_result(ok, messages)
-        if ok:
+        if ok and not windows_only_mode():
             _print_pawnio_warnings(_check_pawnio_driver())
         return 0 if ok else 1
 
     if args.download_pawnio:
+        if windows_only_mode():
+            print("PawnIO is not used on ARM64; use Windows monitoring without drivers.")
+            return 1
         try:
             path = download_pawnio()
         except (SetupError, OSError) as e:
@@ -1298,6 +1304,9 @@ def main(argv=None):
         return 0
 
     if args.hardware_smoke:
+        if windows_only_mode():
+            print("CPU temperature smoke is unavailable in Windows monitoring mode.")
+            return 1
         preflight_ok, preflight_messages = run_preflight()
         if not preflight_ok:
             _print_preflight_result(preflight_ok, preflight_messages)
@@ -1307,6 +1316,16 @@ def main(argv=None):
             print("Hardware smoke failed:")
             for message in messages:
                 print(f"  ERROR: {message}")
+        return 0 if ok else 1
+
+    if windows_only_mode():
+        if args.restore_runtime:
+            print("The x64 hardware runtime is not used on ARM64.")
+            return 1
+        ok, messages = check_windows_dependencies()
+        _print_preflight_result(ok, messages)
+        if ok:
+            print("Windows monitoring ready. Start run_as_admin.bat; ARM64 does not need UAC.")
         return 0 if ok else 1
 
     unsupported = _unsupported_runtime_message()

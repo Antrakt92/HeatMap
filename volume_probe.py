@@ -5,7 +5,7 @@ import re
 
 import psutil
 
-from storage_identity import volume_disk_number
+from storage_identity import volume_disk_number, disk_properties
 from storage_probe import (PROBE_TIMEOUT_SECONDS, run_bounded_probe,
                            _reply_sample_time, _send_probe_message)
 from thermal_policy import finite
@@ -29,7 +29,7 @@ def _fixed_mounts():
     return [mount for mount in mounts if _kernel.GetDriveTypeW(mount) == 3]  # DRIVE_FIXED
 
 
-def _query(mount, capacity=lambda result: None, *, include_identity=True):
+def _query(mount, capacity=lambda result: None, *, include_identity=True, include_model=False):
     if mount is None:
         return {'mounts': _fixed_mounts()}
     usage = psutil.disk_usage(mount)
@@ -40,18 +40,30 @@ def _query(mount, capacity=lambda result: None, *, include_identity=True):
     number = volume_disk_number(mount[:2]) if include_identity else None
     if number is not None:
         volume['disk_number'] = number
+        if include_model:
+            properties = disk_properties(number, include_vendor=True)
+            if properties and properties.get('name'):
+                volume['device_name'] = properties['name']
+                if properties.get('temp') is not None:
+                    volume['temp'] = properties['temp']
+                    volume['temperature_source'] = properties.get('source', 'Windows storage temperature property')
     return {'volume': volume}
 
 
 def _worker(mount, pipe):
-    mount, include_identity = mount if isinstance(mount, tuple) else (mount, True)
+    options = mount if isinstance(mount, tuple) else (mount, True)
+    mount, include_identity = options[:2]
+    include_model = options[2] if len(options) == 3 else False
 
     def capacity(result):
         _send_probe_message(pipe, result)
 
     try:
         try:
-            result = _query(mount, capacity, include_identity=include_identity)
+            if include_model:
+                result = _query(mount, capacity, include_identity=include_identity, include_model=True)
+            else:
+                result = _query(mount, capacity, include_identity=include_identity)
         except (OSError, psutil.Error, ValueError) as exc:
             result = {'error': str(exc)[:500]}
         try:
@@ -90,11 +102,24 @@ def _validate(result, mount):
         if type(number) is not int or not 0 <= number <= 0x7fffffff:
             raise ValueError('Invalid volume disk identity')
         sample['disk_number'] = number
+    if 'device_name' in volume:
+        name = volume['device_name']
+        if ('disk_number' not in sample or not isinstance(name, str) or not name.strip()
+                or len(name) > 256 or any(ord(char) < 32 for char in name)):
+            raise ValueError('Invalid volume device model')
+        sample['device_name'] = name.strip()
+    if volume.get('temp') is not None:
+        temperature = finite(volume['temp'], 1, 150)
+        if temperature is None or 'device_name' not in sample:
+            raise ValueError('Invalid volume temperature')
+        sample['temp'] = round(temperature)
+        if volume.get('temperature_source') in ('Windows storage temperature property', 'Windows UFS case temperature attribute'):
+            sample['temperature_source'] = volume['temperature_source']
     return {'volume': sample}
 
 
 def probe_volume(mount=None, cancelled=lambda: False, *, timeout=PROBE_TIMEOUT_SECONDS,
-                 include_identity=True):
+                 include_identity=True, include_model=False):
     """Bound volume queries while retaining capacity if only mapping fails.
 
     Capacity includes its own sample_time; identity_error never removes it.
@@ -104,6 +129,8 @@ def probe_volume(mount=None, cancelled=lambda: False, *, timeout=PROBE_TIMEOUT_S
         raise ValueError('Invalid fixed-volume path')
     if type(include_identity) is not bool:
         raise ValueError('Invalid volume identity option')
+    if type(include_model) is not bool or (include_model and not include_identity):
+        raise ValueError('Model discovery requires physical disk identity')
     progress = {}
 
     def consume(result):
@@ -132,5 +159,6 @@ def probe_volume(mount=None, cancelled=lambda: False, *, timeout=PROBE_TIMEOUT_S
         return {'error': 'Volume ' + error}
 
     return run_bounded_probe(
-        _worker, mount if include_identity else (mount, False), consume, failure, cancelled, timeout,
+        _worker, (mount, include_identity, True) if include_model else
+        mount if include_identity else (mount, False), consume, failure, cancelled, timeout,
     )

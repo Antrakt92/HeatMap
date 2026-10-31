@@ -93,7 +93,37 @@ def _property_temperatures(raw):
     return primary, readings
 
 
-def disk_properties(number, identified=lambda sample: None):
+def _ufs_temperature(raw):
+    """Validate a UFS READ ATTRIBUTE reply for bDeviceCaseRoughTemperature.
+
+    Attribute 0x18 is a big-endian u32, with Celsius encoded as value minus 80.
+    Attribute zero means unavailable. Upper/lower temperature bounds are not
+    current readings. This query never changes UFS flags or attributes.
+    """
+    if len(raw) < 52:
+        return None
+    version, size, protocol, kind, attribute, subvalue, offset, length = struct.unpack_from('<8I', raw)
+    if (version != 48 or size != 48 or protocol != 5 or kind != 2 or attribute != 0x18
+            or subvalue != 0 or offset < 40 or length != 4 or 8 + offset + length > len(raw)):
+        return None
+    value = int.from_bytes(raw[8 + offset:12 + offset], 'big')
+    temperature = value - 80
+    return temperature if 1 <= value <= 255 and 1 <= temperature <= 150 else None
+
+
+def _read_ufs_temperature(handle):
+    # StorageDeviceProtocolSpecificProperty / ProtocolTypeUfs / read attribute.
+    # The initial buffer follows the documented 512-byte protocol-data capacity;
+    # Windows returns the four-byte attribute value and its actual length.
+    data = struct.pack('<12I', 50, 0, 5, 2, 0x18, 0, 40, 512, 0, 0, 0, 0) + bytes(512)
+    buffer, returned = ctypes.create_string_buffer(data), wintypes.DWORD()
+    ok = _kernel.DeviceIoControl(handle, 0x002d1400, buffer, len(data), buffer, len(buffer),
+                                ctypes.byref(returned), None)
+    return _ufs_temperature(buffer.raw[:returned.value]) if ok else None
+
+
+def disk_properties(number, identified=lambda sample: None, *, include_temperature=True,
+                    include_vendor=False):
     """Read only Windows model/temperature properties of this physical path.
 
     Call inside a bounded disposable process, not the main sensor thread.
@@ -106,7 +136,8 @@ def disk_properties(number, identified=lambda sample: None):
         return None
     try:
         sample = {'disk_number': number, 'temp': None}
-        for prop in (0, 52):  # StorageDeviceProperty / StorageDeviceTemperatureProperty
+        bus_type = None
+        for prop in ((0, 52) if include_temperature else (0,)):
             query = ctypes.create_string_buffer(struct.pack('<III', prop, 0, 0))
             output, returned = ctypes.create_string_buffer(4096), wintypes.DWORD()
             ok = _kernel.DeviceIoControl(handle, 0x002d1400, query, 12, output, len(output),
@@ -115,12 +146,26 @@ def disk_properties(number, identified=lambda sample: None):
                 continue
             raw = output.raw[:returned.value]
             if prop == 0:
+                bus_type = struct.unpack_from('<I', raw, 28)[0] if len(raw) >= 32 else None
                 sample['name'] = _property_model(raw)
+                if include_vendor and len(raw) >= 36:
+                    offset = struct.unpack_from('<I', raw, 12)[0]
+                    size = struct.unpack_from('<I', raw, 4)[0]
+                    if 36 <= offset < size <= len(raw):
+                        vendor = raw[offset:size].split(b'\0', 1)
+                        if len(vendor) == 2:
+                            vendor = vendor[0].decode('ascii', errors='replace').strip()
+                            if vendor and not sample['name'].casefold().startswith(vendor.casefold()):
+                                sample['name'] = vendor + ' ' + sample['name']
                 identified(dict(sample))
             else:
                 sample['temp'], readings = _property_temperatures(raw)
                 if len(readings) > 1:
                     sample['temperatures'] = readings
+        if include_temperature and sample['temp'] is None and bus_type == 19:  # BusTypeUfs
+            sample['temp'] = _read_ufs_temperature(handle)
+            if sample['temp'] is not None:
+                sample['source'] = 'Windows UFS case temperature attribute'
         return sample if sample.get('name') else None
     finally:
         _kernel.CloseHandle(handle)

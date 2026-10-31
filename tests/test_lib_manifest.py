@@ -11,6 +11,12 @@ import setup
 
 
 class LibManifestTests(unittest.TestCase):
+    def setUp(self):
+        # These tests model the x64 CLR runtime even on an ARM test host.
+        mode = mock.patch.object(setup, "windows_only_mode", return_value=False)
+        mode.start()
+        self.addCleanup(mode.stop)
+
     def test_manifest_covers_exact_current_lib_dlls(self):
         manifest = setup.load_lib_manifest()
         manifest_files = sorted(entry["file"] for entry in manifest["files"])

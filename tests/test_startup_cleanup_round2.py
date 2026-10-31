@@ -8,6 +8,11 @@ from test_ui_layout import TkTestCase
 
 
 class StartupCleanupTests(TkTestCase):
+    def setUp(self):
+        mode = mock.patch.object(overlay, "windows_only_mode", return_value=False)
+        mode.start()
+        self.addCleanup(mode.stop)
+
     def check_failed_startup(self, stage, error, *, terminal=None, cancellation_error=False):
         real_tk = overlay.tk.Tk
         roots, threads = [], []

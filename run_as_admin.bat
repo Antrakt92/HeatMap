@@ -44,6 +44,11 @@ if errorlevel 1 (
 )
 del "%PRECHECK_LOG%" >nul 2>nul
 
+rem ARM Windows uses its native monitoring backend without the x64 driver/UAC.
+"%PY_EXE%" "%APP_DIR%launch.py" --native-only
+set "NATIVE_ROUTE_EXIT=%ERRORLEVEL%"
+if not "%NATIVE_ROUTE_EXIT%"=="20" exit /b %NATIVE_ROUTE_EXIT%
+
 "%PY_EXE%" "%APP_DIR%codex_detach.py"
 set "DETACH_EXIT=%ERRORLEVEL%"
 if "%DETACH_EXIT%"=="1" exit /b 0
