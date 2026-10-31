@@ -59,7 +59,7 @@ def _native_sample(number, identified=lambda sample: None, progress=lambda stage
     properties = disk_properties(number, identified)
     if properties and properties.get("temp") is not None:
         properties["name"] = display_name(properties["name"])
-        properties["source"] = "Windows storage temperature property"
+        properties.setdefault("source", "Windows storage temperature property")
         return properties
     progress("runtime")
     import clr
@@ -165,7 +165,7 @@ def _validated_sample(result, number):
         raise ValueError("Invalid storage temperature")
     sample = {"disk_number": number, "name": name, "temp": round(temp) if temp is not None else None}
     source = result.get("source")
-    if source in ("Windows storage temperature property", "DiskInfoToolkit SMART"):
+    if source in ("Windows storage temperature property", "Windows UFS case temperature attribute", "DiskInfoToolkit SMART"):
         sample["source"] = source
     life = finite(result.get("life_pct"), 0, 100)
     if life is not None:

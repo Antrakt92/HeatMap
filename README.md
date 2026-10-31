@@ -41,8 +41,27 @@ unavailable. Use **Display → Details** for additional metrics and
 
 ## Installation
 
-HeatMap requires **64-bit Windows, 64-bit Python 3.10 or newer and administrator
-access for hardware sensors**. The release ZIP contains the Python application;
+HeatMap selects its backend automatically on both **Windows x64 and ARM64**.
+On ARM64 (including Snapdragon laptops), native Windows monitoring shows CPU
+load/frequency, current GPU engine clock/load, ACPI thermal-zone temperatures, RAM and fixed-volume
+capacity without administrator access, pythonnet, LibreHardwareMonitor or PawnIO.
+HeatMap automatically reads firmware thermal associations and supported SoC
+sensor profiles. CPU/SoC and GPU-zone temperatures appear in their component
+rows when identified; unidentified zones remain in the thermal-zone section.
+Volume-to-device mapping supplies the disk manufacturer/model independently of
+temperature support. Disk temperature and fullness take priority over long
+device names, which are shortened with an ellipsis. No GiB totals are added to
+the compact disk row. Native UFS devices can report case temperature through
+their standard read-only attribute. Details and diagnostics
+show sensor identities, full device names and sources; anonymous thermal zones
+are kept in Details rather than duplicated on the main display.
+Fan RPM/control and unsupported drive temperatures may remain unavailable. Firmware continues
+to manage cooling. The same source tree retains
+the existing hardware-monitoring backend and commissioned profiles on x64.
+Use native ARM64 Python on an ARM64 computer.
+
+HeatMap requires **64-bit Windows and 64-bit Python 3.10 or newer**, plus
+administrator access for x64 hardware sensors. The release ZIP contains the Python application;
 it is not a standalone executable installer.
 
 1. Download and extract the [latest release](https://github.com/Antrakt92/HeatMap/releases/latest),

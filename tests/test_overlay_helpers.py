@@ -16,6 +16,9 @@ import overlay
 
 class OverlayHelperTests(unittest.TestCase):
     def setUp(self):
+        mode = mock.patch.object(overlay, "windows_only_mode", return_value=False)
+        mode.start()
+        self.addCleanup(mode.stop)
         # These tests supply fake hardware; desktop process inventory is a
         # separate integration boundary covered by the access-guard suite.
         access = mock.patch.object(overlay, "require_hardware_access")

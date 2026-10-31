@@ -1,4 +1,4 @@
 # Supported ranges. Production installs should also use constraints-known-good.txt.
-pythonnet>=3.1,<4; python_version < "3.11"
-pythonnet>=3.2.1,<4; python_version >= "3.11"
+pythonnet>=3.1,<4; python_version < "3.11" and platform_machine != "ARM64" and platform_machine != "arm64" and platform_machine != "aarch64"
+pythonnet>=3.2.1,<4; python_version >= "3.11" and platform_machine != "ARM64" and platform_machine != "arm64" and platform_machine != "aarch64"
 psutil>=7.2,<8

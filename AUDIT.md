@@ -1,5 +1,86 @@
 # HeatMap Audit Backlog
 
+ARM64 integration / home x64 verification (2026-10-31): the adaptive backend
+branch passed 1,218 tests again on Windows x64. Preflight initially found the
+local venv behind the existing production constraints; pythonnet and pycparser
+were updated to those exact pins. CPU smoke, independent LHM CPU/GPU/fan/RAM
+samples, all four volume mappings and disk temperatures passed. Normal task
+startup produced fresh case active / GPU standby reports, and normal shutdown
+confirmed restoration. DLLs, drivers and commissioned cooling settings were
+preserved. Local native launcher/Scheduler/desktop/PiP/notice/volume checks also
+passed. See `docs/portability-audit-2026-10-31.md` for evidence and boundaries;
+physical UI, gaming, reboot/login and multi-monitor checks remain open.
+
+Compatibility follow-up audit (2026-10-31): preserved copied x64 fan flags
+when ARM display preferences are saved; blocked irrelevant ARM CPU fan calibration.
+Fixed direct x64 launch.py forwarding and limited batch handoff to exact code 20.
+GPU load now matches WDDM adapter LUID/physical index; PDH failures leave WDDM
+clock available and reopen counters after bounded backoff. Cached only immutable
+WinAPI bindings, retaining adapter rediscovery and handle cleanup per sample.
+Firmware profile v4 resolves namespace references, rejects mixed/ambiguous
+associations, bounds cache/disassembly reads and tolerates cache-write failure.
+Removed obsolete normal-backend footer mappings, unused parser helper/import;
+native psutil preflight reads the authoritative constraints pin.
+Validation: 1218 unit tests passed, compileall, runtime verify and preflight;
+real Windows launcher fixtures, disposable scheduler XML registration and bounded
+volume-worker integration checks passed. Native ARM overlay smoke confirmed
+SoC/GPU/UFS temperatures, GPU clock/load and compact disk row without fan workers.
+Original x64 machine, real elevated LHM/driver/fan operation, reboot/login,
+sleep/resume, gaming and multi-monitor acceptance remain physically untested.
+See docs/portability-audit-2026-10-31.md for scope and limitations.
+
+Footer cleanup (2026-10-31): normal Windows-native backend identity and the
+unsupported fan-RPM notice are retained in copied diagnostics rather than
+permanent overlay labels. Actual sensor failures, stale data, storage errors
+and thermal warnings remain visible. Mapped native UI regressions cover the
+empty healthy footer and visible stale/error states at three DPI scales.
+
+Windows ARM64 automatic discovery (2026-10-31): one checkout selects x64
+LHM or native Windows monitoring based on the host CPU, including emulation.
+The x64 verified runtime, UAC path, locked DLLs and commissioned fan policies
+are unchanged. Copied desktop fan settings cannot activate controls on ARM.
+
+ARM launch prepares the exact official ACPICA iASL 20260408 executable (size
+and SHA-256 checked before execution), cached per user. Only a copied DSDT is
+disassembled; no firmware methods or registers are executed/written, and no
+firmware is uploaded. Local metadata is keyed by DSDT SHA-256/schema version.
+SDM8380's QCOM0C58/59 TSENS banks are labeled CPU/SoC, not per-core sensors;
+QCOM0C91 is associated with GPU through its explicit _TZD reference. Unmapped
+and duplicate/ambiguous zones are not assigned by their temperatures. Unknown
+hardware retains generic thermal zones in Details and logs discovery failures.
+The local tool/profile is not a portable per-PC configuration committed to Git.
+
+PDH supplies live zones, CPU clock and GPU load. Current GPU engine-0 frequency
+comes from standard WDDM D3DKMT_NODE_PERFDATA.Frequency; software adapters are
+excluded, maximum frequency is never substituted, and all adapter handles close
+on success/failure. Missing optional telemetry clears values without removing
+independent CPU/RAM data. No periodic PowerShell process or custom driver is used.
+
+Bounded volume probes retain early capacity and independently query proven
+single-extent DiskNumber plus Windows manufacturer/model. Standard Windows
+temperature queries and UFS read-attribute 0x18 are bounded in the same child;
+there is no CLR/SMART fallback on ARM. Validated big-endian UFS case readings
+use the standardized Celsius offset of 80; zero and bounds are not readings. A long model name is ellipsized after reserving numeric columns;
+temperature and fullness remain visible. Full identity remains in copied
+diagnostics. Real mapped off-screen Tk tests cover three DPI scales, long names,
+component labels, GPU MHz, Details visibility and unavailable-data clearing.
+
+Live Galaxy Book4 Edge checks returned distinct CPU/SoC and GPU-zone readings,
+GPU frequency (280 MHz at idle), CPU clock/load, RAM and C: capacity with KIOXIA
+THGJFJT1E45BATPA identity. The compact main display was visually inspected.
+An elevated read-only WMI probe confirmed temperatures but returned no fans and
+zero generic storage temperatures. The separate UFS protocol query subsequently
+returned live KIOXIA case temperatures (approximately 33-36 C), independently
+of that unsupported generic property. Only fan RPM remains unavailable.
+Both fan children remain absent. No driver replacement or cooling commissioning
+was performed. Physical x64, ARM sleep/resume and reboot checks remain unperformed.
+
+Final native checks passed: 1,201 tests, compilation, DLL verification and
+preflight. Live UI showed separate CPU/SoC and GPU-zone temperatures, current
+GPU MHz and the original compact disk format (model / temperature / fullness).
+Long models elide without covering temperature or percent; generic thermal
+zones are available only in Details. No disk GiB totals are displayed.
+
 Storage inventory repair (2026-10-29): elevated fixed-volume enumeration through
 `psutil.disk_partitions` reproduced an eight-second timeout while individual
 C:/D:/E:/F: capacity/extent queries succeeded in 0.10–0.68 seconds. Enumeration

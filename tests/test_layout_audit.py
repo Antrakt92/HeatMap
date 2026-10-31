@@ -8,13 +8,13 @@ from test_ui_layout import TkTestCase, layout_app
 
 
 @contextmanager
-def mapped_layout_app(scaling=1.333, width=1280, height=900):
+def mapped_layout_app(scaling=1.333, width=1280, height=900, *, windows_only=False):
     # Tk does not propagate Canvas child geometry fully while withdrawn.
     # Mapping only this disposable, alpha-zero, no-activate HWND permits actual
     # clipping checks without showing UI or taking foreground from another app.
     origin = 20000
     area = ((origin, origin, origin + width, origin + height),) * 2
-    with layout_app(scaling, height) as app:
+    with layout_app(scaling, height, windows_only=windows_only) as app:
         with mock.patch.object(overlay, "_get_monitor_areas", return_value=(area,)):
             app.config.update(x=origin, y=origin)
             app.root.geometry(f"+{origin}+{origin}")

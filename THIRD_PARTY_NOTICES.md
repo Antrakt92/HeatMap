@@ -64,3 +64,13 @@ tracked artifact. Canonical SPDX texts are pinned to an exact
 `spdx/license-list-data` commit and hash. Maintainers can regenerate the bundle
 with `python tools/check_third_party_licenses.py --sync`; generation stops before
 writing unverified remote bytes.
+
+## Optional native firmware discovery
+
+Windows ARM64 launch may download ACPICA iASL 20260408 from the official
+open-acpica/acpica release into the user's local cache. It is not bundled with
+HeatMap. The original Intel license and release terms apply; see
+https://github.com/open-acpica/acpica/releases/tag/20260408 and
+https://github.com/open-acpica/acpica/blob/20260408/source/include/acpi.h.
+HeatMap calls the disassembler on a copied firmware table and does not include
+ACPICA source code. Size/SHA-256 pins are recorded in native_discovery.py.

@@ -57,6 +57,11 @@ class LockedVersionPinTests(unittest.TestCase):
 
 
 class PreflightSupplyChainTests(unittest.TestCase):
+    def setUp(self):
+        mode = mock.patch.object(setup, "windows_only_mode", return_value=False)
+        mode.start()
+        self.addCleanup(mode.stop)
+
     def test_preflight_fails_when_shared_fan_module_is_tampered(self):
         with (
             mock.patch.object(setup, "_unsupported_runtime_message", return_value=None),

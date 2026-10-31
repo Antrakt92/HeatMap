@@ -23,7 +23,7 @@ def settle_layout(app):
 
 
 @contextmanager
-def layout_app(scaling=1.333, height=720):
+def layout_app(scaling=1.333, height=720, *, windows_only=False):
     real_tk = overlay.tk.Tk
     def hidden_root():
         root = real_tk()
@@ -32,6 +32,7 @@ def layout_app(scaling=1.333, height=720):
         return root
     areas = (((0, 0, 1280, height), (0, 0, 1280, height)),)
     with ExitStack() as stack:
+        stack.enter_context(mock.patch.object(overlay, "windows_only_mode", return_value=windows_only))
         # Suppress dispatch, not just winsound.Beep: a delayed second beep could
         # otherwise outlive the fixture and run after the sound mock is removed.
         for name in ("sensor_loop", "storage_loop", "volume_loop", "_check_alerts", "_schedule_embed", "_poll_screen_change", "_poll_peek_edge", "_poll_desktop_visibility"):

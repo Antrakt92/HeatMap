@@ -24,12 +24,15 @@ import threading
 import time
 import uuid
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, simpledialog
 import winreg
 import winsound
 import xml.etree.ElementTree as ET
 
 import psutil
+from windows_native import windows_only_mode
+from windows_telemetry import WindowsTelemetry
 
 from thermal_policy import (ThermalAdvisor, gpu_delta, delta_severity, finite,
                             GPU_GAP_WARN_DELTA, GPU_GAP_CRITICAL_DELTA,
@@ -103,6 +106,7 @@ SENSOR_STATUS_KEY = "_sensor_status"
 SENSOR_REINIT_KEY = "_sensor_reinit"
 SENSOR_STORAGE_FAILED_KEY = "_storage_read_failed"
 SENSOR_STATUS_PSUTIL_FALLBACK = "psutil_fallback"
+SENSOR_STATUS_WINDOWS_ONLY = "windows_only"
 SENSOR_STATUS_PARTIAL = "partial"
 SENSOR_STATUS_WARMING_UP = "warming_up"
 SENSOR_STATUS_DRIVER_MISSING = "driver_missing"
@@ -2570,15 +2574,21 @@ def _format_diag_value(value):
 
 
 def build_sensor_diagnostics(computer, sensor_data=None, is_admin=None, pawnio_installed=None):
+    native = bool(sensor_data and sensor_data.get(SENSOR_STATUS_KEY) == SENSOR_STATUS_WINDOWS_ONLY)
     is_admin = _is_admin() if is_admin is None else is_admin
-    pawnio_installed = is_pawnio_driver_installed() if pawnio_installed is None else pawnio_installed
+    pawnio_installed = (False if native else is_pawnio_driver_installed()) if pawnio_installed is None else pawnio_installed
     lines = [
         "HeatMap diagnostics",
         f"Version: {VERSION}",
         f"Admin: {'yes' if is_admin else 'no'}",
-        f"PawnIO: {'installed' if pawnio_installed else 'missing'}",
+        f"PawnIO: {'not used (ARM64)' if native else 'installed' if pawnio_installed else 'missing'}",
         f"LHM computer: {'yes' if computer is not None else 'no'}",
     ]
+    if native:
+        lines.extend([
+            "Monitoring backend: Windows native (ARM64)",
+            "Fan RPM: not exposed by supported Windows interfaces; cooling managed by firmware",
+        ])
 
     if sensor_data:
         lines.append("Sensor data:")
@@ -2587,7 +2597,7 @@ def build_sensor_diagnostics(computer, sensor_data=None, is_admin=None, pawnio_i
             "gpu_temp", "gpu_temp_label", "gpu_core_temp", "gpu_hotspot_temp", "gpu_memory_temp",
             "gpu_name", "gpu_id", "gpu_load", "gpu_load_source", "gpu_load_sensor", "gpu_clock", "gpu_fan", "gpu_fan_pct",
             "gpu_vram_pct", "gpu_vram_used_gb", "gpu_vram_total_gb", "gpu_vram_source",
-            "ram_pct", "ram_used_gb", "ram_total_gb", "volumes", "volume_errors", SENSOR_STATUS_KEY, SENSOR_REINIT_KEY,
+            "ram_pct", "ram_used_gb", "ram_total_gb", "volumes", "volume_errors", "thermal_zones", "native_telemetry_error", "native_thermal_profile_error", "cpu_temp_source", "gpu_temp_source", "gpu_temp_sensor", "gpu_clock_source", "gpu_clock_adapter", "gpu_adapter_luid", SENSOR_STATUS_KEY, SENSOR_REINIT_KEY,
         ):
             if key in sensor_data:
                 lines.append(f"  {key}={_format_diag_value(sensor_data.get(key))}")
@@ -2920,6 +2930,16 @@ class OverlayApp:
         # Hardware discovery runs on the sensor thread so it cannot delay Tk.
         self.computer = None
         self.config, config_warning = load_config_result()
+        self._windows_only = windows_only_mode()
+        self._hardware_settings_to_preserve = {}
+        if self._windows_only:
+            # A copied desktop config must never start board-specific controls.
+            # Configuration is local to this installation.
+            self.config = dict(self.config)
+            for key in ("case_fans_enabled", "case_fans_shared_enabled",
+                        "case_fans_b850_enabled", "gpu_fans_enabled"):
+                self._hardware_settings_to_preserve[key] = self.config.get(key, False)
+                self.config[key] = False
         self._config_status = STATUS_CONFIG_ADJUSTED if config_warning else None
         retired_board = _retire_unsupported_case_fan_profile(self.config)
         retired_module = _retire_broken_shared_module(self.config)
@@ -2938,15 +2958,16 @@ class OverlayApp:
                     log.warning("Retired %s; previous config: %s", reason, backup)
             self._config_status = STATUS_CONFIG_ADJUSTED
         try:
-            self._monitor_coexistence = require_hardware_access("monitor") == "shared"
+            self._monitor_coexistence = (False if self._windows_only else
+                                         require_hardware_access("monitor") == "shared")
         except HardwareAccessConflict:
             self._monitor_coexistence = False
-        self._gpu_monitor_coexistence = not _gpu_control_available()
+        self._gpu_monitor_coexistence = self._windows_only or not _gpu_control_available()
         self._case_monitor_coexistence = (self._gpu_monitor_coexistence
             if self.config.get("case_fans_b850_enabled") else self._monitor_coexistence)
         self._driver_status = (
             SENSOR_STATUS_DRIVER_MISSING
-            if not is_pawnio_driver_installed()
+            if not self._windows_only and not is_pawnio_driver_installed()
             else None
         )
         self._sensor_start_time = time.monotonic()
@@ -3051,15 +3072,16 @@ class OverlayApp:
         self.root.bind("<MouseWheel>", self._scroll_content)
 
         self.rows = {}
+        self.summary_labels = {}
         self.groups = {}
         self.DISK_CLR = "#fdba74"
         cpu = self._make_group("CPU", "#6ea8fe")
-        self._make_summary_row(cpu, "Package", "cpu")
+        self._make_summary_row(cpu, "Load" if self._windows_only else "Package", "cpu")
         self._make_row("cpu_fan", "Fan 1", parent=cpu)
         self._make_row("cpu_optional_fan", "Fan 2", parent=cpu)
 
         gpu = self._make_group("GPU", "#c084fc")
-        self._make_summary_row(gpu, "Core", "gpu")
+        self._make_summary_row(gpu, "Load" if self._windows_only else "Core", "gpu")
         self._make_row("gpu_hotspot_temp", "Hotspot", parent=gpu)
         hotspot = self.rows["gpu_hotspot_temp"]
         self.rows["gpu_delta"] = tk.Label(hotspot.master, text="--", font=("Segoe UI", 9),
@@ -3070,7 +3092,20 @@ class OverlayApp:
         self._make_row("gpu_fan", "Fans", parent=gpu)
         self._make_row("gpu_fan_control", "Cooling", parent=gpu)
 
+        if self._windows_only:
+            native_thermal = self._make_group("THERMAL ZONES", "#a7f3d0")
+            native_thermal.pack_forget()
+            self._make_row("native_thermal", "Hottest", parent=native_thermal)
+            self._make_row("native_thermal_range", "Range", parent=native_thermal)
         cooling = self._make_group("CASE COOLING", "#a7f3d0")
+        if self._windows_only:
+            cooling.pack_forget()
+            self.rows["cpu_temp"].pack_forget()
+            self.rows["gpu_temp"].pack_forget()
+            for key in ("gpu_hotspot_temp", "gpu_memory_temp", "vram", "gpu_fan", "gpu_fan_control"):
+                self.rows[key].master.pack_forget()
+            self.rows["cpu_fan"].master.pack_forget()
+            self.rows["cpu_optional_fan"].master.pack_forget()
         for number in range(1, 7):
             self._make_row(f"case_fan_{number}", f"SYS {number}", parent=cooling)
             self.rows[f"case_fan_{number}"].master.pack_forget()
@@ -3091,6 +3126,11 @@ class OverlayApp:
                            ("detail_peak_usage", "Peak usage")):
             self._make_row(key, label, parent=self.details_frame,
                            label_fg=self.DISK_CLR if key.startswith("detail_disk_") else "#cbd5e1")
+        if self._windows_only:
+            self.rows["native_thermal_details"] = tk.Label(
+                self.details_frame, text="--", font=("Segoe UI", 9),
+                bg="#1a1a2e", fg="#cbd5e1", anchor="w", justify="left", wraplength=290)
+            self.rows["native_thermal_details"].pack(fill="x", pady=(3, 0))
         self.disk_frame = tk.Frame(storage, bg="#1a1a2e")
         self.disk_frame.pack(fill="x")
         self.disk_labels = []
@@ -3135,7 +3175,7 @@ class OverlayApp:
         self._autostart_warning = (autostart_result.message if autostart_result is not None and not autostart_result.ok else "")
         self._add_menu_item("autostart", "Autostart: Checking..." if self._autostart_pending else
                             "Autostart: ERROR" if autostart_enabled is None else
-                            "Autostart: ON (UAC)" if autostart_enabled else "Autostart: OFF",
+                            ("Autostart: ON" if self._windows_only else "Autostart: ON (UAC)") if autostart_enabled else "Autostart: OFF",
                             self.toggle_autostart, menus["Display"])
         self._add_menu_item("alerts", "Alerts: " + ("ON" if self.alerts_enabled else "OFF"), self.toggle_alerts, menus["Alerts & limits"])
         menus["Alerts & limits"].add_command(label="Colors, thresholds and sensor guide...", command=self.show_sensor_guide)
@@ -3205,6 +3245,9 @@ class OverlayApp:
         return f"CPU fan % reference: {value} RPM..." if value else "CPU fan % reference: not set..."
 
     def configure_cpu_reference(self):
+        if getattr(self, "_windows_only", False) is True:
+            self._show_info_notice("Cooling", "CPU fan calibration is unavailable on this computer.")
+            return
         self._settings_dialog_open = True
         try:
             value = simpledialog.askinteger("CPU fan percentage", "Rated maximum RPM for the CPU cooler fans.\n"
@@ -3234,7 +3277,10 @@ class OverlayApp:
     def _make_summary_row(self, parent, label, prefix):
         row = tk.Frame(parent, bg="#1a1a2e")
         row.pack(fill="x", pady=1)
-        tk.Label(row, text=label, font=("Segoe UI", 9), fg=parent.cget("fg"), bg="#1a1a2e", anchor="w").pack(side="left")
+        summary_label = tk.Label(row, text=label, font=("Segoe UI", 9), fg=parent.cget("fg"), bg="#1a1a2e", anchor="w")
+        summary_label.pack(side="left")
+        if hasattr(self, "summary_labels"):
+            self.summary_labels[prefix] = summary_label
         for metric in ("load", "clock", "temp"):
             widget = tk.Label(row, text="--", font=("Segoe UI", 9), fg="#888888", bg="#1a1a2e", anchor="e")
             widget.pack(side="right", padx=(6, 0))
@@ -3275,7 +3321,8 @@ class OverlayApp:
             return self._driver_status
         if config_status:
             return config_status
-        return getattr(self, "_sensor_status", None)
+        status = getattr(self, "_sensor_status", None)
+        return None if status == SENSOR_STATUS_WINDOWS_ONLY else status
 
     def _refresh_runtime_status(self):
         if not hasattr(self, "status_label"):
@@ -3296,6 +3343,7 @@ class OverlayApp:
 
     def _set_sensor_status(self, status):
         if status not in (
+            SENSOR_STATUS_WINDOWS_ONLY,
             SENSOR_STATUS_PSUTIL_FALLBACK,
             SENSOR_STATUS_PARTIAL,
             SENSOR_STATUS_WARMING_UP,
@@ -3313,7 +3361,10 @@ class OverlayApp:
         self._refresh_runtime_status()
 
     def _save_config(self, update_status=True):
-        ok, message = save_config(self.config)
+        persisted = self.config
+        if getattr(self, "_windows_only", False) is True:
+            persisted = dict(self.config, **getattr(self, "_hardware_settings_to_preserve", {}))
+        ok, message = save_config(persisted)
         if update_status and getattr(self, "running", False):
             self._set_config_status(None if ok else STATUS_CONFIG_SAVE_ERROR)
         return ok, message
@@ -3678,6 +3729,12 @@ class OverlayApp:
         )
 
     def _apply_details_visibility(self):
+        native = getattr(self, "groups", {}).get("THERMAL ZONES")
+        if native is not None:
+            if self.details_enabled:
+                native.pack(fill="x", pady=(0, 5))
+            else:
+                native.pack_forget()
         if self.details_enabled:
             pack_options = {"fill": "x"}
             if hasattr(self, "disk_frame"):
@@ -3783,6 +3840,26 @@ class OverlayApp:
             value.configure(wraplength=260)
         yield
         preferred_width = max(240, self.content.winfo_reqwidth())
+        # Text updates can reach nested Frame requested widths a geometry pass
+        # later. Reserve numeric columns from their actual font measurements so
+        # a long model and high DPI cannot clip capacity during that interval.
+        for key in getattr(self, "disk_labels", []):
+            values = [self.rows.get(key + suffix) for suffix in ("", "_usage")]
+            values = [value for value in values if isinstance(value, tk.Label) and value.winfo_manager()]
+            if values:
+                font = tkfont.Font(root=values[0], font=values[0].cget("font"))
+                reserved = font.measure(" C: …") + 20
+                for value in values:
+                    metric_font = tkfont.Font(root=value, font=value.cget("font"))
+                    reserved += metric_font.measure(value.cget("text")) + 8
+                preferred_width = max(preferred_width, reserved)
+        for label in getattr(self, "summary_labels", {}).values():
+            if not isinstance(label, tk.Label):
+                continue
+            visible = [child for child in label.master.winfo_children() if child.winfo_manager()]
+            required = sum(tkfont.Font(root=child, font=child.cget("font")).measure(child.cget("text")) + 10
+                           for child in visible if isinstance(child, tk.Label))
+            preferred_width = max(preferred_width, required + 10)
         if hasattr(self, "health_label"):
             self.health_label.configure(wraplength=max(100, min(preferred_width, work_width - 24)))
         yield
@@ -3939,10 +4016,6 @@ class OverlayApp:
         row = tk.Frame(parent, bg="#1a1a2e")
         row.pack(fill="x", pady=1)
         # Left: disk name (orange, bold)
-        tk.Label(
-            row, text=f" {disk_name}", font=("Segoe UI", 10, "bold"),
-            fg=self.DISK_CLR, bg="#1a1a2e", anchor="w", justify="left"
-        ).pack(side="left")
         # Far-right: usage % (colored)
         usage_lbl = tk.Label(
             row, text="", font=("Segoe UI", 10),
@@ -3955,6 +4028,29 @@ class OverlayApp:
             fg="#888888", bg="#1a1a2e", anchor="e"
         )
         temp_lbl.pack(side="right", padx=(0, 4))
+        # Reserve the numeric columns first. The model receives only remaining
+        # width and cannot increase the overlay width or push capacity offscreen.
+        name_label = tk.Label(row, text=f" {disk_name}", width=1,
+                              font=("Segoe UI", 10, "bold"), fg=self.DISK_CLR,
+                              bg="#1a1a2e", anchor="w", justify="left")
+        name_label.pack(side="left", fill="x", expand=True)
+        full_name = " " + disk_name
+        font = tkfont.Font(root=name_label, font=name_label.cget("font"))
+        def fit_name(_event=None):
+            available = max(0, name_label.winfo_width() - 4)
+            shortened = full_name
+            if font.measure(shortened) > available:
+                low, high = 0, len(shortened)
+                while low < high:
+                    mid = (low + high + 1) // 2
+                    if font.measure(full_name[:mid] + "…") <= available:
+                        low = mid
+                    else:
+                        high = mid - 1
+                shortened = full_name[:low] + "…" if low else ""
+            if name_label.cget("text") != shortened:
+                name_label.config(text=shortened)
+        name_label.bind("<Configure>", fit_name)
         self.rows[key] = temp_lbl
         self.rows[key + "_usage"] = usage_lbl
 
@@ -4258,7 +4354,7 @@ class OverlayApp:
             else:
                 log.error("%s", _format_autostart_reconcile_error(result.changed, result.message))
         self._set_menu_label("autostart", "Autostart: ERROR" if not result.ok or result.enabled is None else
-                            "Autostart: ON (UAC)" if result.enabled else "Autostart: OFF")
+                            ("Autostart: ON" if getattr(self, "_windows_only", False) is True else "Autostart: ON (UAC)") if result.enabled else "Autostart: OFF")
         if not result.ok and (manual or not result.changed):
             self.root.after(60000, self._retry_autostart_check)
 
@@ -4322,6 +4418,9 @@ class OverlayApp:
         )
 
     def toggle_gpu_fans(self):
+        if getattr(self, "_windows_only", False) is True:
+            self._show_info_notice("Cooling", "Fan control is managed by this computer's firmware on ARM64.")
+            return
         enabled = not self.config.get("gpu_fans_enabled", False)
         if enabled:
             with self.lock:
@@ -4344,6 +4443,9 @@ class OverlayApp:
         self._set_menu_label("gpu_fans", "Automatic GPU fans: " + ("ON" if enabled else "OFF"))
 
     def toggle_case_fans(self):
+        if getattr(self, "_windows_only", False) is True:
+            self._show_info_notice("Cooling", "Fan control is managed by this computer's firmware on ARM64.")
+            return
         enabled = not self.config.get("case_fans_enabled", False)
         if enabled:
             # Serialize starting with the sensor owner's pause latch. Otherwise
@@ -4391,7 +4493,17 @@ class OverlayApp:
             reported = {item.key for item in self.thermal_findings}
             missing.extend(label for key, label in (("gpu_hotspot_temp", "GPU Hotspot"), ("gpu_memory_temp", "VRAM temp"))
                            if data.get(key) is None and "missing:" + key not in reported)
-        if missing:
+        if getattr(self, "_windows_only", False) is True:
+            if missing:
+                messages.append("Temperature unavailable: " + ", ".join(missing))
+                severity = max(severity, 1)
+            if not data.get("thermal_zones"):
+                messages.append("Thermal zone readings unavailable")
+                severity = max(severity, 1)
+            if data.get("native_telemetry_error"):
+                messages.append("Windows telemetry: " + data["native_telemetry_error"])
+                severity = max(severity, 1)
+        elif missing:
             messages.append("Unavailable: " + ", ".join(missing))
             severity = max(severity, 1)
         if (self._fan_control_paused("fan_worker")
@@ -4575,6 +4687,8 @@ class OverlayApp:
         return False
 
     def sensor_loop(self):
+        if getattr(self, "_windows_only", False):
+            return self.windows_sensor_loop()
         # psutil maintains its CPU baseline per thread.
         psutil.cpu_percent(interval=0)
         computer = self.computer
@@ -4746,6 +4860,49 @@ class OverlayApp:
             with self.lock:
                 self.computer = None
 
+    def windows_sensor_loop(self):
+        """OS readings and native PDH; never open CLR, drivers or fan owners."""
+        psutil.cpu_percent(interval=0)
+        telemetry = None
+        retry_at = 0
+        try:
+            while self.running and not self._stop_event.is_set():
+                try:
+                    data = _apply_psutil_fallbacks(_empty_sensor_data())
+                    data[SENSOR_STATUS_KEY] = SENSOR_STATUS_WINDOWS_ONLY
+                    try:
+                        if telemetry is None and time.monotonic() >= retry_at:
+                            telemetry = WindowsTelemetry()
+                        if telemetry is not None:
+                            data.update(telemetry.sample())
+                    except Exception as exc:
+                        data["native_telemetry_error"] = str(exc)
+                        log.warning("Windows telemetry unavailable: %s", exc)
+                        if telemetry is not None:
+                            telemetry.close()
+                            telemetry = None
+                        retry_at = time.monotonic() + 30
+                    with self.lock:
+                        volume_snapshot = getattr(self, "_volume_snapshot", None)
+                    volumes = _fresh_volume_data(volume_snapshot, time.monotonic()) or {}
+                    disks = {}
+                    for volume in volumes.get("volumes", []):
+                        number = volume.get("disk_number")
+                        if type(number) is int and volume.get("device_name") and volume.get("temp") is not None:
+                            disks[number] = {"disk_number": number, "name": volume["device_name"],
+                                             "temp": volume["temp"], "source": volume.get("temperature_source")}
+                    data["disks"] = list(disks.values())
+                except Exception as exc:
+                    log.warning("Windows monitoring sample failed", exc_info=True)
+                    data = {"error": str(exc)}
+                with self.lock:
+                    self.sensor_data = data
+                    self._sensor_sample_time = time.monotonic()
+                self._stop_event.wait(2)
+        finally:
+            if telemetry is not None:
+                telemetry.close()
+
     def volume_loop(self):
         """A blocked filesystem or extent query cannot stall other sensor owners."""
         retry_after = {}
@@ -4764,6 +4921,8 @@ class OverlayApp:
             try:
                 if mount in mapping_retry_after and time.monotonic() < mapping_retry_after[mount][0]:
                     return probe_volume(mount, cancelled, include_identity=False)
+                if getattr(self, "_windows_only", False):
+                    return probe_volume(mount, cancelled, include_model=True)
                 return probe_volume(mount, cancelled)
             except (OSError, ValueError, RuntimeError) as exc:
                 return {'error': 'Volume probe failed: ' + str(exc)[:300]}
@@ -4820,6 +4979,8 @@ class OverlayApp:
 
     def storage_loop(self):
         """Keep slow disk identification independent of the CPU/GPU sensor owner."""
+        if getattr(self, "_windows_only", False):
+            return
         retry_after = {}
         def stopped():
             return self._stop_event.is_set() or not self.running
@@ -5070,6 +5231,35 @@ class OverlayApp:
             return
 
         self._set_sensor_status(data.get(SENSOR_STATUS_KEY))
+        if getattr(self, "_windows_only", False) is True:
+            for component in ("cpu", "gpu"):
+                key = component + "_temp"
+                if data.get(key) is not None:
+                    self.rows[key].pack(side="right", padx=(6, 0))
+                else:
+                    self.rows[key].pack_forget()
+                if component in getattr(self, "summary_labels", {}):
+                    self.summary_labels[component].config(
+                        text=("Temperature" if component == "gpu" and data.get(key) is not None
+                              else data.get(component + "_temp_label", "Load")))
+        if "native_thermal" in self.rows:
+            zones = data.get("thermal_zones", [])
+            if zones:
+                hottest = max(zones, key=lambda zone: zone["temp"])
+                short_name = hottest["name"].split(".")[-1]
+                self.rows["native_thermal"].config(text=f"{hottest['temp']:.1f}°C · {short_name}", fg="#cbd5e1")
+                low = min(zone["temp"] for zone in zones)
+                self.rows["native_thermal_range"].config(
+                    text=f"{low:.1f}–{hottest['temp']:.1f}°C · {len(zones)} zones", fg="#cbd5e1")
+                if "native_thermal_details" in self.rows:
+                    self.rows["native_thermal_details"].config(
+                        text="ACPI thermal zones (°C):\n" + "\n".join(
+                            f"{zone['name'].split('.')[-1]}: {zone['temp']:.1f}" for zone in zones), fg="#cbd5e1")
+            else:
+                for key in ("native_thermal", "native_thermal_range"):
+                    self.rows[key].config(text="--", fg="#888888")
+                if "native_thermal_details" in self.rows:
+                    self.rows["native_thermal_details"].config(text="ACPI thermal zones unavailable", fg="#888888")
         # A slow native read may finish after the volume snapshot has expired.
         volumes = _fresh_volume_data(volume_snapshot, time.monotonic()) or {}
         data = dict(data, volumes=volumes.get("volumes", []),
@@ -5253,6 +5443,8 @@ class OverlayApp:
                           if type(number) is int and type(disk.get("disk_number")) is int
                           and disk["disk_number"] == number]
             entry, name = dict(volume), volume["name"]
+            if not candidates and entry.get("device_name"):
+                name += " " + entry["device_name"]
             if len(candidates) == 1:
                 index, disk = candidates[0]
                 matched.add(index)
@@ -5482,7 +5674,7 @@ def _is_admin():
 
 
 def main():
-    dll_errors = _runtime_dll_errors()
+    dll_errors = [] if windows_only_mode() else _runtime_dll_errors()
     if dll_errors:
         details = "\n".join(f"- {message}" for message in dll_errors[:8])
         if len(dll_errors) > 8:
@@ -5500,7 +5692,7 @@ def main():
 
     try:
         log.info("HeatMap starting version=%s pid=%s parent_pid=%s", VERSION, os.getpid(), os.getppid())
-        if not _is_admin():
+        if not windows_only_mode() and not _is_admin():
             log.warning("Running without admin privileges — hardware sensors may be unavailable")
         app = OverlayApp(autostart_result=AutostartReconcileResult(False, True, "Checking", None))
         try:
