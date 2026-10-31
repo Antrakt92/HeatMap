@@ -1,5 +1,19 @@
 # HeatMap Audit Backlog
 
+Hardware-pause diagnostic loss (2026-10-31): supplied 1.5.0 diagnostics and
+terminal controller reports show simultaneous normal handback at 22:15:29,
+followed by sensor recovery at 22:15:47. The recoverable guard path omitted its
+initial warning, and clearing the active pause discarded its reason from copied
+diagnostics. Preserve the original guard category/reason and start/recovery times,
+log entry into a recoverable pause, and latch the pause before logging. Two
+regressions fail before the fix and pass afterward. Recovery intervals, verified
+handback and deliberate fan re-enable requirements remain unchanged.
+Windows events record Gaming Services/driver and Xbox service installation in
+the same interval, but the original guard kind cannot be recovered from the old
+log, so exact causation remains unconfirmed. The screenshot's dark rectangles
+are not established as an application rendering defect; a read-only resource
+snapshot found 51 GDI and 123 USER objects, not resource exhaustion at that moment.
+
 ARM64 integration / home x64 verification (2026-10-31): the adaptive backend
 branch passed 1,218 tests again on Windows x64. Preflight initially found the
 local venv behind the existing production constraints; pythonnet and pycparser

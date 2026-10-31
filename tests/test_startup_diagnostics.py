@@ -91,6 +91,23 @@ class StartupDiagnosticsTests(unittest.TestCase):
         app.sensor_data = {"cpu_temp": 58}
         return app
 
+    def test_diagnostics_keeps_last_pause_after_sensor_recovery(self):
+        app = self.diagnostics_app()
+        app._hardware_pause_reason = None
+        app._last_hardware_pause = {
+            'kind': 'inventory_unverified', 'reason': 'Process inventory unavailable',
+            'started_at': 100, 'resumed_at': 118,
+        }
+        with mock.patch.object(overlay, 'build_sensor_diagnostics', return_value='Live sensors'):
+            app.copy_diagnostics()
+            app._diagnostics_thread.join(3)
+            self.assertFalse(app._diagnostics_thread.is_alive())
+            app._poll_diagnostics()
+        text = app.root.clipboard_append.call_args.args[0]
+        self.assertIn('Most recent hardware-access pause:', text)
+        self.assertIn('Process inventory unavailable', text)
+        self.assertIn('"resumed_at": 118', text)
+
     def test_diagnostics_return_to_ui_before_slow_formatting_without_hardware(self):
         app = self.diagnostics_app()
         opened = threading.Event()

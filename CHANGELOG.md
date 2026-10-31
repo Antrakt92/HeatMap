@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.5.1 — 2026-10-31
+
+- Log the original reason and category when hardware access pauses because of
+  driver activity or an unverifiable process inventory. These recoverable
+  pauses previously could leave only a later "resuming sensor monitoring" line.
+- Retain the most recent hardware-access pause and its start/recovery times in
+  Copy diagnostics after live sensor readings return. A stopped fan controller
+  can now be investigated without losing the guard event that stopped it.
+- Keep the existing safety behavior: sensor reads resume only after verified
+  access and confirmed fan handback; fan assistance still requires deliberate
+  re-enabling after a safety pause. Drivers, dependencies, cooling thresholds
+  and fan-control policies are unchanged from 1.5.0.
+
 ## 1.5.0 — 2026-10-31
 
 HeatMap now runs on Windows ARM64 as well as x64. The same application selects

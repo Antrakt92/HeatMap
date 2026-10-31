@@ -46,7 +46,7 @@ from storage_identity import volume_disk_number, physical_disk_numbers
 from storage_probe import probe_disk, snapshot_data as storage_snapshot_data
 from volume_probe import probe_volume
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 
 
 # --- Paths ---
@@ -3445,6 +3445,8 @@ class OverlayApp:
             snapshot = getattr(self, "_sensor_diagnostics_snapshot", None)
             data = dict(getattr(self, "sensor_data", {}))
             volume_snapshot = getattr(self, "_volume_snapshot", None)
+            pause = getattr(self, "_last_hardware_pause", None)
+            pause = dict(pause) if pause is not None else None
         now = time.monotonic()
         volumes = _fresh_volume_data(volume_snapshot, now)
         if volumes is None:
@@ -3464,6 +3466,9 @@ class OverlayApp:
                 now, getattr(self, "_hardware_pause_reason", None))
         messages = getattr(self, "health_messages", [])
         health_context = "\nWarnings at request:\n" + "\n".join(messages) if messages else ""
+        if pause is not None:
+            health_context += ("\nMost recent hardware-access pause:\n"
+                               + json.dumps(pause, ensure_ascii=False))
         health_context += "\nCase fan controller:\n" + json.dumps(
             getattr(self, "_case_fan_status", {"state": "off"}), ensure_ascii=False)
         health_context += "\nGPU fan controller:\n" + json.dumps(
@@ -4649,6 +4654,17 @@ class OverlayApp:
             if self.running:
                 self.menu.grab_release()
 
+    def _record_hardware_pause(self, conflict):
+        reason = "Sensors paused: " + str(conflict)
+        kind = getattr(conflict, "kind", None)
+        with self.lock:
+            self._hardware_pause_reason = reason
+            self._last_hardware_pause = {
+                "started_at": time.time(), "kind": kind, "reason": str(conflict),
+            }
+        log.warning("Sensors paused (%s): %s", kind or "unclassified", conflict)
+        return reason
+
     def _wait_for_hardware_recovery(self):
         """Require continuous verified access and completed controller handback."""
         clear_since = None
@@ -4681,6 +4697,9 @@ class OverlayApp:
                             return False
                     with self.lock:
                         self._hardware_pause_reason = None
+                        pause = getattr(self, "_last_hardware_pause", None)
+                        if pause is not None:
+                            self._last_hardware_pause = dict(pause, resumed_at=time.time())
                     log.info("Hardware access stable; resuming sensor monitoring")
                     return True
             self._stop_event.wait(HARDWARE_ACCESS_POLL_SECONDS)
@@ -4826,8 +4845,9 @@ class OverlayApp:
                         raise
                     # One owner closes and reopens its own native handle. Never
                     # spawn a replacement reader while an old call is in flight.
+                    reason = self._record_hardware_pause(exc)
                     with self.lock:
-                        self._hardware_pause_reason = "Sensors paused: " + str(exc)
+                        self._hardware_pause_reason = reason
                         self.sensor_data = {"error": self._hardware_pause_reason}
                         self._sensor_sample_time = time.monotonic()
                         self.computer = None
@@ -4847,8 +4867,7 @@ class OverlayApp:
         except HardwareAccessConflict as exc:
             # Unknown conflicts and unconfirmed controller handback remain
             # hard failures. Only typed transient guard failures auto-recover.
-            reason = "Sensors paused: " + str(exc)
-            log.warning("%s", reason)
+            reason = self._record_hardware_pause(exc)
             with self.lock:
                 self._hardware_pause_reason = reason
                 self.sensor_data = {"error": reason}

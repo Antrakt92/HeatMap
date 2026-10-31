@@ -60,6 +60,21 @@ class OverlayRecoveryAuditTests(unittest.TestCase):
         self.assertIn('close failed', app._hardware_pause_reason)
         computer.Close.assert_called_once_with()
 
+    def test_recovered_pause_retains_and_logs_its_original_cause(self):
+        app = sensor_app(12)
+        access = mock.Mock(side_effect=[
+            HardwareAccessConflict('Process inventory could not be verified',
+                                   kind='inventory_unverified')] + ['full'] * 30)
+        with mock.patch.object(overlay, 'log') as logger:
+            self.run_sensor(app, access, lambda: mock.Mock())
+        self.assertIsNone(app._hardware_pause_reason)
+        event = app._last_hardware_pause
+        self.assertEqual(event['kind'], 'inventory_unverified')
+        self.assertEqual(event['reason'], 'Process inventory could not be verified')
+        self.assertGreaterEqual(event['resumed_at'], event['started_at'])
+        self.assertTrue(any('Process inventory could not be verified' in str(call)
+                            for call in logger.warning.call_args_list))
+
     def test_partial_init_close_failure_hard_stops_future_retries(self):
         for stage in ('Open', 'check'):
             for error in (RuntimeError('native init failure'),
