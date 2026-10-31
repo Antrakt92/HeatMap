@@ -1,5 +1,85 @@
 # Changelog
 
+## 1.5.0 — 2026-10-31
+
+HeatMap now runs on Windows ARM64 as well as x64. The same application selects
+the appropriate monitoring backend automatically, while retaining the existing
+x64 sensor access and commissioned cooling profiles.
+
+### Windows ARM64 monitoring
+
+- Add a native Windows backend for ARM64/Snapdragon computers. Read CPU load
+  and frequency, GPU engine load and current frequency, RAM use, fixed-volume
+  fullness and supported temperatures without administrator access, pythonnet,
+  LibreHardwareMonitor or PawnIO. Detect the ARM host even under x64 emulation.
+- Discover thermal associations from the computer's firmware. On supported
+  SDM8380 systems, show identified CPU/SoC and GPU-zone temperatures in their
+  component rows. Keep unidentified zones in Details and diagnostics rather
+  than guessing which temperature belongs to a component. SoC/thermal-zone
+  readings are distinct from x64 package, core and junction sensors.
+- Match GPU utilization and current WDDM engine frequency to the same adapter.
+  Exclude software adapters and withhold ambiguous readings. Retry failed
+  Windows performance counters after 30 seconds while preserving independent
+  GPU-clock and CPU/RAM readings.
+- Read disk manufacturer/model from verified volume-to-device mappings,
+  independently of temperature availability. Add read-only UFS case-temperature
+  support when the standard Windows temperature property is unavailable.
+- Keep firmware-managed cooling on ARM64. Hide unsupported fan rows and routine
+  backend notices from the compact display; retain limitations and sources in
+  diagnostics, and keep actual failures and stale readings visible.
+
+### Display, settings and startup
+
+- Shorten long drive names with an ellipsis after reserving room for temperature
+  and fullness. Numeric readings remain visible at the tested display scales;
+  the compact row keeps its model / temperature / percentage format.
+- Preserve saved x64 fan-control flags when display preferences are saved on
+  ARM64. Disable those controls only for the ARM session and prevent ARM CPU-fan
+  calibration from changing the original computer's settings.
+- Add `launch.py` as an architecture-aware entry point. ARM64 starts without
+  UAC; x64 forwards to the verified elevated launcher. Native startup errors stop
+  the launch instead of falling through into the x64 driver path.
+- Add an updated desktop screenshot and clarify that release downloads contain
+  the Python application, with separate setup and sensor/cooling guides.
+
+### Dependencies and maintenance
+
+- On x64 with Python 3.11 or newer, update the production pins: pythonnet
+  **3.1.0 → 3.2.1** and pycparser **3.0 → 3.12**. Python 3.10 retains pythonnet
+  3.1.0 and pycparser 3.0. Preflight selects the matching exact pins and rejects
+  incomplete, unsupported or ambiguous conditional constraints. Native ARM64
+  installations exclude pythonnet and continue to require psutil 7.2.2.
+- Add optional firmware discovery using **ACPICA iASL 20260408**. The ARM launcher
+  downloads the official executable on first preparation, checks its exact size
+  and SHA-256, and caches it locally. Discovery disassembles a copied firmware
+  table without executing firmware methods or uploading firmware. Validated
+  profiles are cached by firmware hash; cache-write failures do not discard
+  successfully discovered readings.
+- Update CI tooling: actions/checkout **4.3.1 → 7.0.1** and actions/setup-python
+  **5.6.0 → 7.1.0**, retaining commit-SHA pins.
+- Add regressions for backend selection, copied settings, firmware associations,
+  GPU identity, counter recovery, UFS replies and layout at three display scales.
+  Bundled DLLs, PawnIO, thermal thresholds and commissioned fan-control policies
+  are unchanged from 1.4.5.
+
+### Upgrading and limitations
+
+- Close HeatMap normally, preserve `overlay_config.json` and the original
+  computer's commissioning data, then update the application and reinstall the
+  dependencies using `requirements.txt` with `constraints-known-good.txt`.
+  Use native ARM64 Python on ARM64; do not install the x64 PawnIO runtime there.
+  See [Setup](docs/SETUP.md) for the platform-specific steps.
+- Sensor availability depends on firmware and drivers. ARM64 fan RPM/control
+  remains unavailable through the supported interfaces; some computers cannot
+  expose identifiable component temperatures, GPU clocks or drive temperatures.
+- Local Windows x64 validation passed 1,218 automated tests, runtime integrity,
+  preflight and native integration checks. Elevated reads confirmed CPU/GPU/fan
+  sensors and all four local disk temperatures; existing controller profiles
+  restarted successfully. ARM64 hardware checks are recorded in the
+  [portability audit](docs/portability-audit-2026-10-31.md). These checks do not
+  establish extended gaming, sleep/resume, reboot/login or physical multi-monitor
+  acceptance. Hosted CI was not run for this release.
+
 ## 1.4.5 — 2026-10-29
 
 - Discover fixed volumes from Windows drive letters and types, avoiding a global

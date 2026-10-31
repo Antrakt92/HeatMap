@@ -2,7 +2,7 @@
 Desktop Temperature Overlay
 Desktop widget showing hardware temperatures and usage.
 Sits on the desktop layer — above wallpaper, below all app windows.
-Requires admin privileges to read hardware sensors.
+Requires admin privileges for the x64 hardware sensor backend.
 """
 import base64
 import ctypes
@@ -46,7 +46,7 @@ from storage_identity import volume_disk_number, physical_disk_numbers
 from storage_probe import probe_disk, snapshot_data as storage_snapshot_data
 from volume_probe import probe_volume
 
-VERSION = "1.4.5"
+VERSION = "1.5.0"
 
 
 # --- Paths ---

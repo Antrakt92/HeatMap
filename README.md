@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/Antrakt92/HeatMap/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Antrakt92/HeatMap"></a>
-  <img alt="Windows x64" src="https://img.shields.io/badge/platform-Windows%20x64-blue">
+  <img alt="Windows x64 and ARM64" src="https://img.shields.io/badge/platform-Windows%20x64%20%2B%20ARM64-blue">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 </p>
 
@@ -68,9 +68,10 @@ it is not a standalone executable installer.
    or clone this repository.
 2. Follow the [setup guide](docs/SETUP.md) to create a virtual environment,
    install the pinned dependencies and prepare the verified monitoring runtime.
-3. Start `run_as_admin.bat` and accept the Windows UAC prompt.
+3. Start `run_as_admin.bat`. On x64, accept the Windows UAC prompt; ARM64
+   monitoring starts without elevation.
 
-The setup guide also covers the PawnIO driver needed for CPU and motherboard
+The setup guide also covers the PawnIO driver needed for x64 CPU and motherboard
 sensors. Runtime and driver downloads are verified before use.
 
 ## Controls
@@ -81,7 +82,7 @@ sensors. Runtime and driver downloads are verified before use.
 | Open settings | Click the gear button |
 | Keep it above windows | Display → Always on top |
 | Raise it temporarily | Display → Raise on edge |
-| Start with Windows | Display → Autostart; sensor access still prompts for UAC |
+| Start with Windows | Display → Autostart; x64 sensor access still prompts for UAC |
 | Change alerts and thresholds | Alerts & limits |
 | Inspect readings and controller status | Diagnostics |
 
