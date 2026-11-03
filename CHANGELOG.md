@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.5.2 — 2026-11-03
+
+- Retry a disk-temperature probe on the next scheduled poll after a transient
+  failure, instead of leaving its temperature unavailable for five minutes.
+  Repeated failures increase the retry delay to 60, 120, 240 and at most 300
+  seconds; a successful reading resets the delay for that disk.
+- Count time spent querying disks as part of the 30-second polling period.
+  Slow or timed-out devices no longer add a further 30-second wait after each
+  pass. This prevents two eight-second timeouts from stretching the next healthy
+  disk sample beyond the 45-second freshness limit.
+- Log disk-probe failures with their elapsed time and retry delay, and record
+  successful recovery so intermittent problems can be investigated afterward.
+- Keep the eight-second per-probe deadline, cancellation and child-process
+  cleanup, stale-reading checks and independent volume-capacity reads. Drivers,
+  dependencies, sensor thresholds and fan-control policies are unchanged.
+
 ## 1.5.1 — 2026-10-31
 
 - Log the original reason and category when hardware access pauses because of

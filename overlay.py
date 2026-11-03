@@ -46,7 +46,7 @@ from storage_identity import volume_disk_number, physical_disk_numbers
 from storage_probe import probe_disk, snapshot_data as storage_snapshot_data
 from volume_probe import probe_volume
 
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 
 
 # --- Paths ---
@@ -5011,6 +5011,7 @@ class OverlayApp:
             if cancelled():
                 self._stop_event.wait(HARDWARE_ACCESS_POLL_SECONDS)
                 continue
+            cycle_started = time.monotonic()
             with self.lock:
                 volume_snapshot = getattr(self, "_volume_snapshot", None)
             volumes = _fresh_volume_data(volume_snapshot, time.monotonic()) or {}
@@ -5031,8 +5032,9 @@ class OverlayApp:
             for number in sorted(numbers, key=lambda number: (number not in mounted, number)):
                 if cancelled():
                     break
-                if time.monotonic() < retry_after.get(number, 0):
+                if time.monotonic() < retry_after.get(number, (0, 0))[0]:
                     continue
+                probe_started = time.monotonic()
                 try:
                     require_hardware_access("monitor")
                     sample = probe_disk(number, cancelled)
@@ -5044,10 +5046,15 @@ class OverlayApp:
                 if sample is None or cancelled():
                     break
                 if "error" in sample:
-                    # Do not hammer a driver/device that timed out. Healthy
-                    # disks retain the normal 30-second refresh interval.
-                    retry_after[number] = time.monotonic() + 300
+                    # One slow call should not suppress readings for five minutes.
+                    # Persistent failures still back off to the existing ceiling.
+                    delay = min(300, retry_after[number][1] * 2) if number in retry_after else VOLUME_REFRESH_SECONDS
+                    retry_after[number] = (cycle_started + delay, delay)
+                    log.warning("Disk %s probe failed after %.1fs (backoff %.0fs): %s",
+                                number, time.monotonic() - probe_started, delay, sample["error"])
                 else:
+                    if number in retry_after:
+                        log.info("Disk %s temperature probe recovered", number)
                     retry_after.pop(number, None)
                 with self.lock:
                     previous = self._storage_snapshot.get(number)
@@ -5057,7 +5064,10 @@ class OverlayApp:
             with self.lock:
                 self._storage_snapshot = {number: entry for number, entry in self._storage_snapshot.items()
                                           if number in numbers}
-            self._stop_event.wait(VOLUME_REFRESH_SECONDS)
+            retry_after = {number: entry for number, entry in retry_after.items() if number in numbers}
+            # Query time is part of the poll period, rather than an extra delay
+            # that can expire healthy disks while other devices time out.
+            self._stop_event.wait(max(0, VOLUME_REFRESH_SECONDS - (time.monotonic() - cycle_started)))
 
     def _poll_fan_controller(self, attribute, setting):
         worker = getattr(self, attribute)

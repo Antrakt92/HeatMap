@@ -240,8 +240,46 @@ class StorageProbeTests(unittest.TestCase):
         self.assertEqual(app.sensor_data['disks'][0]['temp'], 45)
         self.assertEqual(app.sensor_data['volumes'][0]['used_pct'], 46)
 
-    def test_failed_disk_backs_off_while_other_disks_keep_refreshing(self):
+    def test_transient_failure_recovers_on_next_scheduled_poll(self):
         app = sensor_app(2)
+        app.config = {}
+        app._storage_snapshot = {}
+        app._volume_snapshot = None
+        with (mock.patch.object(overlay.time, 'monotonic', side_effect=lambda: app._stop_event.now),
+              mock.patch.object(overlay, 'physical_disk_numbers', return_value={1}),
+              mock.patch.object(overlay, 'require_hardware_access'),
+              mock.patch.object(overlay, 'probe_disk', side_effect=[
+                  {'disk_number': 1, 'error': 'timeout'},
+                  {'disk_number': 1, 'name': 'SSD', 'temp': 41}]) as read):
+            app.storage_loop()
+        self.assertEqual(read.call_count, 2)
+        self.assertEqual(app._storage_snapshot[1][1]['temp'], 41)
+
+    def test_slow_failed_disks_do_not_add_an_extra_poll_period_to_healthy_readings(self):
+        app = sensor_app(3)
+        app.config = {}
+        app._storage_snapshot = {}
+        app._volume_snapshot = None
+        healthy_times = []
+        def probe(number, cancelled):
+            if number in (1, 3):
+                app._stop_event.now += 8
+                return {'disk_number': number, 'error': 'timeout'}
+            if number == 0:
+                healthy_times.append(app._stop_event.now)
+            return {'disk_number': number, 'name': 'SSD', 'temp': 41}
+        with (mock.patch.object(overlay.time, 'monotonic', side_effect=lambda: app._stop_event.now),
+              mock.patch.object(overlay, 'physical_disk_numbers', return_value={0, 1, 2, 3}),
+              mock.patch.object(overlay, 'require_hardware_access'),
+              mock.patch.object(overlay, 'probe_disk', side_effect=probe)):
+            app.storage_loop()
+        self.assertEqual(len(healthy_times), 3)
+        self.assertTrue(all(b - a <= storage_probe.STORAGE_STALE_SECONDS
+                            for a, b in zip(healthy_times, healthy_times[1:])), healthy_times)
+        self.assertEqual(healthy_times, [100, 130, 160])
+
+    def test_failed_disk_backs_off_while_other_disks_keep_refreshing(self):
+        app = sensor_app(3)
         app.config = {}
         app._storage_snapshot = {}
         app._volume_snapshot = (100, {'volumes': [{'disk_number': 1}, {'disk_number': 2}]})
@@ -252,7 +290,40 @@ class StorageProbeTests(unittest.TestCase):
               mock.patch.object(overlay, 'require_hardware_access'),
               mock.patch.object(overlay, 'probe_disk', side_effect=probe) as read):
             app.storage_loop()
-        self.assertEqual([call.args[0] for call in read.call_args_list], [1, 2, 2])
+        self.assertEqual([call.args[0] for call in read.call_args_list], [1, 2, 1, 2, 2])
+
+    def test_persistent_timeouts_increase_backoff_to_five_minutes(self):
+        app = sensor_app(30)
+        app.config = {}
+        app._storage_snapshot = {}
+        app._volume_snapshot = None
+        attempts = []
+        def probe(number, cancelled):
+            attempts.append(app._stop_event.now)
+            return {'disk_number': number, 'error': 'timeout'}
+        with (mock.patch.object(overlay.time, 'monotonic', side_effect=lambda: app._stop_event.now),
+              mock.patch.object(overlay, 'physical_disk_numbers', return_value={1}),
+              mock.patch.object(overlay, 'require_hardware_access'),
+              mock.patch.object(overlay, 'probe_disk', side_effect=probe)):
+            app.storage_loop()
+        self.assertEqual(attempts, [100, 130, 190, 310, 550, 850])
+
+    def test_success_resets_backoff_before_another_transient_failure(self):
+        app = sensor_app(4)
+        app.config = {}
+        app._storage_snapshot = {}
+        app._volume_snapshot = None
+        with (mock.patch.object(overlay.time, 'monotonic', side_effect=lambda: app._stop_event.now),
+              mock.patch.object(overlay, 'physical_disk_numbers', return_value={1}),
+              mock.patch.object(overlay, 'require_hardware_access'),
+              mock.patch.object(overlay, 'probe_disk', side_effect=[
+                  {'disk_number': 1, 'error': 'timeout'},
+                  {'disk_number': 1, 'name': 'SSD', 'temp': 41},
+                  {'disk_number': 1, 'error': 'timeout'},
+                  {'disk_number': 1, 'name': 'SSD', 'temp': 42}]) as read):
+            app.storage_loop()
+        self.assertEqual(read.call_count, 4)
+        self.assertEqual(app._storage_snapshot[1][1]['temp'], 42)
 
 
 if __name__ == '__main__':

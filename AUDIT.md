@@ -1,5 +1,28 @@
 # HeatMap Audit Backlog
 
+Storage timeout recovery (2026-11-03): supplied diagnostics show successful
+capacity/mapping for all four volumes, but Disk 1 timed out at SMART and Disk 3
+at runtime loading. Fresh elevated reads returned both temperatures within the
+original eight-second deadline (0.81s and 1.57s); the original native stall was
+not reproduced and its driver/runtime cause remains unconfirmed.
+Two recovery defects were reproduced independently: a single failure suppressed
+the next probe for five minutes; serial query time was added to a full 30-second
+sleep, allowing two eight-second failures to expire healthy 45-second samples.
+Schedule from each pass start, retry a first failure on the next poll and double
+persistent failure delays up to the original 300-second ceiling. Success resets
+that disk's backoff. Log failures and recovery. Regressions cover transient
+recovery, healthy sample age, persistent backoff and reset after success.
+The eight-second query deadline, timestamp validation, stale-data limits,
+hardware guards, fan policy, bundled DLLs and dependencies remain unchanged.
+
+Local verification passed 1,224 tests, compilation, DLL integrity, preflight,
+manifest synchronization, dependency consistency and bounded volume integration.
+A three-pass elevated storage-loop check injected one transient failure, then
+read all four real disk temperatures without errors in the next two passes.
+An initial full run hit an existing 200ms deferred-layout timing assertion while
+native probes ran concurrently; the isolated UI test and full rerun passed
+without changing UI code, test expectations or time limits.
+
 Hardware-pause diagnostic loss (2026-10-31): supplied 1.5.0 diagnostics and
 terminal controller reports show simultaneous normal handback at 22:15:29,
 followed by sensor recovery at 22:15:47. The recoverable guard path omitted its
