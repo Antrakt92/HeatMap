@@ -46,7 +46,7 @@ from storage_identity import volume_disk_number, physical_disk_numbers
 from storage_probe import probe_disk, snapshot_data as storage_snapshot_data
 from volume_probe import probe_volume
 
-VERSION = "1.5.2"
+VERSION = "1.5.3"
 
 
 # --- Paths ---
@@ -2357,6 +2357,11 @@ def _case_fan_advice(status):
     if status.get("restore_confirmed"):
         return "Case fans: automatic control stopped; firmware restored. Copy diagnostics; toggle Automatic case fans OFF then ON to retry."
     if _case_fan_never_acquired(status):
+        marker = "B850 case fan feedback: "
+        reason = status.get("reason", "")
+        if status.get("profile") == "b850-aorus-elite-wifi7-ice-case-123" and marker in reason:
+            return ("Case fans: " + reason.split(marker, 1)[1]
+                    + "; no fan commands sent. Check fans and BIOS/Smart Fan settings.")
         return "Case fans: automatic control could not start; no fan commands sent. Copy diagnostics for the cause."
     if status.get("reason", "").startswith("Shared controller requires"):
         return "Case fans: pump controller baseline unsupported; firmware control retained."

@@ -114,6 +114,17 @@ class StartupDiscoveryTests(unittest.TestCase):
 
 
 class StartupStatusTests(unittest.TestCase):
+    def test_b850_startup_footer_names_failed_headers_without_claiming_restore(self):
+        status = dict(state="error", profile="b850-aorus-elite-wifi7-ice-case-123",
+                      reason="Startup readiness timed out after 60s: B850 case fan feedback: SYS1 unavailable; SYS2 0 RPM",
+                      control_attempted=False, baseline=[], controlled_channels=[], restore_errors=[])
+        advice = overlay._case_fan_advice(status)
+        self.assertIn("SYS1 unavailable; SYS2 0 RPM", advice)
+        self.assertIn("no fan commands sent", advice)
+        self.assertNotIn("restored", advice)
+        status["restore_errors"] = ["unconfirmed"]
+        self.assertIn("restore unconfirmed", overlay._case_fan_advice(status))
+
     def status(self, **fields):
         return dict(profile=fans.PROFILE, state="checking", phase="discovering", control_attempted=False,
                     baseline=[], controlled_channels=[], firmware_channels=[],

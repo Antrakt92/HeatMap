@@ -203,6 +203,26 @@ class B850SessionTests(unittest.TestCase):
 
 
 class B850IntegrationTests(unittest.TestCase):
+    def test_startup_reports_all_unready_headers_instead_of_only_first(self):
+        tachs = [NS(Name=f"Fan #{i + 1}", Identifier=f"{b850.CHIP}/fan/{i}",
+                    SensorType="Fan", Value=value) for i, value in ((2, 0), (3, 150))]
+        chip = NS(Identifier=b850.CHIP, Sensors=tachs)
+        computer = NS(Hardware=[NS(HardwareType="Motherboard", Name=b850.BOARD, SubHardware=[chip])])
+        with self.assertRaises(b850.StartupNotReady) as caught:
+            b850.select_tachs(computer, startup=True)
+        self.assertIn("SYS1 unavailable", str(caught.exception))
+        self.assertIn("SYS2 0 RPM", str(caught.exception))
+        self.assertIn("SYS3 150 RPM (below 200)", str(caught.exception))
+
+    def test_missing_first_header_does_not_hide_invalid_later_identity(self):
+        tach = NS(Name="Foreign fan", Identifier=f"{b850.CHIP}/fan/2", SensorType="Fan", Value=700)
+        chip = NS(Identifier=b850.CHIP, Sensors=[tach])
+        computer = NS(Hardware=[NS(HardwareType="Motherboard", Name=b850.BOARD, SubHardware=[chip])])
+        with self.assertRaises(RuntimeError) as caught:
+            b850.select_tachs(computer, startup=True)
+        self.assertNotIsInstance(caught.exception, b850.StartupNotReady)
+        self.assertIn("identity", str(caught.exception))
+
     def test_recovery_needs_controller_identity_but_not_published_tachs(self):
         chip = NS(Identifier=b850.CHIP, Sensors=[])
         board = NS(HardwareType="Motherboard", Name=b850.BOARD, SubHardware=[chip])
@@ -308,7 +328,7 @@ class B850WorkerTests(unittest.TestCase):
                 clock.now += seconds
                 for tach in backend.tachs:
                     tach.Value = 1250 if backend.values[b850.DUTIES[1]] == 255 else 850
-                stop_at = (170 if fault in ('permanent_zero', 'missing_chip') else
+                stop_at = (170 if fault in ('permanent_zero', 'missing_chip', 'partial_tachs') else
                            125 if fault == 'late_chip' else 130 if commission else 108)
                 if clock.now >= stop_at:
                     clock.stopped = True
@@ -322,6 +342,10 @@ class B850WorkerTests(unittest.TestCase):
                 backend.tachs[0].Value = 700
             elif fault == "permanent_zero":
                 backend.tachs[0].Value = 0
+            elif fault == "partial_tachs":
+                chip.Sensors = backend.tachs[1:]
+                backend.tachs[1].Value = 0
+                backend.tachs[2].Value = 260
             data = sample(cpu_fan_id=f"{b850.CHIP}/fan/0", cpu_optional_fan_id=f"{b850.CHIP}/fan/4",
                           gpu_name="AMD Radeon RX 7900 XT", fans=[dict(name="System Fan #1", rpm=700 + clock.samples)])
             if fault == "identity":
@@ -431,6 +455,15 @@ class B850WorkerTests(unittest.TestCase):
     def test_persistent_startup_zero_times_out_without_commands(self):
         result, _publish, terminal, backend = self.run_worker(fault="permanent_zero")
         self.assertEqual(result, 1)
+        self.assertFalse(terminal["control_attempted"])
+        self.assertEqual(backend.writes, [])
+
+    def test_partial_startup_inventory_retains_all_faults_without_commands(self):
+        result, publish, terminal, backend = self.run_worker(fault="partial_tachs")
+        self.assertEqual(result, 1)
+        self.assertIn("SYS1 unavailable; SYS2 0 RPM", terminal["reason"])
+        self.assertTrue(all("SYS1 unavailable; SYS2 0 RPM" in call.kwargs["reason"]
+                            for call in publish.call_args_list))
         self.assertFalse(terminal["control_attempted"])
         self.assertEqual(backend.writes, [])
 

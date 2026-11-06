@@ -168,23 +168,33 @@ def select_tachs(computer, *, startup=False, require_running=True):
         # returning interrupted ownership to firmware before sensor readiness.
         return chip, []
     selected = []
+    waiting = []
     for index, name in zip((1, 2, 3), TARGETS):
         matches = [s for s in chip.Sensors if str(s.SensorType) == "Fan"
                    and str(s.Identifier) == f"{CHIP}/fan/{index}"]
         if not matches and startup:
-            raise StartupNotReady(f"Waiting for {name} tachometer discovery")
+            waiting.append(f"SYS{index} unavailable")
+            continue
         if len(matches) != 1 or str(matches[0].Name) != f"Fan #{index + 1}":
             raise RuntimeError(f"{name}: tachometer identity missing or ambiguous")
         if matches[0].Value is None:
+            if startup:
+                waiting.append(f"SYS{index} unavailable")
+                continue
             raise StartupNotReady(f"Waiting for {name} tachometer")
         value = matches[0].Value
         if isinstance(value, (bool, str)) or finite(float(value), 0, 10000) is None:
             raise RuntimeError(f"{name}: invalid tachometer reading")
         if float(value) < 200:
             if startup:
-                raise StartupNotReady(f"Waiting for {name} running tachometer")
+                waiting.append(f"SYS{index} {float(value):g} RPM" + (" (below 200)" if value else ""))
+                continue
             raise RuntimeError(f"{name}: running tachometer required")
         selected.append(matches[0])
+    if waiting:
+        # Inspect every header before retrying: one absent tach must not hide
+        # a stopped fan or a terminal identity failure on another channel.
+        raise StartupNotReady("B850 case fan feedback: " + "; ".join(waiting))
     return chip, selected
 
 

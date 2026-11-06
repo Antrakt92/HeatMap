@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.5.3 — 2026-11-06
+
+- Show every unavailable, zero-RPM or below-200-RPM B850 case-fan header in
+  the startup failure report and directly in the overlay warning. Previously
+  the report stopped at the first missing channel and the overlay hid its cause.
+- Check the remaining header identities before retrying missing startup readings,
+  so an absent first tachometer cannot hide an invalid later channel.
+- Retain the 60-second wait, two complete running samples before takeover and
+  no-command behavior when startup feedback remains incomplete. This update
+  does not repair a physical fan or establish why firmware reports missing RPM.
+
 ## 1.5.2 — 2026-11-03
 
 - Retry a disk-temperature probe on the next scheduled poll after a transient

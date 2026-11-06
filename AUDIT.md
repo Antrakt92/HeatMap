@@ -1,5 +1,28 @@
 # HeatMap Audit Backlog
 
+B850 partial startup feedback (2026-11-06): supplied 1.5.2 diagnostics report
+SYS1 absent, SYS2 at zero and SYS3 near 260 RPM. A separate elevated read-only
+five-sample probe reproduced those readings without fan commands. A normal
+restart still timed out waiting for SYS1. The original firmware, connection or
+tachometer cause is unconfirmed; these readings do not prove physical rotation
+or a stopped fan. Do not bypass the commissioned profile's readiness guard.
+
+Fixed two reporting/validation defects: startup selection previously stopped at
+the first missing header, hiding later faults (including terminal identity
+failures); the overlay hid the available cause behind a generic diagnostics
+message. Inspect all three headers and show missing/zero/below-200 feedback in
+the warning and timeout reason. Keep the 60-second deadline, two consecutive
+running samples, ownership/restoration checks and no-command failure behavior.
+Three regressions failed before the correction; the additional whole-worker
+partial-inventory regression confirms timeout with no native writes.
+
+Local checks: 1,228 unit tests, compilation, DLL/module integrity, startup
+preflight, runtime-manifest synchronization and dependency consistency passed.
+Normal Scheduler restart loaded 1.5.3, confirmed by its fresh startup log.
+Full cooling recovery remains unconfirmed while SYS1 feedback is zero; physical
+rotation/connections and BIOS/Smart Fan settings still need inspection. No BIOS,
+driver, dependency, fan calibration or cooling-policy changes were made.
+
 Storage timeout recovery (2026-11-03): supplied diagnostics show successful
 capacity/mapping for all four volumes, but Disk 1 timed out at SMART and Disk 3
 at runtime loading. Fresh elevated reads returned both temperatures within the
