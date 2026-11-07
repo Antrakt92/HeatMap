@@ -1,5 +1,24 @@
 # HeatMap Audit Backlog
 
+B850 automatic feedback recovery (2026-11-07): a fresh Windows logon
+on 1.5.4 recovered the previous firmware settings, then timed out after 60
+seconds because SYS2 feedback remained absent. An elevated read-only probe
+later found all three tachs healthy, including SYS2 at 628-668 RPM. The
+initial cause of the missing tach signal remains unconfirmed.
+
+The B850 worker now marks readiness timeouts and loss of active tach feedback
+for automatic retry. The overlay waits 30 seconds and starts a fresh worker
+only after exit and explicit release evidence. Restarts remain blocked by
+unverified restoration, pending recovery, hardware pauses and invalid
+identities. Every attempt still needs two complete running samples before
+takeover. Commissioning and existing watchdog retry limits are unchanged.
+
+Verified 1233 tests, compilation, runtime verification, preflight, manifest
+synchronization and dependency consistency. A normal elevated Scheduler restart
+loaded 1.6.0 and activated SYS1/2/3 with duty readback and measured RPM.
+The retry path was verified with simulated faults. A fresh Windows reboot
+and a native failure followed by automatic recovery were not exercised.
+
 B850 cold-start tachometer spike (2026-11-07): the 1.5.3 case worker
 reported a terminal tachometer error two seconds after logon. The supplied
 snapshot shows SYS1 at 10074.63 RPM and missing SYS2/SYS3. A separate elevated

@@ -46,7 +46,7 @@ from storage_identity import volume_disk_number, physical_disk_numbers
 from storage_probe import probe_disk, snapshot_data as storage_snapshot_data
 from volume_probe import probe_volume
 
-VERSION = "1.5.4"
+VERSION = "1.6.0"
 
 
 # --- Paths ---
@@ -2354,6 +2354,9 @@ def _case_fan_advice(status):
     if (status.get("recovery_pending") or status.get("restore_errors")
             or (status.get("baseline") and not status.get("restore_confirmed"))):
         return "Case fans: restore unconfirmed; restart Windows. Copy diagnostics for details."
+    if "retry_seconds" in status:
+        reason = status.get("reason", "Waiting for fan feedback")
+        return f"Case fans: firmware control. Retrying in {status['retry_seconds']}s. {reason}"
     if status.get("restore_confirmed"):
         return "Case fans: automatic control stopped; firmware restored. Copy diagnostics; toggle Automatic case fans OFF then ON to retry."
     if _case_fan_never_acquired(status):
@@ -5081,9 +5084,15 @@ class OverlayApp:
             self._fan_recovery = {}
         recovery = self._fan_recovery.setdefault(attribute, {"attempts": 0})
         now = time.monotonic()
-        # Retry verified watchdog rollback or an untouched GPU startup rejected
-        # before native initialization. One retry per enable prevents loops.
+        # Watchdog and GPU startup recovery get one retry per enable. B850
+        # feedback can recover well after logon, so retry it at a slower cadence.
         with self.lock:
+            feedback_retry = (
+                attribute == "fan_worker"
+                and worker.b850 is True
+                and status.get("feedback_retry") is True
+                and status.get("recovery_pending") is False
+            )
             startup_blocked = (
                 attribute == 'gpu_fan_worker'
                 and status.get('startup_access_blocked') is True
@@ -5096,9 +5105,9 @@ class OverlayApp:
                 and not getattr(self, "_hardware_pause_reason", None)
                 and not self._fan_control_paused(attribute)
                 and status.get("state") == "error"
-                and (status.get("stop_cause") == "heartbeat_expired" or startup_blocked)
+                and (feedback_retry or status.get("stop_cause") == "heartbeat_expired" or startup_blocked)
                 and fan_control_released(status)
-                and recovery["attempts"] == 0
+                and (feedback_retry or recovery["attempts"] == 0)
                 and worker.process is not None and worker.process.poll() is not None
             )
             if eligible and startup_blocked:
@@ -5111,20 +5120,28 @@ class OverlayApp:
                 if previous_poll is None or not 0 <= now - previous_poll <= 5:
                     recovery["responsive_since"] = now
                 recovery["last_poll"] = now
-                if now - recovery["responsive_since"] >= 2:
-                    recovery["attempts"] += 1
+                delay = 30 if feedback_retry else 2
+                remaining = delay - (now - recovery["responsive_since"])
+                if remaining <= 0:
+                    counter = "feedback_attempts" if feedback_retry else "attempts"
+                    recovery[counter] = recovery.get(counter, 0) + 1
                     recovery["previous_stop"] = dict(status)
+                    recovery.pop("responsive_since", None)
+                    recovery.pop("last_poll", None)
                     log.warning("Restarting %s after safe controller stop: %s",
                                 attribute, status.get("reason"))
                     worker.start()  # GPU recovery must not accept external settings.
                     status = {"state": "checking", "reason": (
-                        "Retrying GPU startup after access conflict cleared" if startup_blocked
+                        "Retrying B850 case fan feedback" if feedback_retry
+                        else "Retrying GPU startup after access conflict cleared" if startup_blocked
                         else "Restarting after UI heartbeat timeout")}
+                elif feedback_retry:
+                    status = dict(status, retry_seconds=math.ceil(remaining))
             else:
                 recovery.pop("last_poll", None)
                 recovery.pop("responsive_since", None)
         if "previous_stop" in recovery:
-            status = dict(status, recovery_attempts=recovery["attempts"],
+            status = dict(status, recovery_attempts=recovery["attempts"] + recovery.get("feedback_attempts", 0),
                           previous_stop=recovery["previous_stop"])
         if self.config.get(setting, False) and status.get("state") == "stopped":
             # An intentional hardware-access pause is not a worker crash. Keep

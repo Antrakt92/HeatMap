@@ -317,10 +317,13 @@ Before takeover, the B850 controller waits up to 60 seconds for two consecutive
 running SYS1/2/3 samples. Zero, sub-200 RPM and finite readings above 10,000 RPM
 are retried without commands. Persistent out-of-range readings, malformed values
 and wrong identities prevent control. Already-owned channels retain their normal
-stop checks. If startup times out, the overlay warning names the unavailable or
-out-of-range SYS headers. Check physical rotation, connections and BIOS/Smart Fan
-settings before retrying. These readings alone cannot distinguish a stopped fan
-from missing tachometer feedback; HeatMap does not force takeover to test it.
+stop checks. If startup times out or the controller loses running tachometer
+feedback, the overlay shows the reason and retries after 30 seconds under
+firmware control. Each attempt requires two valid samples from all three
+headers and confirmed release from the previous worker. Recovery never retries
+unverified restoration, hardware conflicts or invalid sensor identities.
+If feedback stays unavailable, check physical rotation, connections and
+BIOS/Smart Fan settings. HeatMap does not force takeover to test a missing tach.
 Results and the configuration backup are in `%LOCALAPPDATA%/HeatMap/`.
 Cooling status shows `AUTO …% · SYS 1/2/3`; OFF and normal exit return the three
 headers to their original motherboard modes. CPU, CPU OPT and SYS4 are not written.

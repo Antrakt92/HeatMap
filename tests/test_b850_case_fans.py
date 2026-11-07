@@ -349,6 +349,8 @@ class B850WorkerTests(unittest.TestCase):
                 backend.tachs[2].Value = 260
             elif fault == "persistent_outlier" or (fault == "startup_outlier" and clock.samples == 2):
                 backend.tachs[0].Value = 10074.63
+            elif fault == "lost_running_tach" and clock.now >= 103:
+                backend.tachs[1].Value = 0
             data = sample(cpu_fan_id=f"{b850.CHIP}/fan/0", cpu_optional_fan_id=f"{b850.CHIP}/fan/4",
                           gpu_name="AMD Radeon RX 7900 XT", fans=[dict(name="System Fan #1", rpm=700 + clock.samples)])
             if fault == "identity":
@@ -440,6 +442,13 @@ class B850WorkerTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertTrue(terminal["control_attempted"])
         self.assertTrue(terminal["restore_confirmed"])
+        self.assertNotIn("feedback_retry", terminal)
+
+    def test_lost_running_tach_requests_retry_after_verified_restore(self):
+        result, _publish, terminal, _backend = self.run_worker(fault="lost_running_tach")
+        self.assertEqual(result, 1)
+        self.assertTrue(terminal["restore_confirmed"])
+        self.assertIs(terminal["feedback_retry"], True)
 
     def test_terminal_publication_failure_does_not_report_success_exit(self):
         result, _publish, terminal, _backend = self.run_worker(fault="terminal_publication")
@@ -489,6 +498,7 @@ class B850WorkerTests(unittest.TestCase):
         self.assertTrue(all("SYS1 unavailable; SYS2 0 RPM" in call.kwargs["reason"]
                             for call in publish.call_args_list))
         self.assertFalse(terminal["control_attempted"])
+        self.assertIs(terminal["feedback_retry"], True)
         self.assertEqual(backend.writes, [])
 
     def test_missing_startup_chip_is_rediscovered_before_any_takeover(self):

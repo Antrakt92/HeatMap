@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.6.0 — 2026-11-07
+
+- B850 automatic case cooling retries startup after a 30-second pause if
+  sensor readings have not settled within the first minute. It also retries
+  after losing tachometer feedback during operation, once firmware restoration
+  has been verified. Each attempt still needs two complete, valid samples
+  before taking control.
+- The overlay shows the reason and next retry while the motherboard controls
+  the fans. Unverified restoration, hardware conflicts and invalid identities
+  still stop automatic takeover.
+
 ## 1.5.4 — 2026-11-07
 
 - Retry out-of-range B850 SYS1/2/3 readings above 10,000 RPM during startup.

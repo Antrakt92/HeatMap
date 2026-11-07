@@ -56,6 +56,35 @@ class ControllerRecoveryTests(unittest.TestCase):
                 self.poll(app, 3)
                 worker.start.assert_not_called()
 
+    def test_b850_retries_each_released_feedback_failure_after_cooldown(self):
+        app, worker, status = self.app(stop_cause=None, feedback_retry=True,
+                                       recovery_pending=False, reason="SYS2 unavailable")
+        worker.b850 = True
+        self.assertEqual(self.poll(app, 0)["retry_seconds"], 30)
+        for now in range(2, 30, 2):
+            self.poll(app, now)
+        worker.start.assert_not_called()
+        self.assertEqual(self.poll(app, 30)["state"], "checking")
+        worker.start.assert_called_once_with()
+        worker.poll.return_value = dict(status, time=100)
+        for now in range(32, 64, 2):
+            self.poll(app, now)
+        self.assertEqual(worker.start.call_count, 2)
+
+    def test_b850_feedback_retry_requires_release_and_matching_worker(self):
+        for changes, b850 in (({"recovery_pending": True}, True),
+                              ({"restore_confirmed": False}, True),
+                              ({"status_publication_error": "failed"}, True),
+                              ({}, False)):
+            with self.subTest(changes=changes, b850=b850):
+                app, worker, status = self.app(stop_cause=None, feedback_retry=True,
+                                               recovery_pending=False)
+                status.update(changes)
+                worker.b850 = b850
+                for now in range(0, 36, 2):
+                    self.poll(app, now)
+                worker.start.assert_not_called()
+
     def test_disabled_paused_quitting_or_still_restoring_does_not_restart(self):
         for condition in ('disabled', 'paused', 'quitting', 'live'):
             with self.subTest(condition=condition):

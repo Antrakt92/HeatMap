@@ -146,6 +146,10 @@ class ControllerNotReady(StartupNotReady):
     """The exact board has not exposed its controller during startup yet."""
 
 
+class TachometerLost(RuntimeError):
+    """Running case-fan feedback failed and the session must restore firmware."""
+
+
 def controller(computer, *, startup=False):
     boards = [hw for hw in computer.Hardware if str(hw.HardwareType) == "Motherboard"]
     if not boards:
@@ -399,6 +403,10 @@ class B850Session:
 
 
 def validate_status(status):
+    if "feedback_retry" in status and (
+            status["feedback_retry"] is not True or status.get("state") != "error"
+            or "stop_cause" in status):
+        return "Invalid B850 feedback retry report"
     if status.get("controlled_channels") not in (list(TARGETS), []):
         return "Invalid B850 case channels"
     if status.get("firmware_channels") != []:
@@ -437,6 +445,7 @@ def worker(path, owner_pid, owner_created, full_rpm=None, commission=False):
     baseline = []
     error = None
     stop_cause = None
+    feedback_retry = False
     attempted = False
     verified = None
     journal_path = Path(path).parent / "b850-recovery.json"
@@ -535,7 +544,7 @@ def worker(path, owner_pid, owner_created, full_rpm=None, commission=False):
             readings = [dict(name=name, rpm=finite(float(tach.Value), 0, 10000) if tach.Value is not None else None)
                         for name, tach in zip(TARGETS, backend.tachs)]
             if any(finite(row["rpm"], 200, 10000) is None for row in readings):
-                raise RuntimeError("B850 SYS1/2/3 tachometer lost or stopped")
+                raise TachometerLost("B850 SYS1/2/3 tachometer lost or stopped")
             if commission and now - started < 16:
                 demand, reason = 100, "Explicit full-speed response check"
             elif commission:
@@ -586,6 +595,8 @@ def worker(path, owner_pid, owner_created, full_rpm=None, commission=False):
         error, stop_cause = str(exc), "heartbeat_expired"
     except StartupCancelled:
         pass
+    except (StartupNotReady, TachometerLost) as exc:
+        error, feedback_retry = str(exc), not commission
     except Exception as exc:
         error = str(exc)
     finally:
@@ -605,6 +616,8 @@ def worker(path, owner_pid, owner_created, full_rpm=None, commission=False):
             control_attempted=attempted, restore_errors=restore_errors,
             restore_confirmed=bool(session and not restore_errors),
             recovery_pending=recovery_pending,
-            **({"stop_cause": stop_cause} if stop_cause else {}))
+            **({"stop_cause": stop_cause} if stop_cause else {}),
+            **({"feedback_retry": True} if feedback_retry and not restore_errors and recovery_pending is False
+               else {}))
         error = error or publication_error
     return 1 if error or restore_errors else 0
