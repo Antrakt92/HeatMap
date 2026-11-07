@@ -1,5 +1,23 @@
 # HeatMap Audit Backlog
 
+B850 cold-start tachometer spike (2026-11-07): the 1.5.3 case worker
+reported a terminal tachometer error two seconds after logon. The supplied
+snapshot shows SYS1 at 10074.63 RPM and missing SYS2/SYS3. A separate elevated
+read-only eight-sample probe later measured 331-337, 449-484 and 356-361 RPM
+on SYS1/2/3 respectively. The source of the transient bad reading is unconfirmed.
+
+Retry finite tachometer readings above 10000 RPM during the existing startup
+wait. They reset the consecutive-good count. Persistent spikes time out with
+no fan commands, malformed values and wrong identities remain terminal, and
+running control still stops on lost or invalid tachometer feedback. Both
+whole-worker regressions failed before the fix and pass afterward.
+
+Verified 1230 tests, compileall, runtime integrity, preflight, manifest
+synchronization and dependency consistency. A normal elevated Scheduler restart
+loaded 1.5.4 and reported all three SYS channels active with duty readback and
+positive RPM. Windows logon registration is enabled. A fresh physical reboot
+with 1.5.4 was not exercised.
+
 B850 partial startup feedback (2026-11-06): supplied 1.5.2 diagnostics report
 SYS1 absent, SYS2 at zero and SYS3 near 260 RPM. A separate elevated read-only
 five-sample probe reproduced those readings without fan commands. A normal

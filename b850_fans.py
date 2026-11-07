@@ -183,11 +183,20 @@ def select_tachs(computer, *, startup=False, require_running=True):
                 continue
             raise StartupNotReady(f"Waiting for {name} tachometer")
         value = matches[0].Value
-        if isinstance(value, (bool, str)) or finite(float(value), 0, 10000) is None:
+        if isinstance(value, (bool, str)):
             raise RuntimeError(f"{name}: invalid tachometer reading")
-        if float(value) < 200:
+        rpm = float(value)
+        if not math.isfinite(rpm) or rpm < 0:
+            raise RuntimeError(f"{name}: invalid tachometer reading")
+        if rpm > 10000:
             if startup:
-                waiting.append(f"SYS{index} {float(value):g} RPM" + (" (below 200)" if value else ""))
+                # A finite boot-time spike is not evidence of a running fan.
+                waiting.append(f"SYS{index} {rpm:g} RPM (above 10000)")
+                continue
+            raise RuntimeError(f"{name}: invalid tachometer reading")
+        if rpm < 200:
+            if startup:
+                waiting.append(f"SYS{index} {rpm:g} RPM" + (" (below 200)" if rpm else ""))
                 continue
             raise RuntimeError(f"{name}: running tachometer required")
         selected.append(matches[0])

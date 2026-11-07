@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.4 — 2026-11-07
+
+- Retry out-of-range B850 SYS1/2/3 readings above 10,000 RPM during startup.
+  A transient spike can no longer end automatic case cooling before the
+  readings settle. HeatMap still requires two consecutive valid samples from
+  all three fans before sending any commands. Persistent spikes time out
+  under firmware control and the warning identifies the affected header.
+
 ## 1.5.3 — 2026-11-06
 
 - Show every unavailable, zero-RPM or below-200-RPM B850 case-fan header in

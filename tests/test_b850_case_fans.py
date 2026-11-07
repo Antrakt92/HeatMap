@@ -328,7 +328,8 @@ class B850WorkerTests(unittest.TestCase):
                 clock.now += seconds
                 for tach in backend.tachs:
                     tach.Value = 1250 if backend.values[b850.DUTIES[1]] == 255 else 850
-                stop_at = (170 if fault in ('permanent_zero', 'missing_chip', 'partial_tachs') else
+                stop_at = (170 if fault in ('permanent_zero', 'missing_chip', 'partial_tachs',
+                                            'persistent_outlier') else
                            125 if fault == 'late_chip' else 130 if commission else 108)
                 if clock.now >= stop_at:
                     clock.stopped = True
@@ -346,6 +347,8 @@ class B850WorkerTests(unittest.TestCase):
                 chip.Sensors = backend.tachs[1:]
                 backend.tachs[1].Value = 0
                 backend.tachs[2].Value = 260
+            elif fault == "persistent_outlier" or (fault == "startup_outlier" and clock.samples == 2):
+                backend.tachs[0].Value = 10074.63
             data = sample(cpu_fan_id=f"{b850.CHIP}/fan/0", cpu_optional_fan_id=f"{b850.CHIP}/fan/4",
                           gpu_name="AMD Radeon RX 7900 XT", fans=[dict(name="System Fan #1", rpm=700 + clock.samples)])
             if fault == "identity":
@@ -455,6 +458,27 @@ class B850WorkerTests(unittest.TestCase):
     def test_persistent_startup_zero_times_out_without_commands(self):
         result, _publish, terminal, backend = self.run_worker(fault="permanent_zero")
         self.assertEqual(result, 1)
+        self.assertFalse(terminal["control_attempted"])
+        self.assertEqual(backend.writes, [])
+
+    def test_startup_outlier_requires_two_new_valid_samples_before_takeover(self):
+        result, publish, terminal, backend = self.run_worker(fault="startup_outlier")
+        self.assertEqual(result, 0)
+        first_reports = publish.call_args_list[:4]
+        self.assertIn("second running", first_reports[0].kwargs["reason"])
+        self.assertIn("SYS1", first_reports[1].kwargs["reason"])
+        self.assertIn("above 10000", first_reports[1].kwargs["reason"])
+        self.assertIn("second running", first_reports[2].kwargs["reason"])
+        self.assertTrue(all(report.kwargs["control_attempted"] is False for report in first_reports[:3]))
+        self.assertEqual(first_reports[3].args[1], "active")
+        self.assertTrue(backend.writes)
+        self.assertTrue(terminal["restore_confirmed"])
+
+    def test_persistent_startup_outlier_times_out_without_commands(self):
+        result, _publish, terminal, backend = self.run_worker(fault="persistent_outlier")
+        self.assertEqual(result, 1)
+        self.assertIn("timed out", terminal["reason"])
+        self.assertIn("SYS1", terminal["reason"])
         self.assertFalse(terminal["control_attempted"])
         self.assertEqual(backend.writes, [])
 

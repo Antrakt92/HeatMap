@@ -314,11 +314,11 @@ owned header even when another fails. The explicit minimum-speed check aborts if
 thermal protection requires more airflow; after six seconds at 60%, all three
 tachs must still run and fall at least 5% below their verified full-speed readings.
 Before takeover, the B850 controller waits up to 60 seconds for two consecutive
-running SYS1/2/3 samples. An early zero or sub-200 RPM startup sample is retried
-without commands. Persistent low readings, invalid values and wrong identities
-still prevent control; already-owned channels retain their normal stop checks.
-If startup times out, the overlay warning names every unavailable, zero-RPM or
-below-200-RPM SYS header. Check physical rotation, connections and BIOS/Smart Fan
+running SYS1/2/3 samples. Zero, sub-200 RPM and finite readings above 10,000 RPM
+are retried without commands. Persistent out-of-range readings, malformed values
+and wrong identities prevent control. Already-owned channels retain their normal
+stop checks. If startup times out, the overlay warning names the unavailable or
+out-of-range SYS headers. Check physical rotation, connections and BIOS/Smart Fan
 settings before retrying. These readings alone cannot distinguish a stopped fan
 from missing tachometer feedback; HeatMap does not force takeover to test it.
 Results and the configuration backup are in `%LOCALAPPDATA%/HeatMap/`.
