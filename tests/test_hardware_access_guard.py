@@ -47,6 +47,16 @@ class HardwareAccessGuardTests(unittest.TestCase):
                 with self.assertRaisesRegex(guard.HardwareAccessConflict, installer):
                     guard.require_hardware_access('monitor')
 
+    def test_controllers_classify_installer_only_without_masking_ownership_conflict(self):
+        for scope in ('control', 'gpu_control', 'independent_case_control'):
+            for names, kind in ((['atisetup.exe'], 'driver_change'),
+                                (['atisetup.exe', 'fancontrol.exe'], None)):
+                with self.subTest(scope=scope, conflicts=names), mock.patch.object(
+                        guard, 'hardware_conflicts', return_value=names):
+                    with self.assertRaises(guard.HardwareAccessConflict) as conflict:
+                        guard.require_hardware_access(scope)
+                    self.assertEqual(conflict.exception.kind, kind)
+
     def test_gnu_compiler_layout_does_not_block_hardware(self):
         for layout in ('mingw', 'w64devkit'):
             with self.subTest(layout=layout), tempfile.TemporaryDirectory() as folder:

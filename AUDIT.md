@@ -1,5 +1,19 @@
 # HeatMap Audit Backlog
 
+Controller-first driver pause (2026-11-20): after the 1.6.1 launch,
+both controllers detected AtiSetup and exited before the overlay's sensor
+thread saw the installer. B850 verified restoration after takeover. GPU
+standby confirmed it had not issued commands and no recovery was pending.
+The original fix covered the opposite ordering, a sensor-requested stop.
+
+Report recoverable driver/inventory blocks in the terminal stop cause.
+Allow a fresh worker once the old process has exited, handback is verified,
+native samples are fresh and the controller's own access scope stays clear
+across 15 seconds of responsive polls. Mixed installer and competing-monitor
+conflicts stay classified as ownership conflicts for that control scope.
+Regression coverage exercises the worker-first order, both terminal report
+paths, a reappearing blocker, stale sensors and unverified handback.
+
 Cooling after AMD installer pause (2026-11-20): the log records an AtiSetup
 pause at 03:25:31 and native sensor recovery at 03:25:56. Both workers
 confirmed restoration, but the overlay treated their planned stops as errors

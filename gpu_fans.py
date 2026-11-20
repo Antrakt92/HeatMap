@@ -17,7 +17,8 @@ from case_fans import (FanWorkerClient, TerminalStatusWriteError, WorkerMutex,
 import fan_common
 from fan_common import (OwnerHeartbeat, OwnerHeartbeatExpired, GPU_TERMINAL_KEYS,
                         read_status_report, check_status, write_alive, StatusPolicy)
-from hardware_access_guard import HardwareAccessConflict, require_hardware_access as _require_hardware_access
+from hardware_access_guard import HardwareAccessConflict, RECOVERABLE_ACCESS_KINDS
+from hardware_access_guard import require_hardware_access as _require_hardware_access
 from thermal_policy import (finite, interpolate, SENSOR_STALE_DEGRADE_SECONDS, SENSOR_STALE_FAIL_SECONDS,
                             TACH_PERSISTENCE_SECONDS)
 from startup_readiness import StartupCancelled, StartupNotReady, wait_for_readiness
@@ -754,9 +755,10 @@ def worker(path, owner_pid, owner_created, *, commission=False, accept_external=
         startup_cancelled = not (control_attempted or bool(session and session.touched))
     except HardwareAccessConflict as exc:
         error = str(exc)
-        # Only a rejected guard before ADLX construction permits a fresh start.
-        # A conflict after opening native resources still requires manual review.
-        startup_access_blocked = not native_open_attempted
+        if exc.kind in RECOVERABLE_ACCESS_KINDS:
+            stop_cause = 'hardware_access_paused'
+        else:
+            startup_access_blocked = not native_open_attempted
     except Exception as exc:
         error = str(exc)
     finally:

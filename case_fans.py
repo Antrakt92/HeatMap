@@ -21,7 +21,7 @@ from thermal_policy import (CaseAirflowPolicy, FanRamp, _curve_demand, case_fan_
 from fan_common import (OwnerHeartbeat, OwnerHeartbeatExpired, check_guarded, check_owner,
                       read_status_report, check_status, write_alive, restore_with_retry,
                       StatusPolicy, CASE_TERMINAL_KEYS)
-from hardware_access_guard import require_hardware_access
+from hardware_access_guard import HardwareAccessConflict, RECOVERABLE_ACCESS_KINDS, require_hardware_access
 from shared_fans import (SHARED_NAMES, SHARED_JOURNAL_NAME, SharedRecoveryJournal,
                          open_shared_session, make_shared_computer, recover_shared_journal,
                          select_shared_sensors)
@@ -789,6 +789,10 @@ def worker(status_path, owner_pid, owner_created, full_rpm=None, shared=False, c
         error, stop_cause = str(exc), "heartbeat_expired"
     except StartupCancelled:
         pass  # Ordinary owner shutdown is not a controller failure.
+    except HardwareAccessConflict as exc:
+        error = str(exc)
+        if exc.kind in RECOVERABLE_ACCESS_KINDS:
+            stop_cause = "hardware_access_paused"
     except Exception as exc:
         error = str(exc)
     finally:

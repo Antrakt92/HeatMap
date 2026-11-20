@@ -67,6 +67,23 @@ class GpuStartupAccessRecoveryTests(unittest.TestCase):
         self.assertNotIn('startup_access_blocked', reports[-1])
         self.assertEqual(adapter.writes, [])
 
+    def test_driver_pause_after_native_open_reports_clean_standby_handoff(self):
+        harness = test_gpu_fan_startup_audit.GpuStartupAuditTests()
+        def guard():
+            if adapter_opened.called:
+                raise HardwareAccessConflict('AtiSetup', kind='driver_change')
+
+        adapter_opened = mock.Mock()
+        def sample(*_):
+            adapter_opened()
+            return test_gpu_fan_startup_audit.sample()
+
+        result, adapter, _, reports, _ = harness.run_worker(sample, access_guard=guard)
+        self.assertEqual(result, 1)
+        self.assertEqual(reports[-1]['stop_cause'], 'hardware_access_paused')
+        self.assertTrue(gpu_fans.fan_common.fan_control_released(reports[-1]))
+        self.assertEqual(adapter.writes, [])
+
     def test_constructor_failure_is_not_untouched_startup(self):
         owner = mock.Mock()
         owner.create_time.return_value = 1

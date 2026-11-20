@@ -370,6 +370,9 @@ class B850WorkerTests(unittest.TestCase):
         real_session = b850.B850Session
         owner = NS(create_time=lambda: 1, is_running=lambda: True)
         heartbeat = NS(listen=mock.Mock(), expired=lambda: False)
+        def guard(_scope):
+            if fault == "driver_pause" and backend.writes:
+                raise access.HardwareAccessConflict("AtiSetup", kind="driver_change")
         with (mock.patch.dict(sys.modules, clr=NS(AddReference=mock.Mock())),
               mock.patch.object(overlay, "_is_admin", return_value=True),
               mock.patch.object(overlay, "_runtime_dll_errors", return_value=[]),
@@ -380,7 +383,7 @@ class B850WorkerTests(unittest.TestCase):
                                 (b850.select_tachs(comp, **kw), backend)[1]),
               mock.patch.object(b850, "B850Session", side_effect=lambda a, b: real_session(a, b, Bus)),
               mock.patch.object(b850, "IsaBus", Bus),
-              mock.patch.object(b850, "require_hardware_access"),
+              mock.patch.object(b850, "require_hardware_access", side_effect=guard),
               mock.patch.object(b850.psutil, "Process", return_value=owner),
               mock.patch.object(b850.threading, "Event", Event),
               mock.patch.object(b850.threading, "Thread"),
@@ -404,6 +407,16 @@ class B850WorkerTests(unittest.TestCase):
         self.assertEqual(commands[0], 68)
         self.assertIn(100, commands)
         self.assertTrue(terminal["restore_confirmed"])
+        self.assertEqual(terminal["restore_errors"], [])
+        self.assertTrue(all(backend.values[r] == 0xC0 for r in b850.MODES))
+
+    def test_running_worker_reports_driver_pause_after_restoring_registers(self):
+        result, _publish, terminal, backend = self.run_worker(fault="driver_pause")
+        self.assertEqual(result, 1)
+        self.assertEqual(terminal["stop_cause"], "hardware_access_paused")
+        self.assertTrue(terminal["control_attempted"])
+        self.assertTrue(terminal["restore_confirmed"])
+        self.assertFalse(terminal["recovery_pending"])
         self.assertEqual(terminal["restore_errors"], [])
         self.assertTrue(all(backend.values[r] == 0xC0 for r in b850.MODES))
 

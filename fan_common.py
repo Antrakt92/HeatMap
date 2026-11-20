@@ -250,7 +250,7 @@ def check_status(policy, status, *, exited, worker_pid, process_pid, started, no
         return policy.shape_error, worker_pid
     if "reason" in status and not isinstance(status["reason"], str):
         return policy.reason_error, worker_pid
-    if ("stop_cause" in status and (status["stop_cause"] != "heartbeat_expired"
+    if ("stop_cause" in status and (status["stop_cause"] not in ("heartbeat_expired", "hardware_access_paused")
                                     or state != "error")):
         return policy.stop_cause_error, worker_pid
     if (any(key in status and type(status[key]) is not bool for key in policy.restoration_keys)

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.6.2 — 2026-11-20
+
+- Restore automatic GPU and case cooling when a fan controller detects a
+  temporary driver operation before the overlay's sensor monitor does. After
+  verified handback, HeatMap waits for fresh native sensor readings and 15
+  seconds of verified access in the controller's scope before starting it again.
+- A competing fan control tool or unverified restoration still blocks automatic
+  takeover. Diagnostics retain the cause of the controller's stop.
+
 ## 1.6.1 — 2026-11-20
 
 - Automatic GPU and case cooling resume after a temporary hardware-access

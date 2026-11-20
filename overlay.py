@@ -41,12 +41,12 @@ from thermal_policy import (ThermalAdvisor, gpu_delta, delta_severity, finite,
 from case_fans import FanWorkerClient, full_rpm_reference
 from fan_common import fan_control_released
 from gpu_fans import GpuWorkerClient, mode_text as gpu_fan_mode_text
-from hardware_access_guard import HardwareAccessConflict, require_hardware_access
+from hardware_access_guard import HardwareAccessConflict, RECOVERABLE_ACCESS_KINDS, require_hardware_access
 from storage_identity import volume_disk_number, physical_disk_numbers
 from storage_probe import probe_disk, snapshot_data as storage_snapshot_data
 from volume_probe import probe_volume
 
-VERSION = "1.6.1"
+VERSION = "1.6.2"
 
 
 # --- Paths ---
@@ -4675,7 +4675,7 @@ class OverlayApp:
                 "started_at": time.time(), "kind": kind, "reason": str(conflict),
             }
             self._fan_resume_sample_time = None
-            if kind in ("driver_change", "inventory_unverified"):
+            if kind in RECOVERABLE_ACCESS_KINDS:
                 if not hasattr(self, "_fan_pause_stops"):
                     self._fan_pause_stops = {}
                 for attribute in ("fan_worker", "gpu_fan_worker"):
@@ -4699,7 +4699,7 @@ class OverlayApp:
                 clear_since = None
                 with self.lock:
                     self._hardware_pause_reason = "Sensors paused: " + str(exc)
-                if getattr(exc, "kind", None) not in ("driver_change", "inventory_unverified"):
+                if exc.kind not in RECOVERABLE_ACCESS_KINDS:
                     return False
             else:
                 now = time.monotonic()
@@ -4843,10 +4843,9 @@ class OverlayApp:
                             with self.lock:
                                 self.sensor_data = data
                                 self._sensor_sample_time = time.monotonic()
-                                if getattr(self, "_fan_pause_stops", None):
-                                    self._fan_resume_sample_time = (
-                                        self._sensor_sample_time if computer is not None
-                                        and "error" not in data and not data.get(SENSOR_REINIT_KEY) else None)
+                                self._fan_resume_sample_time = (
+                                    self._sensor_sample_time if computer is not None
+                                    and "error" not in data and not data.get(SENSOR_REINIT_KEY) else None)
                             try:
                                 self._cache_sensor_diagnostics(computer, data)
                             except Exception as exc:
@@ -4870,7 +4869,7 @@ class OverlayApp:
                             needs_reinit = consecutive_errors >= 3
                         self._stop_event.wait(2)
                 except HardwareAccessConflict as exc:
-                    if getattr(exc, "kind", None) not in ("driver_change", "inventory_unverified"):
+                    if exc.kind not in RECOVERABLE_ACCESS_KINDS:
                         raise
                     # One owner closes and reopens its own native handle. Never
                     # spawn a replacement reader while an old call is in flight.
@@ -5112,8 +5111,14 @@ class OverlayApp:
             paused_process = pause_stops.get(attribute)
             pause_retry = (paused_process is not None and paused_process is worker.process
                            and status.get("state") == "stopped" and fan_control_released(status))
+            # A worker can detect a short installer run before the sensor thread
+            # notices it, so this path verifies its own uninterrupted clear interval.
+            worker_first = (status.get("state") == "error"
+                            and status.get("stop_cause") == "hardware_access_paused"
+                            and worker.process is not recovery.get("resumed_process"))
             sample_time = getattr(self, "_fan_resume_sample_time", None)
-            pause_ready = pause_retry and sample_time is not None and 0 <= now - sample_time <= SENSOR_STALE_SECONDS
+            pause_ready = ((pause_retry or worker_first) and sample_time is not None
+                           and 0 <= now - sample_time <= SENSOR_STALE_SECONDS)
             feedback_retry = (
                 attribute == "fan_worker"
                 and worker.b850 is True
@@ -5137,25 +5142,32 @@ class OverlayApp:
                 and (pause_ready or feedback_retry or recovery["attempts"] == 0)
                 and worker.process is not None and worker.process.poll() is not None
             )
-            if eligible and startup_blocked:
+            if eligible and (startup_blocked or worker_first):
                 try:
-                    require_hardware_access('gpu_control')
+                    scope = ("gpu_control" if attribute == "gpu_fan_worker" else
+                             "independent_case_control" if worker.b850 is True else "control")
+                    require_hardware_access(scope)
                 except HardwareAccessConflict:
                     eligible = False
             if eligible:
                 previous_poll = recovery.get("last_poll")
-                if previous_poll is None or not 0 <= now - previous_poll <= 5:
+                if (worker.process is not recovery.get("checked_process")
+                        or previous_poll is None or not 0 <= now - previous_poll <= 5):
                     recovery["responsive_since"] = now
+                recovery["checked_process"] = worker.process
                 recovery["last_poll"] = now
-                delay = 30 if feedback_retry else 2
+                delay = HARDWARE_ACCESS_CLEAR_SECONDS if worker_first else 30 if feedback_retry else 2
                 remaining = delay - (now - recovery["responsive_since"])
                 if remaining <= 0:
                     counter = ("pause_attempts" if pause_ready else
                                "feedback_attempts" if feedback_retry else "attempts")
                     recovery[counter] = recovery.get(counter, 0) + 1
                     recovery["previous_stop"] = dict(status)
+                    if worker_first:
+                        recovery["resumed_process"] = worker.process
                     recovery.pop("responsive_since", None)
                     recovery.pop("last_poll", None)
+                    recovery.pop("checked_process", None)
                     pause_stops.pop(attribute, None)
                     restart_reason = (
                         "Resuming fan control after hardware-access pause" if pause_ready
@@ -5166,11 +5178,15 @@ class OverlayApp:
                                 attribute, status.get("reason"))
                     worker.start()  # GPU recovery must not accept external settings.
                     status = {"state": "checking", "reason": restart_reason}
+                elif worker_first:
+                    status = dict(status, state="checking",
+                                  display_reason="Waiting for hardware access to stay clear")
                 elif feedback_retry:
                     status = dict(status, retry_seconds=math.ceil(remaining))
             else:
                 recovery.pop("last_poll", None)
                 recovery.pop("responsive_since", None)
+                recovery.pop("checked_process", None)
         if "previous_stop" in recovery:
             status = dict(status, recovery_attempts=(recovery["attempts"] + recovery.get("feedback_attempts", 0)
                                                      + recovery.get("pause_attempts", 0)),

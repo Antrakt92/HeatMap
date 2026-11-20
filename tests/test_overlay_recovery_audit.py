@@ -156,6 +156,39 @@ class OverlayRecoveryAuditTests(unittest.TestCase):
                     else:
                         worker.start.assert_not_called()
 
+    def test_sensor_loop_recovers_when_both_controllers_exit_before_it_detects_installer(self):
+        app = sensor_app(26)
+        app.config = {'case_fans_enabled': True, 'gpu_fans_enabled': True}
+        controllers = (('fan_worker', 'case_fans_enabled'), ('gpu_fan_worker', 'gpu_fans_enabled'))
+        for attribute, _ in controllers:
+            worker = mock.Mock()
+            worker.process.poll.return_value = 1
+            worker.poll.return_value = dict(
+                state='error', stop_cause='hardware_access_paused', reason='AtiSetup',
+                restore_confirmed=(attribute == 'fan_worker'), restore_errors=[],
+                recovery_pending=False, control_attempted=(attribute == 'fan_worker'))
+            setattr(app, attribute, worker)
+        started_at = []
+        wait = app._stop_event.wait
+
+        def poll_then_wait(seconds):
+            for attribute, setting in controllers:
+                app._poll_fan_controller(attribute, setting)
+            return wait(seconds)
+
+        def access(scope):
+            if not started_at and scope == 'monitor':
+                started_at.append(app._stop_event.now)
+                raise HardwareAccessConflict('AtiSetup', kind='driver_change')
+            return 'full'
+
+        app._stop_event.wait = poll_then_wait
+        self.run_sensor(app, access, lambda: mock.Mock())
+        for attribute, _ in controllers:
+            getattr(app, attribute).start.assert_called_once_with()
+        self.assertIsNotNone(app._last_hardware_pause['resumed_at'])
+        self.assertGreaterEqual(app._stop_event.now - started_at[0], 30)
+
     def test_reappearing_conflict_resets_clear_hysteresis(self):
         app = sensor_app(20)
         checks = []

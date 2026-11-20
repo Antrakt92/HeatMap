@@ -13,6 +13,7 @@ CONFLICTING_PROCESS_NAMES = frozenset({
 })
 _UNREADABLE = object()
 DRIVER_INSTALLER_PROCESS_NAMES = frozenset({'atisetup.exe', 'pnputil.exe'})
+RECOVERABLE_ACCESS_KINDS = frozenset({'driver_change', 'inventory_unverified'})
 _PNPUTIL_DEVICE_OPERATIONS = frozenset({
     "/disable-device", "/enable-device", "/restart-device", "/remove-device", "/scan-devices",
 })
@@ -157,15 +158,15 @@ def require_hardware_access(scope="control"):
         # GCC's updater/tray alone does not establish fan ownership. These scopes
         # verify ADLX curves or exact B850 registers; shared EC stays exclusive.
         conflicts = [name for name in conflicts if name != "gcc.exe"]
-    if scope == "monitor" and conflicts:
-        installers = sorted(set(conflicts) & DRIVER_INSTALLER_PROCESS_NAMES)
-        if not installers:
-            return "shared"
+    installers = sorted(set(conflicts) & DRIVER_INSTALLER_PROCESS_NAMES)
+    if installers and (scope == "monitor" or len(installers) == len(conflicts)):
         raise HardwareAccessConflict(
             "Driver installation detected: " + ", ".join(installers) + ". "
             "Sensor access will be checked again after driver activity finishes.",
             kind='driver_change',
         )
+    if scope == "monitor" and conflicts:
+        return "shared"
     if conflicts:
         raise HardwareAccessConflict(
             "Hardware monitoring or driver tools are running: " + ", ".join(conflicts) + ". "

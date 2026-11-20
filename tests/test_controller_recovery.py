@@ -42,6 +42,55 @@ class ControllerRecoveryTests(unittest.TestCase):
                 self.poll(app, 20, attribute, setting)
                 worker.start.assert_called_once()
 
+    def test_worker_first_driver_pause_recovers_after_stable_scope_access(self):
+        for attribute, setting, scope, release in (
+                ('fan_worker', 'case_fans_enabled', 'independent_case_control', {}),
+                ('gpu_fan_worker', 'gpu_fans_enabled', 'gpu_control',
+                 dict(control_attempted=False, restore_confirmed=False, recovery_pending=False))):
+            with self.subTest(attribute=attribute):
+                app, worker, status = self.app(stop_cause='hardware_access_paused',
+                                               reason='Driver installation detected', **release)
+                worker.b850 = True
+                with mock.patch.object(overlay, 'require_hardware_access', return_value='full') as guard:
+                    for now in range(0, 15, 2):
+                        app._fan_resume_sample_time = now
+                        self.poll(app, now, attribute, setting)
+                    worker.start.assert_not_called()
+                    app._fan_resume_sample_time = 16
+                    result = self.poll(app, 16, attribute, setting)
+                    self.assertEqual(result['state'], 'checking')
+                    self.assertEqual(result['previous_stop'], status)
+                    self.poll(app, 18, attribute, setting)
+                worker.start.assert_called_once_with()
+                self.assertTrue(guard.call_args_list)
+                self.assertTrue(all(call == mock.call(scope) for call in guard.call_args_list))
+
+    def test_worker_first_driver_pause_restarts_clear_interval_after_another_block(self):
+        app, worker, _ = self.app(stop_cause='hardware_access_paused')
+        with mock.patch.object(overlay, 'require_hardware_access', return_value='full') as guard:
+            for now in range(0, 31, 2):
+                app._fan_resume_sample_time = now
+                guard.side_effect = overlay.HardwareAccessConflict('still installing') if now == 14 else None
+                self.poll(app, now)
+            worker.start.assert_not_called()
+            app._fan_resume_sample_time = 32
+            self.poll(app, 32)
+        worker.start.assert_called_once_with()
+
+    def test_worker_first_driver_pause_requires_release_and_fresh_sensors(self):
+        for changes, refresh in (({'restore_confirmed': False}, True),
+                                 ({'restore_confirmed': True, 'recovery_pending': True}, True),
+                                 ({'settings_conflict': {'external': True}}, True),
+                                 ({'status_publication_error': 'failed'}, True), ({}, False)):
+            with self.subTest(changes=changes, refresh=refresh):
+                app, worker, _ = self.app(stop_cause='hardware_access_paused', **changes)
+                with mock.patch.object(overlay, 'require_hardware_access', return_value='full') as guard:
+                    for now in range(0, 21, 2):
+                        app._fan_resume_sample_time = now if refresh else -20
+                        self.poll(app, now)
+                guard.assert_not_called()
+                worker.start.assert_not_called()
+
     def test_unsafe_or_unexplained_stops_are_not_retried(self):
         for changes in (
             {'stop_cause': None}, {'stop_cause': 'requested_stop'},

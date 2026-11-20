@@ -15,7 +15,7 @@ import psutil
 import fan_common
 from gpu_fans import (ASSIST_ON, demand as gpu_demand,
                       emergency_cooling as gpu_emergency_cooling, recovery_journal_exists)
-from hardware_access_guard import require_hardware_access
+from hardware_access_guard import HardwareAccessConflict, RECOVERABLE_ACCESS_KINDS, require_hardware_access
 from pawnio_shared import IsaBus
 from startup_readiness import StartupNotReady, StartupCancelled, wait_for_readiness
 from thermal_policy import FanRamp, finite, interpolate, TACH_PERSISTENCE_SECONDS
@@ -595,6 +595,10 @@ def worker(path, owner_pid, owner_created, full_rpm=None, commission=False):
         error, stop_cause = str(exc), "heartbeat_expired"
     except StartupCancelled:
         pass
+    except HardwareAccessConflict as exc:
+        error = str(exc)
+        if exc.kind in RECOVERABLE_ACCESS_KINDS:
+            stop_cause = "hardware_access_paused"
     except (StartupNotReady, TachometerLost) as exc:
         error, feedback_retry = str(exc), not commission
     except Exception as exc:
