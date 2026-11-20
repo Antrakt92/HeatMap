@@ -121,6 +121,41 @@ class OverlayRecoveryAuditTests(unittest.TestCase):
         app.fan_worker.start.assert_not_called()
         app.gpu_fan_worker.start.assert_not_called()
 
+    def test_driver_pause_resumes_only_the_fan_processes_it_stopped(self):
+        for stop_report, was_running, expected_restart in (
+                ({'state': 'stopped'}, True, True),
+                ({'state': 'stopped'}, False, False),
+                ({'state': 'error'}, True, False)):
+            with self.subTest(stop_report=stop_report, was_running=was_running):
+                app = sensor_app(12)
+                app.config = {'case_fans_enabled': True, 'gpu_fans_enabled': True}
+                for attribute in ('fan_worker', 'gpu_fan_worker'):
+                    process = mock.Mock()
+                    process.stdin.closed = False
+                    process.poll.return_value = None if was_running else 0
+                    worker = mock.Mock(process=process)
+                    worker.stop.side_effect = lambda proc=process: setattr(proc.poll, 'return_value', 0)
+                    worker.poll.return_value = dict(stop_report, restore_confirmed=True,
+                                                   restore_errors=[], recovery_pending=False)
+                    setattr(app, attribute, worker)
+                access = mock.Mock(side_effect=[HardwareAccessConflict('installer', kind='driver_change')]
+                                   + ['full'] * 30)
+                self.run_sensor(app, access, lambda: mock.Mock())
+                app.running = True
+                app._stop_event.remaining = 1
+                for attribute, setting in (('fan_worker', 'case_fans_enabled'),
+                                           ('gpu_fan_worker', 'gpu_fans_enabled')):
+                    worker = getattr(app, attribute)
+                    worker.start.assert_not_called()
+                    for offset in (0, 2, 4):
+                        now = app._sensor_sample_time + offset
+                        with mock.patch.object(overlay.time, 'monotonic', return_value=now):
+                            app._poll_fan_controller(attribute, setting)
+                    if expected_restart:
+                        worker.start.assert_called_once_with()
+                    else:
+                        worker.start.assert_not_called()
+
     def test_reappearing_conflict_resets_clear_hysteresis(self):
         app = sensor_app(20)
         checks = []

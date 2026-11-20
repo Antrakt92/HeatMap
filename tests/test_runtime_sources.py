@@ -112,9 +112,10 @@ class RuntimeSourceTests(unittest.TestCase):
             SensorType=SimpleNamespace(Temperature=temperature_type),
         )
 
-        ok, messages = setup.run_hardware_smoke(
-            import_module=lambda name: {"clr": clr, "LibreHardwareMonitor.Hardware": hardware}[name]
-        )
+        with mock.patch.object(hardware_access_guard, "require_hardware_access", return_value="full"):
+            ok, messages = setup.run_hardware_smoke(
+                import_module=lambda name: {"clr": clr, "LibreHardwareMonitor.Hardware": hardware}[name]
+            )
 
         self.assertFalse(ok)
         self.assertIn("PawnIO", "\n".join(messages))

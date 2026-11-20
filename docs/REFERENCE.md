@@ -438,8 +438,11 @@ stops fan assistance normally. Monitoring checks access every two seconds and
 reopens its native reader after 15 seconds of uninterrupted verified access,
 successful closure of the old reader, and confirmed fan handback. Another driver
 operation resets this wait. Windows RAM and volume capacity remain available.
-Storage-temperature polling also resumes after the pause. Fan assistance remains
-stopped; re-enable its saved toggle OFF then ON after checking Cooling diagnostics.
+Storage-temperature polling also resumes after the pause. For each enabled fan
+controller that HeatMap stopped for the pause, a confirmed clean exit and a fresh
+native sensor sample allow one automatic restart attempt. The window must poll
+responsively for two seconds. The new controller checks hardware access and
+ownership again before taking over.
 An unknown conflict, failed native closure, or unconfirmed fan handback still
 requires intervention. This cannot guarantee recovery from a driver removed
 during an in-flight native call.
@@ -576,8 +579,8 @@ A GPU access conflict detected before opening the native AMD interface also
 permits one automatic retry. The previous worker must have exited without opening
 the interface or sending commands, with no pending recovery or restoration errors.
 GPU control access must remain available for two seconds of responsive polling.
-Conflicts after native initialization and live driver-installation sensor pauses
-still require review and a restart; external GPU settings are never auto-accepted.
+Worker-reported conflicts after native initialization require manual review.
+Automatic recovery preserves the GPU settings conflict check.
 
 Autostart from a user-writable checkout retains the normal UAC prompt at Windows
 login. After HeatMap starts, the profile regulates itself. Fully silent privileged

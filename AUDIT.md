@@ -1,5 +1,20 @@
 # HeatMap Audit Backlog
 
+Cooling after AMD installer pause (2026-11-20): the log records an AtiSetup
+pause at 03:25:31 and native sensor recovery at 03:25:56. Both workers
+confirmed restoration, but the overlay treated their planned stops as errors
+after the pause cleared. Track the live processes stopped for a recoverable
+pause and, once sensors provide a fresh native sample, allow one restart per
+clean stop after two seconds of responsive polling. An exited worker from
+before the pause, a worker-reported failure, uncertain restoration, a disabled
+toggle or an ownership conflict cannot use this recovery path. The workers
+still check access, readiness and ownership before issuing commands.
+
+The regression reproduced the old stopped-controller behavior with fake owners.
+A normal elevated Scheduler restart confirmed live duty readback and positive
+RPM on SYS1/2/3 and fresh GPU standby telemetry. No driver operation was
+triggered to exercise the automatic recovery on the live hardware.
+
 B850 automatic feedback recovery (2026-11-07): a fresh Windows logon
 on 1.5.4 recovered the previous firmware settings, then timed out after 60
 seconds because SYS2 feedback remained absent. An elevated read-only probe

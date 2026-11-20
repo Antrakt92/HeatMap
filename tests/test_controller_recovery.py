@@ -167,5 +167,33 @@ class ControllerRecoveryTests(unittest.TestCase):
         worker.start.assert_not_called()
 
 
+    def test_driver_pause_retry_requires_current_process_and_fresh_native_sample(self):
+        for blocker in ('paused', 'stale', 'no sample', 'different process',
+                        'disabled', 'coexistence', 'live', 'unverified'):
+            with self.subTest(blocker=blocker):
+                app, worker, status = self.app(state='stopped', stop_cause=None)
+                app._fan_pause_stops = {'fan_worker': worker.process}
+                app._fan_resume_sample_time = 2
+                if blocker == 'paused':
+                    app._hardware_pause_reason = 'Installer detected'
+                elif blocker == 'stale':
+                    app._fan_resume_sample_time = -20
+                elif blocker == 'no sample':
+                    app._fan_resume_sample_time = None
+                elif blocker == 'different process':
+                    worker.process = mock.Mock()
+                elif blocker == 'disabled':
+                    app.config['case_fans_enabled'] = False
+                elif blocker == 'coexistence':
+                    app._monitor_coexistence = True
+                elif blocker == 'live':
+                    worker.process.poll.return_value = None
+                else:
+                    status['restore_confirmed'] = False
+                self.poll(app, 2)
+                self.poll(app, 4)
+                worker.start.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()
