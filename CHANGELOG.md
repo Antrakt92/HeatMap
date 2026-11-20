@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.6.1 — 2026-11-20
+
+- Automatic GPU and case cooling resume after a temporary hardware-access
+  pause, such as AMD driver installer activity. HeatMap retries each enabled
+  controller it stopped for the pause once it confirms the controller exited
+  cleanly, firmware or driver control was restored, and native sensors are
+  reporting again.
+- Cooling diagnostics keep the original stop reason. The restarted controllers
+  check hardware access and ownership again before taking over. GPU settings
+  conflicts still require manual review.
+
 ## 1.6.0 — 2026-11-07
 
 - B850 automatic case cooling retries startup after a 30-second pause if
